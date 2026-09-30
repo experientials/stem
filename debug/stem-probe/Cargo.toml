@@ -1,0 +1,28 @@
+[package]
+name = "stem-probe"
+version = "0.1.0"
+edition = "2021"
+description = "RP2040 bench/dev host — the stem bus-inspector / i.MX8 M7 stand-in (v0). Special DEBUG firmware (STEM-DIRECTION); embassy HAL. See docs/RP2040-BENCH-HOST.md."
+
+[dependencies]
+# embassy (crates.io) — versions match examples/rp on embassy main (2026-09-30); defmt dropped for a lean v0.
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread"] }
+embassy-rp = { version = "0.10", features = [
+    "unstable-pac",
+    "time-driver",
+    "critical-section-impl",
+    "rp2040",
+] }
+embassy-usb = { version = "0.6" }
+embassy-time = { version = "0.5" }
+embassy-futures = { version = "0.1" }
+cortex-m = { version = "0.7.6", features = ["inline-asm"] }
+cortex-m-rt = "0.7"
+# Cortex-M0 (thumbv6m) has no atomic CAS — route atomics through critical-section so embassy-sync /
+# executor / others compile. embassy-rp's `critical-section-impl` supplies the actual CS implementation.
+portable-atomic = { version = "1", features = ["critical-section"] }
+
+[profile.release]
+debug = true      # keep symbols; picotool loads the ELF directly
+opt-level = "s"
+# LTO off: cross-crate LTO trips "failed to load bitcode" here, and a dev host has 2 MB flash to spare.

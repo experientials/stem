@@ -222,6 +222,68 @@ capture busses at speed (logic-analyser), implement extra/unusual bus protocols 
 I²C + 2 SPI, and do precise-timing stimulus — far beyond a fixed-peripheral MCU. Dual-core + 264 KB
 SRAM give room for capture buffers + a USB command loop concurrently.
 
+### 2.6 Pin allocation — per-board profiles & the Arducam Pico4ML constraint
+
+The §2.1 layout assumes a **plain Pico** (free pins). The **Arducam Pico4ML** (the Inner-vision dev
+base, STEM-DIRECTION point 3) is NOT free — its camera + LCD + mic hardwire most low GPIOs, and
+crucially **`I2C0` (GP4/GP5) is the camera SCCB bus** — a direct clash with §2.1's Stem-I²C. So there
+is no single fixed pin map; `rp-bsp` carries a **pin profile per (chip, module)**, and the semantic bus
+roles (`stem_i2c`/`leaf_i2c`/…) bind to different GPIOs per board. Source: ArduCAM RPI-Pico-Cam +
+Arducam Pico4ML docs (2026-09-30); **confirm the exact camera data-bus width/pins against the Arducam
+schematic / RPI-Pico-Cam driver** before finalising (the HM01B0 data lines beyond GP6 overlap the LCD,
+so the width is reduced/PIO-multiplexed — not yet pinned here).
+
+**Arducam Pico4ML fixed usage (do not reassign):**
+
+| Function | Pins | Notes |
+|---|---|---|
+| Camera **SCCB (I2C0)** | GP4 SDA / GP5 SCL | the camera control bus — **this is why I2C0 is not free** |
+| Camera control | GP2 reset · GP3 XCLK · GP16 VSYNC · GP6 data-base (+ TBD data/PCLK/HSYNC) | parallel capture via PIO |
+| **LCD** ST7735 (SPI1) | GP7 RST · GP9 DC · GP13 CS · GP10 CLK · GP11 MOSI | |
+| **PDM mic** | 2 pins (TBD) | confirm from schematic |
+| likely free | GP0, GP1, GP14, GP15, GP17–22, GP26–28(ADC), GP8/GP12(if not cam-data) | the bus budget on this board |
+
+**Two board profiles in `rp-bsp`:**
+
+- **`pico-bench` (plain Pico, the v0 host):** the §2.1 layout — Stem=I2C0 GP4/5, Leaf=I2C1 GP6/7, SPI0,
+  UART0, etc. Full bus-mastering; no camera.
+- **`arducam-vision` (Pico4ML, Inner-vision dev base):** the camera/LCD/mic own their pins; the
+  bus roles remap onto free pins. Clean reconciliation using the semantic model:
+  - **Leaf-I²C = I2C0 (GP4/5)** — the camera *is* a leaf node (a sensor), so it sits on the Leaf bus with
+    any other leaf sensors. No change to the camera wiring.
+  - **Stem-I²C = I2C1 on free pins** (e.g. GP14 SDA / GP15 SCL, or GP26/27) — the SoM/M7 uplink.
+  - **SPI** is taken by the LCD (SPI1); a second SPI peripheral (SPI0) can use free pins if needed.
+  - This board's *role* is vision, so it need not expose the full bench control-line set — it's the
+    product/Inner-vision profile, not the bench inspector.
+
+**Consequence / recommendation.** The bench v0 uses `pico-bench` (free pins, §2.1). For a **future
+custom product module** (not a devkit) we *choose* the pins, so design that PCB to a **canonical stem
+pin map** so firmware ports cleanly. The Arducam is the exception that proves the rule — its fixed
+devkit wiring is why the role→pin binding must live per-profile in `board`, never hard-coded.
+
+#### Don't re-map RP2040 → RP2350 (Henrik 2026-09-30)
+
+Good news: **Arducam kept the same camera pin convention across RP2040 and RP2350** — HM0360 for
+Pico/Pico 2 uses SDA=GP4, SCL=GP5, VSYNC=GP16, HREF=GP15, PCLK=GP14, D0=GP6 ([Arducam HM0360 for
+Pico 2](https://www.arducam.com/blog/product/arducam-hm0360-vga-spi-camera-module-for-raspberry-pi-pico-2/)),
+and **RP2350A is pin-compatible with RP2040** (Pico 2 = Pico form factor). So if we **align our
+`arducam-vision` profile to Arducam's camera convention**, the RP2040 Pico4ML and the RP2350 ML boards
+share one map — **no re-map on the chip bump**. Two hard constraints to design around:
+
+- **Camera data = 8 *consecutive* GPIOs** (a PIO requirement): D0=GP6 ⇒ **GP6–GP13 reserved** for an
+  8-bit camera. (The combined camera+LCD Pico4ML dodges this by running the camera at reduced width;
+  a standalone HM0360 module uses the full GP6–GP13.) So on a camera board, treat **GP4–GP16 as the
+  camera/SCCB block** and place everything else above it.
+- **RP I²C pinmux: SDA on even, SCL on odd**, port-specific pairs. So the **Stem-I²C uplink** lands on a
+  high free I2C1 pair clear of the camera block — e.g. **I2C1 GP18(SDA)/GP19(SCL)** or GP26/GP27.
+
+**Recommendation for the product: use RP2350B (48 GPIO).** The camera block (GP4–16) + LCD + mic leave
+almost no room on a 30-GPIO RP2040/RP2350A for the bench control-line set (Stem/Leaf, reset/bootsel/
+wakeup/sleepy, level-shifter OE, i.MX8 PMIC/boot). **RP2350B's 48 GPIO** ends the squeeze — the camera
+keeps its Arducam-canonical pins (no re-map) and the stem/control functions get the upper pins
+(GP30–47). So the canonical map is: **low pins = Arducam camera block (fixed), upper pins = stem +
+control**, identical RP2040(bench, subset) → RP2350A(vision) → RP2350B(product, full set).
+
 ---
 
 ## 3. Firmware structure
@@ -323,6 +385,56 @@ for manual recovery. Recommendation: **(c) for v0** (software updates need no ex
    suite into the standing "common tests across islands".
 
 ---
+
+## 3.5 Product angle — deep introspection with the SoM off (RESEARCH TODO)
+
+> Verbatim (Henrik 2026-09-30): *"research how RP Pico might be used in a product to provide deep
+> introspection and debugging over USB 2.0 while UCM SoM is switched off."*
+
+**Finding: this is a "service processor" / BMC pattern, and it's feasible.** Researched 2026-09-30.
+
+- **The pattern is proven at small scale.** RP2040/RP2350 already ship as on-board debug processors:
+  the **RP2350B dev board uses an RP2040 running Picoprobe-style firmware** to debug the main RP2350B
+  over SWD+UART ([Elektor](https://www.elektormagazine.com/news/rp2350b-development-board);
+  [RP Debug Probe](https://www.raspberrypi.com/documentation/microcontrollers/debug-probe.html);
+  non-invasive SWD register peek [PicoReg2](https://iosoft.blog/2025/03/30/picoreg2/)). Generalising
+  that on-board debugger into a **management controller** for the i.MX8 = exactly a **BMC**: "a service
+  processor that runs whenever the system is energised and handles power on/off/reboot"
+  ([parisc BMC](https://parisc.docs.kernel.org/en/latest/bmc.html)). Frame the in-product RP that way.
+- **USB-2.0-while-the-SoM-is-off works because the RP's USB is independent.** The RP2040/RP2350 has its
+  **own USB 2.0 full-speed device controller**, unrelated to the i.MX8's USB. Wire a product USB port to
+  the RP and it enumerates (picotool + CDC) regardless of SoM state. Better: the RP can be **bus-powered
+  from VBUS**, so *plugging in a host powers the RP up* even if the product is otherwise off — the
+  service processor is reachable on demand without an always-on rail. (An always-on/standby rail is the
+  alternative when it must run untethered; the RP's dormant draw is low enough for that — confirm the
+  exact standby budget against the RP datasheet when the rail is designed.)
+- **Introspection surface with the SoM off** (from §2): the RP masters Stem/Leaf I²C, the control lines,
+  rails/ADC, and the i.MX8 PMIC/boot pins — so it can read every node's regmap, dump voltages, sequence
+  power, and **force the i.MX8 into USB-SDP recovery**. **SDP** is the i.MX boot-ROM's USB-HID protocol,
+  the fallback when the boot media is empty/unbootable; it downloads images *and* can read/write
+  registers ([NXP: enter SDP from SW](https://community.nxp.com/t5/i-MX-Processors/Enter-USB-Serial-Download-from-Software/m-p/1715466);
+  [u-boot SDP README](https://github.com/ARM-software/u-boot/blob/master/doc/README.sdp)). It's selected
+  by the **boot-mode straps** the RP drives (via level shifters). **Data-path caveat:** the SDP transfer
+  runs over the *i.MX8's own* USB to a host — so the RP's job is to **sequence the SoM into SDP + power**
+  (straps + ONOFF/POR_B), while the actual reflash streams over the i.MX8 USB (RP2040 USB-host is
+  PIO-only and weak; don't plan to bridge the SDP payload through it). Exact i.MX8MP pin names
+  (ONOFF / PMIC_ON_REQ / POR_B / BOOT_MODE) come from the i.MX8MP RM + Compulab UCM docs (`ucm-dev`).
+- **Isolation makes it safe in a live product** (§2.3): directional level shifters with OE, tri-stated
+  by default, so the RP only drives the internal busses when it deliberately introspects — otherwise it
+  is invisible to normal SoM operation.
+- **Security is THE decisive product concern.** An always-reachable debug master on a USB port is a
+  powerful attack surface (power-control, bus access, SoM reflash). Mitigations to design in: ship the
+  product variant on **RP2350** (secure boot + OTP so only signed RP firmware runs), **gate
+  introspection behind an authenticated/signed command** (or a fuse/strap/physical enable), and treat
+  the USB port as untrusted. Decide **DFT-only population** (don't fit the RP on production units) vs a
+  **locked-down shipped** debug controller — this is the main go/no-go for shipping it.
+- **Chip:** bench = **RP2040** (on hand); the in-product debug/service processor should be **RP2350**
+  for the security features above. Same `host-core`/firmware, different power+enable+trust context — so
+  this is the same code as the M7-stand-in (§0), just deployed on a standby/VBUS rail behind auth.
+
+**Open (next research / design):** the exact standby rail + budget; the i.MX8MP strap/power net list
+(from the RM/UCM); the auth/enable scheme; whether SDP reflash is host-driven over the i.MX8 USB or
+needs the RP in any part of the path; and RP2350 secure-boot/OTP provisioning flow.
 
 ## 4. Decisions
 

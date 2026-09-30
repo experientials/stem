@@ -28,5 +28,10 @@ serial = "2FAFB46F29002500"   # MSP430FR2433, id 0x01c6 (fr24xx, single-I²C pas
 
 [[board.alias]]
 name = "rp2040"
-serial = "E0C9125B0D9B"        # RP2040 rev B2 — bench dev HOST / M7 stand-in. Serial = BOOTSEL flash-uid
-                               # (picotool --ser key), NOT eZ-FET. Blank flash as of 2026-09-30 (RP2 Boot).
+serial = "E0C9125B0D9B"        # RP2040 rev B2 — bench dev HOST / M7 stand-in. This is the BOOTSEL/`RP2
+                               # Boot` USB serial = the `picotool --ser` key when flashing. NOT eZ-FET.
+# IMPORTANT (found on bench 2026-09-30): the BOOTSEL serial DIFFERS from the running firmware's id.
+# The stem-probe firmware reports the true 64-bit QSPI flash unique id as its USB iSerial:
+#   flash_uid = "E6614C311B471322"   # what the OS/CDC sees while the app runs
+# So the board key is MODE-DEPENDENT: picotool/BOOTSEL → E0C9125B0D9B; running/CDC → E6614C311B471322.
+# hwd must map both to this one board (see docs/proposals/thepia-hwd-pico-support.md §3).
