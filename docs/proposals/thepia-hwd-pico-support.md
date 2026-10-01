@@ -35,11 +35,12 @@ All `picotool` flags above are verified against the picotool v2.3.x README/BUILD
 
 Both confirmed on the bench RP2040 (rev B2) with the v0 `stem-probe` firmware + `picotool` v2.3.1:
 
-1. **`picotool reboot -f` needs the firmware's reset interface.** Against v0 (which does **not** yet
-   link it) it errored: *"Unable to locate reset interface on the device."* So the hands-free
-   "enter BOOTSEL" step **only** works once the firmware links the picotool-reset interface (§7). Until
-   then, the firmware's own command (v0: a `boot` line over CDC → `reset_to_usb_boot`) or the HW
-   BOOTSEL/RUN lines are the only way in. **v0 `boot`→BOOTSEL was verified working.**
+1. **`picotool reboot -f` needs the firmware's reset interface — now ADDED + PROVEN.** First v0 lacked
+   it and `reboot -f` errored *"Unable to locate reset interface."* The firmware now links a
+   picotool-compatible reset interface (vendor 0xFF/0x00/0x01 + a control handler calling
+   `reset_to_usb_boot`), and **`picotool reboot -f -u` now forces BOOTSEL hands-free (verified on the
+   bench RP2040)**. So hwd can rely on `reboot -f -u` for the "enter BOOTSEL" step. (The firmware's own
+   `boot` CDC command + the HW BOOTSEL/RUN lines remain as fallbacks for a blank/wedged board.)
 2. **The board key is MODE-DEPENDENT — the BOOTSEL serial ≠ the running iSerial.** On this board:
    BOOTSEL/`RP2 Boot` serial = **`E0C9125B0D9B`** (what `picotool --ser` matches when flashing), but the
    running firmware's `flash_unique_id` (its USB iSerial) = **`E6614C311B471322`**. They do **not**

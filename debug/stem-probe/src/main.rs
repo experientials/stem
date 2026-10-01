@@ -22,8 +22,9 @@ use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
+use embassy_usb::control::{OutResponse, Request, RequestType};
 use embassy_usb::driver::EndpointError;
-use embassy_usb::{Builder, Config};
+use embassy_usb::{Builder, Config, Handler};
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const FW_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -37,6 +38,34 @@ bind_interrupts!(struct Irqs {
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {
         cortex_m::asm::wfe();
+    }
+}
+
+// picotool-compatible RESET interface (Pico-SDK `reset_interface`): a vendor interface (class 0xFF,
+// subclass 0x00, protocol 0x01) with no endpoints. `picotool reboot -f` finds it by these ids and
+// sends a control request `bRequest = RESET_REQUEST_BOOTSEL` to the interface → we reset to BOOTSEL.
+// This is what lets `hwd`/`picotool reboot -f -u` force BOOTSEL hands-free (no `boot` keystroke, no button).
+const RESET_INTERFACE_CLASS: u8 = 0xFF;
+const RESET_INTERFACE_SUBCLASS: u8 = 0x00;
+const RESET_INTERFACE_PROTOCOL: u8 = 0x01;
+const RESET_REQUEST_BOOTSEL: u8 = 0x01;
+
+struct ResetHandler;
+
+impl Handler for ResetHandler {
+    fn control_out(&mut self, req: Request, _data: &[u8]) -> Option<OutResponse> {
+        // picotool's reset: bmRequestType = 0x41 (Vendor | Interface | host-to-device),
+        // bRequest = RESET_REQUEST_BOOTSEL. That combination is uniquely ours (CDC uses Class requests),
+        // so we don't need the interface index. (The handler must be declared before the builder to
+        // outlive `usb`, which is why it can't hold the interface number.)
+        // Match picotool's reset on a control-OUT regardless of Vendor-vs-Class/recipient: bRequest=0x01
+        // on OUT is uniquely the reset (CDC control-OUTs use 0x20/0x21/0x22; its 0x01 is an IN).
+        if req.request == RESET_REQUEST_BOOTSEL
+            && matches!(req.request_type, RequestType::Vendor | RequestType::Class)
+        {
+            embassy_rp::rom_data::reset_to_usb_boot(0, 0); // never returns
+        }
+        None
     }
 }
 
@@ -77,6 +106,8 @@ async fn main(_spawner: Spawner) {
     let mut bos_descriptor = [0u8; 256];
     let mut control_buf = [0u8; 64];
     let mut state = State::new();
+    // Declared before `builder` so it outlives `usb` (which holds its &mut via the registered handler).
+    let mut reset_handler = ResetHandler;
 
     let mut builder = Builder::new(
         driver,
@@ -88,6 +119,25 @@ async fn main(_spawner: Spawner) {
     );
 
     let mut class = CdcAcmClass::new(&mut builder, &mut state, 64);
+
+    // Add the picotool-compatible reset interface (vendor 0xFF/0x00/0x01, no endpoints) + its control
+    // handler, so `picotool reboot -f` can force BOOTSEL. Registered before `build()`.
+    {
+        let mut func = builder.function(
+            RESET_INTERFACE_CLASS,
+            RESET_INTERFACE_SUBCLASS,
+            RESET_INTERFACE_PROTOCOL,
+        );
+        let mut iface = func.interface();
+        iface.alt_setting(
+            RESET_INTERFACE_CLASS,
+            RESET_INTERFACE_SUBCLASS,
+            RESET_INTERFACE_PROTOCOL,
+            None,
+        );
+    }
+    builder.handler(&mut reset_handler);
+
     let mut usb = builder.build();
 
     let usb_fut = usb.run();
