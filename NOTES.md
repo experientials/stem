@@ -208,14 +208,16 @@ schematic (`buttons.rs`).
         (never push-pull 3.3 V). Full plan: `prod/DESIGN.md` "How the wake is hooked up"; pin `som_wake`
         (TBD, open-drain) in `connections.toml`. Remaining = assign the pin + reserve the OP/IP bits.
 - [~] **eUSCI_B1 I²C-SLAVE surface (Stem bus → SoM)** — transport DONE, master-read verification
-      pending. `prod/src/stem.rs`: polled eUSCI_B1 slave @ 0x20 on P3.2/P3.6, dispatches the PCA9698
+      pending. `prod/src/stem.rs`: polled eUSCI_B1 slave @ 0x20 on the chip's UCB1 pins (FR247x
+      P3.2/P3.6; FR23xx/FR21xx P4.6/P4.7 — chip-split via `_stem_p3`/`_stem_p4`), dispatches the PCA9698
       command-pointer + AI protocol onto a `RegFile`. Debug/identity window (0x30–0x3F) is REAL (via
       `status::read_reg` — same bytes as the bench dump); GPIO banks (OP/IOC/PI/MSK) are coherent
       firmware SHADOW; IP=0 and voltages=0 until the pin map + rail ADC land. Polled in both the
       console command loop and the production idle loop. Verified: builds (silent 2192 B/6 %), boots,
       sensor bus (B0/P1) unaffected, no hang. **NOT verified: a master actually reading it** — no
       master on the Stem bus.
-      - CLOSE THE LOOP without the SoM: wire a **B0↔B1 loopback** (jumper P3.2→P1.2, P3.6→P1.3) — the
+      - CLOSE THE LOOP without the SoM: wire a **B0↔B1 loopback** (jumper the chip's Stem pins to Leaf:
+        FR247x P3.2→P1.2, P3.6→P1.3; FR23xx/21xx P4.6→P1.2, P4.7→P1.3) — the
         slave (0x20) then appears on the sensor bus and the B0 master can read its own DBG_IFACE
         (0x30 → 0xD0), build id, etc. Could add a firmware self-test that triggers when 0x20 shows in
         the scan. (Needs 2 jumper wires on the LaunchPad.)
@@ -283,7 +285,8 @@ schematic (`buttons.rs`).
 - [ ] APDS INT wiring for interrupt-driven gesture/proximity (polled for now).
 - [ ] Wire `examples/*` onto `crates/sched`.
 - [ ] `connections.toml` package field `RHB VQFN-40` — confirm the real bob-929 package.
-- [ ] Verify **FR2433** I²C pins from *its* datasheet before trusting P1.2/P1.3 there.
+- [x] Verify **FR2433** I²C pins from *its* datasheet (2026-10-01) — CONFIRMED P1.2=UCB0SDA / P1.3=UCB0SCL,
+      SEL=01 (MSP430FR2433 ds: signal table "eUSCI_B0 I2C data/clock" + P1 pinout). No change needed.
 - [x] **Banner the SUPERSEDED `TEST-FR2476` POC render** (2026-09-24) — the 2022 Eeschema symbol
       reverses the eUSCI_B0/B1 roles (SENSOR on B1/P3.2-6, STEM on B0-alt/P4.5-6), shows a
       **SYS_I2C on MSP pins P4.3/P4.4 that doesn't exist** (MSP is Stem + Sensor ONLY), and reserves

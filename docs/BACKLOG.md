@@ -73,6 +73,8 @@ status**. Check the box when done. Keep newest context at the top of each item.
     eUSCI_B0 (UCB0). Reused the chip-agnostic contract WHOLESALE — `regmap.rs` unchanged; `RegFile`/
     `Slave`/`poll` in `stem.rs` unchanged. Only the peripheral seam differs, isolated in a new cfg-split
     `stem::hw` module: DUAL → `e_usci_b1`/`ucb1*`/P3.2-6 (unchanged); fr24xx → `usci_b0_i2c_mode`/`ucb0*`
+    *(correction 2026-10-01: "P3.2-6" holds only for FR247x; the dual path was later chip-split —
+    FR23xx/FR21xx UCB1 = P4.6/P4.7 via `_stem_p3`/`_stem_p4`. See stem.rs.)*
     (IFG = `ucb0ifg_i2c`, mode-split PAC) / P1.2-3. `status.rs` decoupled from the sensor scan
     (`from_scan` gated `_dual`; `booted`/`read_reg`/`dump` shared). `run_fr24xx` now: detect → booted+
     Passive status → `stem::init` (UCB0 slave @0x20) → print-once banner+dump (console) → serve loop.

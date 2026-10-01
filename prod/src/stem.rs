@@ -4,8 +4,10 @@
 //!
 //! **One transport, two peripherals.** The protocol / [`RegFile`] / [`Slave`] logic is chip-agnostic;
 //! only the eUSCI_B instance + pins differ, isolated in the [`hw`] seam:
-//!   • DUAL families (fr247x/fr215x/fr235x): eUSCI_B1 (`ucb1*`) on **P3.2/P3.6** — a dedicated slave
-//!     bus, independent of the eUSCI_B0 sensor-master, so it never disturbs enumeration.
+//!   • DUAL families (fr247x/fr215x/fr235x): eUSCI_B1 (`ucb1*`) — a dedicated slave bus, independent
+//!     of the eUSCI_B0 sensor-master, so it never disturbs enumeration. The UCB1↔pin mux is **chip-
+//!     specific** (verified per-datasheet, gated by `_stem_p3`/`_stem_p4`): FR247x = **P3.2/P3.6**
+//!     (P3SEL=01); FR23xx/FR21xx (FR2355/FR2155) = **P4.6/P4.7** (P4SEL=01).
 //!   • FR2433 (fr24xx, single-I²C slave-only): its ONE eUSCI_B0 (`ucb0*`, mode-split PAC field
 //!     `usci_b0_i2c_mode`) on **P1.2/P1.3** — this bus IS the node's whole job (no sensor master).
 //!
@@ -46,16 +48,38 @@ const UCNACKIFG: u16 = 0x0020;
 /// for-register identical apart from the peripheral accessor (ucb1 vs ucb0) and the port/bits, so the
 /// shared protocol below never mentions a concrete peripheral. (The fr24xx PAC is mode-split, so its
 /// IFG is `ucb0ifg_i2c`; the dual PAC exposes a single `ucb1ifg`.)
+#[cfg(all(feature = "_dual", not(any(feature = "_stem_p3", feature = "_stem_p4"))))]
+compile_error!("a _dual family must select exactly one Stem pin-group: _stem_p3 (FR247x) or _stem_p4 (FR23xx/FR21xx)");
+
 #[cfg(feature = "_dual")]
 mod hw {
     use super::{Peripherals, STEM_ADDR, UCMODE_3, UCOAEN, UCSWRST, UCSYNC};
-    const SDA_BIT: u8 = 0x04; // P3.2 = UCB1SDA
-    const SCL_BIT: u8 = 0x40; // P3.6 = UCB1SCL
 
-    pub fn init(p: &Peripherals) {
+    // The UCB1 register programming below is identical across the dual family; ONLY the port the
+    // UCB1SDA/UCB1SCL signals mux onto differs by chip (the UCB1↔pin map is NOT uniform — verified
+    // against each datasheet). `route_pins` is the only chip-split; `init` and the accessors are shared.
+    //   • _stem_p3 → FR247x (FR2476/FR2475): UCB1 on P3.2(SDA)/P3.6(SCL), P3SEL=01  [FR2476 ds p67]
+    //   • _stem_p4 → FR23xx/FR21xx (FR2355/FR2155): UCB1 on P4.6(SDA)/P4.7(SCL), P4SEL=01 [FR2355 ds p24/p102]
+    #[cfg(feature = "_stem_p3")]
+    fn route_pins(p: &Peripherals) {
+        const SDA_BIT: u8 = 0x04; // P3.2 = UCB1SDA
+        const SCL_BIT: u8 = 0x40; // P3.6 = UCB1SCL
         // Route P3.2/P3.6 to the primary module function (SEL1=0, SEL0=1 = UCB1SDA/UCB1SCL).
         p.p3.p3sel1().modify(|r, w| unsafe { w.bits(r.bits() & !(SDA_BIT | SCL_BIT)) });
         p.p3.p3sel0().modify(|r, w| unsafe { w.bits(r.bits() | (SDA_BIT | SCL_BIT)) });
+    }
+    #[cfg(feature = "_stem_p4")]
+    fn route_pins(p: &Peripherals) {
+        const SDA_BIT: u8 = 0x40; // P4.6 = UCB1SDA (bit 6)
+        const SCL_BIT: u8 = 0x80; // P4.7 = UCB1SCL (bit 7)
+        // Route P4.6/P4.7 to the primary module function (SEL1=0, SEL0=1 = UCB1SDA/UCB1SCL). Distinct
+        // bits from the FR2355 console UART (P4.2/P4.3), so the read-modify-write doesn't disturb it.
+        p.p4.p4sel1().modify(|r, w| unsafe { w.bits(r.bits() & !(SDA_BIT | SCL_BIT)) });
+        p.p4.p4sel0().modify(|r, w| unsafe { w.bits(r.bits() | (SDA_BIT | SCL_BIT)) });
+    }
+
+    pub fn init(p: &Peripherals) {
+        route_pins(p); // chip-specific UCB1 pin mux (SEL=01); see route_pins above
         p.e_usci_b1.ucb1ctlw0().write(|w| unsafe { w.bits(UCSWRST) }); // hold in reset
         p.e_usci_b1
             .ucb1ctlw0()
@@ -390,9 +414,17 @@ impl Loopback {
     }
 }
 
-/// Bench self-test with NO SoM: jumper **P3.2→P1.2** and **P3.6→P1.3** so the eUSCI_B0 MASTER shares a
-/// bus with this eUSCI_B1 SLAVE, then have the master READ our own slave surface. This proves the slave
-/// answers a real master (not merely that it builds and boots).
+/// Operator hint naming the no-SoM loopback jumpers — the chip's Stem (B1) ↔ Leaf (B0) pin pairing.
+/// Chip-specific because the B1 pins differ (see [`hw`]). Used by both the boot self-test and `l`.
+#[cfg(all(feature = "console", feature = "_stem_p3"))]
+pub const LOOPBACK_JUMPER_HINT: &str = "P3.2->P1.2, P3.6->P1.3";
+#[cfg(all(feature = "console", feature = "_stem_p4"))]
+pub const LOOPBACK_JUMPER_HINT: &str = "P4.6->P1.2, P4.7->P1.3";
+
+/// Bench self-test with NO SoM: jumper the Stem (B1) pins to the Leaf (B0) pins so the eUSCI_B0 MASTER
+/// shares a bus with this eUSCI_B1 SLAVE, then have the master READ our own slave surface. This proves
+/// the slave answers a real master (not merely that it builds and boots). Jumpers are **chip-specific**
+/// (the B1 pins differ): FR247x = **P3.2→P1.2, P3.6→P1.3**; FR23xx/FR21xx = **P4.6→P1.2, P4.7→P1.3**.
 ///
 /// It's a single MCU, so a plain blocking master read would DEADLOCK — the slave clock-stretches SCL
 /// waiting for firmware to service its RX/TX while that same firmware is blocked in the master read. We

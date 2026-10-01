@@ -31,7 +31,10 @@ const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const FW_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // Stem-I²C contract (the FR2433 node's slave surface; mirrors prod/src/regmap.rs — the shared contract).
-// Pico-bench profile: Stem-I²C = I2C0 on GP4(SDA)/GP5(SCL). Conformance target = the FR2433 regmap.
+// CANONICAL pin map (same across Pico/Pico H/Pico4ML/RP2350 product, no re-map):
+//   Stem-I²C = I2C1 on GP18(SDA)/GP19(SCL)  — the SoM/M7 uplink; clear of the Pico4ML camera block.
+//   Leaf-I²C = I2C0 on GP4(SDA)/GP5(SCL)    — sensors; on a Pico4ML this is the camera SCCB.
+// Conformance target = the FR2433 regmap on the Stem bus.
 const STEM_ADDR: u8 = 0x20; // PCA9698 group base (prod STEM_ADDR)
 const DBG_IFACE: u8 = 0x30; // → DBG_IFACE_MAGIC
 const DBG_IFACE_MAGIC: u8 = 0xD0;
@@ -152,11 +155,11 @@ async fn main(_spawner: Spawner) {
 
     let usb_fut = usb.run();
 
-    // Stem-I²C master (pico-bench profile: I2C0, GP5=SCL / GP4=SDA). The RP2040 MASTERS the bus to read
-    // an MSP430 node's slave regmap — the cross-core conformance read. `Config::default()` enables the
-    // RP2040 internal pull-ups (sda/scl_pullup = true), so a short bench jumper needs just 3 wires:
-    // RP GP4/5 ↔ FR2433 P1.2/P1.3 + GND. No external pull-ups for a short link. ~100 kHz.
-    let mut i2c = I2c::new_blocking(p.I2C0, p.PIN_5, p.PIN_4, i2c::Config::default());
+    // Stem-I²C master — CANONICAL map (authoritative; identical on every board): I2C1 on
+    // GP18(SDA)/GP19(SCL), clear of the Pico4ML camera block (GP4-16). The RP2040 MASTERS the Stem bus
+    // to read the MSP430 node's slave regmap. `Config::default()` enables the RP internal pull-ups, so a
+    // short link needs just 3 wires: RP GP18/GP19 ↔ FR2433 P1.2/P1.3 + GND (RP GND = pin 23). ~100 kHz.
+    let mut i2c = I2c::new_blocking(p.I2C1, p.PIN_19, p.PIN_18, i2c::Config::default());
 
     // Console: banner on connect, then a tiny command loop (id | scan | read | boot).
     let console_fut = async {
@@ -214,7 +217,7 @@ async fn main(_spawner: Spawner) {
                             } else {
                                 let _ = write_str(
                                     &mut class,
-                                    "\r\nno response at 0x20 — wire RP GP4/5 -> FR2433 P1.2/3 + GND (RP pull-ups on)\r\n> ",
+                                    "\r\nno response at 0x20 — wire RP GP18/19 -> FR2433 P1.2/3 + GND (RP pull-ups on)\r\n> ",
                                 )
                                 .await;
                             }

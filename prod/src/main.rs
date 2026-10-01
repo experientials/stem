@@ -198,8 +198,8 @@ fn run_dual(p: &Peripherals) -> ! {
         uart::puts(p, "commands: s=scan  r=report  d=debug regs  m=switch mode  l=loopback self-test\n");
         enumerate::report(p, &last);
         rf.status.dump(p);
-        // Boot self-test: drive the eUSCI_B1 SLAVE from the eUSCI_B0 MASTER (needs the P3.2->P1.2 /
-        // P3.6->P1.3 jumpers). Auto-run so hwd's READ-ONLY console captures PASS/FAIL with NO keystroke
+        // Boot self-test: drive the eUSCI_B1 SLAVE from the eUSCI_B0 MASTER (needs the chip's Stem↔Leaf
+        // jumpers — see stem::LOOPBACK_JUMPER_HINT). Auto-run so hwd's READ-ONLY console captures PASS/FAIL with NO keystroke
         // — a short-lived agent reads the hwd console log but cannot send the `l` keystroke. No jumpers
         // → an honest "no response". Only meaningful in Sensing (B0 must be up as master).
         if mach.is_sensing() {
@@ -208,7 +208,9 @@ fn run_dual(p: &Peripherals) -> ! {
             uart::hex8(p, stem::STEM_ADDR as u8);
             uart::puts(p, " (boot self-test): ");
             if !lb.ran {
-                uart::puts(p, "no response (fit jumpers P3.2->P1.2, P3.6->P1.3)\n");
+                uart::puts(p, "no response (fit jumpers ");
+                uart::puts(p, stem::LOOPBACK_JUMPER_HINT);
+                uart::puts(p, ")\n");
             } else {
                 uart::puts(p, "iface=0x");
                 uart::hex8(p, lb.iface);
@@ -269,7 +271,9 @@ fn run_dual(p: &Peripherals) -> ! {
                             uart::hex8(p, stem::STEM_ADDR as u8);
                             uart::puts(p, ": ");
                             if !lb.ran {
-                                uart::puts(p, "no response (jumper P3.2->P1.2, P3.6->P1.3?)\n");
+                                uart::puts(p, "no response (jumper ");
+                                uart::puts(p, stem::LOOPBACK_JUMPER_HINT);
+                                uart::puts(p, "?)\n");
                             } else {
                                 uart::puts(p, "iface=0x");
                                 uart::hex8(p, lb.iface);
