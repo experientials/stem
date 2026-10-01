@@ -18,6 +18,7 @@ use embassy_futures::join::join;
 use embassy_rp::bind_interrupts;
 use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::gpio::{Level, Output};
+use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_time::{Duration, Timer};
@@ -28,6 +29,15 @@ use embassy_usb::{Builder, Config, Handler};
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 const FW_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// Stem-I²C contract (the FR2433 node's slave surface; mirrors prod/src/regmap.rs — the shared contract).
+// Pico-bench profile: Stem-I²C = I2C0 on GP4(SDA)/GP5(SCL). Conformance target = the FR2433 regmap.
+const STEM_ADDR: u8 = 0x20; // PCA9698 group base (prod STEM_ADDR)
+const DBG_IFACE: u8 = 0x30; // → DBG_IFACE_MAGIC
+const DBG_IFACE_MAGIC: u8 = 0xD0;
+const DBG_MODEL_L: u8 = 0x31;
+const DBG_MODEL_H: u8 = 0x32;
+const FR2433_MODEL: u16 = 0x8240; // expected detected device-id
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -142,7 +152,12 @@ async fn main(_spawner: Spawner) {
 
     let usb_fut = usb.run();
 
-    // Console: banner on connect, then a tiny command loop (`boot` → BOOTSEL).
+    // Stem-I²C master (pico-bench profile: I2C0, GP5=SCL / GP4=SDA). The RP2040 MASTERS the bus to read
+    // an MSP430 node's slave regmap — the cross-core conformance read. Needs external pull-ups + the
+    // node jumpered on (RP GP4/5 ↔ FR2433 P1.2/P1.3 + GND). ~100 kHz default.
+    let mut i2c = I2c::new_blocking(p.I2C0, p.PIN_5, p.PIN_4, i2c::Config::default());
+
+    // Console: banner on connect, then a tiny command loop (id | scan | read | boot).
     let console_fut = async {
         loop {
             class.wait_connection().await;
@@ -156,12 +171,58 @@ async fn main(_spawner: Spawner) {
                             let _ = write_str(&mut class, "\r\n[entering BOOTSEL]\r\n").await;
                             Timer::after(Duration::from_millis(50)).await; // let the packet flush
                             embassy_rp::rom_data::reset_to_usb_boot(0, 0); // never returns
+                        } else if contains_ci(line, b"scan") {
+                            // Probe the Stem bus (MASTER) for responding addresses.
+                            let _ = write_str(&mut class, "\r\nscan:").await;
+                            let mut found = 0u8;
+                            let mut a = 0x08u8;
+                            while a <= 0x77 {
+                                let mut b = [0u8; 1];
+                                if i2c.blocking_read(a, &mut b).is_ok() {
+                                    let _ = write_str(&mut class, " 0x").await;
+                                    let _ = write_hex8(&mut class, a).await;
+                                    found += 1;
+                                }
+                                a += 1;
+                            }
+                            if found == 0 {
+                                let _ = write_str(&mut class, " (none — check wiring/pull-ups)").await;
+                            }
+                            let _ = write_str(&mut class, "\r\n> ").await;
+                        } else if contains_ci(line, b"read") {
+                            // Cross-core conformance read of the MSP430 node's regmap @ 0x20.
+                            let mut iface = [0u8; 1];
+                            let mut ml = [0u8; 1];
+                            let mut mh = [0u8; 1];
+                            let ok = i2c.blocking_write_read(STEM_ADDR, &[DBG_IFACE], &mut iface).is_ok()
+                                && i2c.blocking_write_read(STEM_ADDR, &[DBG_MODEL_L], &mut ml).is_ok()
+                                && i2c.blocking_write_read(STEM_ADDR, &[DBG_MODEL_H], &mut mh).is_ok();
+                            if ok {
+                                let model = ((mh[0] as u16) << 8) | ml[0] as u16;
+                                let _ = write_str(&mut class, "\r\nstem@0x20 iface=0x").await;
+                                let _ = write_hex8(&mut class, iface[0]).await;
+                                let _ = write_str(&mut class, " model=0x").await;
+                                let _ = write_hex8(&mut class, mh[0]).await;
+                                let _ = write_hex8(&mut class, ml[0]).await;
+                                let pass = iface[0] == DBG_IFACE_MAGIC && model == FR2433_MODEL;
+                                let _ = write_str(
+                                    &mut class,
+                                    if pass { "  CONFORMANT (FR2433)\r\n> " } else { "  (unexpected)\r\n> " },
+                                )
+                                .await;
+                            } else {
+                                let _ = write_str(
+                                    &mut class,
+                                    "\r\nno response at 0x20 — wire RP GP4/5 -> FR2433 P1.2/3 + GND + pull-ups\r\n> ",
+                                )
+                                .await;
+                            }
                         } else if contains_ci(line, b"id") {
                             let _ = write_str(&mut class, "\r\nid ").await;
                             let _ = class.write_packet(serial.as_bytes()).await;
                             let _ = write_str(&mut class, "\r\n> ").await;
                         } else {
-                            let _ = write_str(&mut class, "\r\ncmds: id | boot\r\n> ").await;
+                            let _ = write_str(&mut class, "\r\ncmds: id | scan | read | boot\r\n> ").await;
                         }
                     }
                     Err(_) => break, // disconnected → wait for the next connection
@@ -204,6 +265,17 @@ async fn write_str<'d, T: embassy_rp::usb::Instance + 'd>(
         class.write_packet(chunk).await?;
     }
     Ok(())
+}
+
+/// Write a byte as two uppercase hex chars over CDC.
+async fn write_hex8<'d, T: embassy_rp::usb::Instance + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T>>,
+    v: u8,
+) -> Result<(), EndpointError> {
+    const H: &[u8; 16] = b"0123456789ABCDEF";
+    class
+        .write_packet(&[H[(v >> 4) as usize], H[(v & 0x0f) as usize]])
+        .await
 }
 
 /// Case-insensitive substring test (needle is lowercase ASCII).
