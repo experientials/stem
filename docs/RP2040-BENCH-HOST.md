@@ -376,7 +376,8 @@ for manual recovery. Recommendation: **(c) for v0** (software updates need no ex
 > **Status (v0, 2026-10-01):** steps 1–2 implemented in `debug/stem-probe`. **PROVEN on hardware:** USB
 > CDC + flash-uid iSerial + banner; `boot`→BOOTSEL; **`picotool reboot -f -u`** (reset interface). Stem-I²C
 > master + `scan`/`read` commands are live and correctly report absence — the **conformance read awaits
-> the bench jumpers** (RP GP4/5 ↔ FR2433 P1.2/P1.3 + GND + pull-ups).
+> the bench jumpers**: just 3 wires RP GP4/5 ↔ FR2433 P1.2/P1.3 + GND (embassy-rp `Config::default()`
+> enables the RP2040 internal pull-ups, so no external resistors for a short link).
 
 1. **Loading loop first (the stated first challenge):** RP2040 host bin = USB CDC printing a **build
    stamp** + **flash unique id** (= `iSerial`), accepting `bootloader` → reset→BOOTSEL. Proves the

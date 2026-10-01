@@ -153,8 +153,9 @@ async fn main(_spawner: Spawner) {
     let usb_fut = usb.run();
 
     // Stem-I²C master (pico-bench profile: I2C0, GP5=SCL / GP4=SDA). The RP2040 MASTERS the bus to read
-    // an MSP430 node's slave regmap — the cross-core conformance read. Needs external pull-ups + the
-    // node jumpered on (RP GP4/5 ↔ FR2433 P1.2/P1.3 + GND). ~100 kHz default.
+    // an MSP430 node's slave regmap — the cross-core conformance read. `Config::default()` enables the
+    // RP2040 internal pull-ups (sda/scl_pullup = true), so a short bench jumper needs just 3 wires:
+    // RP GP4/5 ↔ FR2433 P1.2/P1.3 + GND. No external pull-ups for a short link. ~100 kHz.
     let mut i2c = I2c::new_blocking(p.I2C0, p.PIN_5, p.PIN_4, i2c::Config::default());
 
     // Console: banner on connect, then a tiny command loop (id | scan | read | boot).
@@ -186,7 +187,7 @@ async fn main(_spawner: Spawner) {
                                 a += 1;
                             }
                             if found == 0 {
-                                let _ = write_str(&mut class, " (none — check wiring/pull-ups)").await;
+                                let _ = write_str(&mut class, " (none — check wiring)").await;
                             }
                             let _ = write_str(&mut class, "\r\n> ").await;
                         } else if contains_ci(line, b"read") {
@@ -213,7 +214,7 @@ async fn main(_spawner: Spawner) {
                             } else {
                                 let _ = write_str(
                                     &mut class,
-                                    "\r\nno response at 0x20 — wire RP GP4/5 -> FR2433 P1.2/3 + GND + pull-ups\r\n> ",
+                                    "\r\nno response at 0x20 — wire RP GP4/5 -> FR2433 P1.2/3 + GND (RP pull-ups on)\r\n> ",
                                 )
                                 .await;
                             }
