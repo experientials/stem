@@ -55,8 +55,8 @@ build family="fr247x" mode="auto" console="console" modes="":
         # BENCHMARK the fr247x image against the PRODUCTION dual-I²C parts (FR2155/FR2355): 32 KB FRAM /
         # 4 KB SRAM — the FR2476 dev board has 8 KB SRAM, HALF of which the shipped part won't have.
         # Informational (never fails the dev build) — confirms the image fits what we actually ship.
-        # NOTE: fr215x/fr235x are not yet COMPILE targets — that needs the FR2155 PAC (svd2rust); see
-        # docs/MCU_SELECTION.md + NOTES.md. This is the size benchmark until then.
+        # (fr235x and fr215x ARE compile targets now — both PACs exist and build; this fr247x check is
+        # just the size benchmark against the 32K/4K production envelope.)
         if [ "{{family}}" = fr247x ]; then
             scripts/size-check.sh "$art" 32768 4096 "  ↳ benchmark vs FR2155/FR2355 (production 32K/4K)" 1024 || true
         fi

@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build examples (same just recipe as local dev)
-        run: just build          # inside the container → detects /.dockerenv → builds natively
+        run: just examples       # inside the container → detects /.dockerenv → builds natively
 
       - name: Build diag (FR2476) — gated at 32 KB FRAM / 8 KB SRAM
         run: just diag build     # size-check.sh fails the job on overflow

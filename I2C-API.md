@@ -25,6 +25,32 @@ The open-drain interrupt output is activated when one of the port pins changes s
 
 The I/O Expander I2C API is enabled by calling `stemI2C(scl_pin, sda_pin, i2c_address)`.
 
+### Stem address is ROLE-BASED (CANONICAL — verbatim, Henrik 2026-10-01)
+
+> The address for MCUs on the stem bus should be determined on the role they play, so for the FR2476
+> we need to give it an alt address value indicating that it isn't the real thing(or some other
+> excuse). It would have the same firmware as FR2355. FR2433 would have an I/O expander role, which
+> for now is a placeholder
+
+**Derivation (subordinate to the block above).** The node's Stem I²C slave address is **chosen at boot
+from the detected model → its role**, not fixed. A master (SoM / RP2040) can therefore tell *what it is
+talking to* from the address alone — and a dev stand-in cannot masquerade as the production supervisor.
+Values are within the PCA9698 strap group 0x20–0x27:
+
+| Role | Model(s) | Stem addr | Note |
+|---|---|---|---|
+| **Supervisor** (production) | FR2355, FR2155 | **0x20** | the genuine sleep-supervisor; PCA9698 group base |
+| **Supervisor — DEV stand-in** | FR2476 / FR2475 | **0x21** | SAME firmware as FR2355, but "not the real thing" → distinct address so it can't pose as the production supervisor |
+| **I/O-expander** (placeholder) | FR2433 | **0x22** | plays the dumb-expander role; PLACEHOLDER value until the role is defined |
+| **Power controller** | CYPM1111 (EZ-PD PMG1-S1) | **0x23** | the PD controller **is an MCU → a full Stem-bus node** (Henrik 2026-10-03): addressable like the others, **and it masters the Stem bus while the SoM is off** (the SoM-off-regime master). Requires the Stem bus to reach the power module (292) across the B2B. |
+
+*(Address values 0x21/0x22/0x23 are a derivation — the canonical block fixes the scheme, not the exact
+numbers; adjust here if the role map changes. Firmware: `Model::stem_addr()` in `prod/src/model.rs`.)*
+
+**Masters on the Stem bus** (bus mastership, not a side-channel handshake): the **SoM/M7** while it is
+alive; the **PD controller (CYPM1111)** while the SoM is off; the **RP2040** on the dev bench (SoM
+stand-in). Only one master at a time — the SoM→off handoff passes mastership to the PD controller.
+
 
 ### From the PCA9698 Datasheet
 

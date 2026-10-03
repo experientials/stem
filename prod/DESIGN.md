@@ -177,12 +177,20 @@ register-map home — is now designed from the datasheet.
 5. **Transition sequencing / bus-handoff protocol** so the SoM and MSP never both master the sensor bus.
 
 ### Boot logic (the "basic boot logic" required)
+0. **Stem slave up FIRST** — the SoM's always-on control channel (eUSCI_B1 slave at the role address) is
+   configured **before** any sensor-bus work, so the node is reachable the instant it boots even if the
+   sensor bus is wedged/slow. *(Regression fixed 2026-10-03: it used to come up AFTER enumeration, so a
+   two-master-wedged Leaf bus delayed — and could indefinitely block — the SoM's only way in. Observed
+   on the bench as "FR2355 appears on the Stem bus a few seconds late.")*
 1. **Model detection** — read the device ID from the MSP430 **TLV device descriptor** / SYS device-ID
    registers; pick the model record at runtime.
 2. **Pin mapping** — apply that model's map: which port pins are GPIO banks (regmap), which are the
    MCU-bus I²C, the sensor-bus I²C, ADC (VSOM/CHARGE), and the STEM INT/MSG line.
-3. **Sensor enumeration** — if a sensor-master bus exists, probe it and record what's present /
-   sensable; expose to the SoM.
+3. **Default mode = Passive** (resolves open-Q#4 for now) — at power-on the SoM/host is active and owns
+   the buses, so the MSP stays an I/O-extender (OFF the sensor bus) until the SoM commands Sensing (when
+   it suspends). This also prevents a **boot-time two-master fight** on the sensor bus. `mode::default_boot`.
+4. **Sensor enumeration** — ONLY in Sensing: if a sensor-master bus exists, probe it and record what's
+   present / sensable; expose to the SoM.
 
 ### Single binary across multiple models
 Requirement: **one binary image serves multiple MSP430 models**, detecting the exact model and

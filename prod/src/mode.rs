@@ -28,16 +28,20 @@ pub enum Mode {
 }
 
 impl Mode {
-    /// Boot default. TODO(open-q, DESIGN.md): the real default + FRAM (`INIT_CODE`) persistence. For
-    /// now prefer Sensing when built (the autonomous-supervisor posture), else Passive.
+    /// Boot default. TODO(open-q, DESIGN.md): FRAM (`INIT_CODE`) persistence of the real default.
+    /// **Passive** by default: at power-on the SoM/host is active and owns the buses, so the MSP stays
+    /// an I/O-extender (OFF the sensor bus) until the SoM commands Sensing (when it later suspends).
+    /// This also prevents a boot-time **two-master fight** on the sensor bus (the MSP grabbing it while
+    /// another master is attached — the bench failure mode). Falls back to Sensing only for a
+    /// sensing-only build (no `mode-passive`).
     pub const fn default_boot() -> Self {
-        #[cfg(feature = "mode-sensing")]
-        {
-            Mode::Sensing
-        }
-        #[cfg(not(feature = "mode-sensing"))]
+        #[cfg(feature = "mode-passive")]
         {
             Mode::Passive
+        }
+        #[cfg(not(feature = "mode-passive"))]
+        {
+            Mode::Sensing
         }
     }
 

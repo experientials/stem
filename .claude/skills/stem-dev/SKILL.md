@@ -101,7 +101,20 @@ just diag run           # build + flash to the connected board
 just monitor            # watch the 9600 8N1 backchannel (auto-detects the usbmodem port)
 just usb status|recover # diagnose/recover the eZ-FET USB when it drops (hub/short/latch)
 just example build hello-rust
+
+# One chip-primary command builds any board's firmware; routes to prod/diag/probe + the right toolchain.
+just build fr2355            # FR2355 product (prod)        → Docker toolchain
+just build fr2355 --diag     # FR2355 POST/self-test (diag) → Docker toolchain
+just build rp2040            # RP2040 bench host (stem-probe) → HOST cargo (no container; Linux+macOS)
+just build-all               # every default image: MSP430 products (Docker) + the RP2040 probe
 ```
+
+**Which build path (automatic via `just build <chip>`):** MSP430 (`prod`/`diag`, `msp430-none-elf`)
+needs TI's external `msp430-elf-gcc` → **Docker**. The RP2040 (`debug/stem-probe`, thumbv6m) links with
+**rust-lld** (in Rust) → **host cargo**, no container, Linux+macOS alike. Future RP2350/nRF52/PD = a
+sibling firmware module + a `build` case arm. **Never** run raw `cargo build` for MSP430 and read the
+missing-linker error as "toolchain missing" — it means you bypassed `just build`. See
+[TOOLCHAIN.md](../../../TOOLCHAIN.md) "One `just build <chip>`, two link toolchains".
 
 Flashing gotchas (USB drops, "No unused FET found", `cargo install svd2rust` hangs, the old
 `cargo 1.64` on PATH) are all documented in the **msp430-macos-dev** skill — consult it whenever

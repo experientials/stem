@@ -28,9 +28,10 @@ use crate::regmap::{self, ShadowState};
 use crate::status::Status;
 use crate::pac::Peripherals;
 
-/// I²C-slave address. PCA9698 parts answer a strap-selected address in 0x20–0x27; we default to
-/// the group base. TODO(confirm-on-doc): pin this against I2C-API.md's canonical Stem-node address.
-pub const STEM_ADDR: u16 = 0x20;
+// I²C-slave address is **ROLE-BASED** — chosen per detected model by `model::Model::stem_addr()` and
+// threaded into `init`/`loopback_selftest` as `addr` (PCA9698 group 0x20–0x27). See I2C-API.md "Stem
+// address is ROLE-BASED": FR2355/FR2155=0x20 (production supervisor), FR2476/FR2475=0x21 (dev
+// stand-in), FR2433=0x22 (I/O-expander placeholder). No fixed const here.
 
 // ── CTLW0 / I2COA0 / IFG bit definitions (eUSCI_B, slau445 §24). Shared: the register *layout* is
 // identical across instances; only the accessor name differs (handled in `hw`). ──
@@ -53,7 +54,7 @@ compile_error!("a _dual family must select exactly one Stem pin-group: _stem_p3 
 
 #[cfg(feature = "_dual")]
 mod hw {
-    use super::{Peripherals, STEM_ADDR, UCMODE_3, UCOAEN, UCSWRST, UCSYNC};
+    use super::{Peripherals, UCMODE_3, UCOAEN, UCSWRST, UCSYNC};
 
     // The UCB1 register programming below is identical across the dual family; ONLY the port the
     // UCB1SDA/UCB1SCL signals mux onto differs by chip (the UCB1↔pin map is NOT uniform — verified
@@ -78,13 +79,13 @@ mod hw {
         p.p4.p4sel0().modify(|r, w| unsafe { w.bits(r.bits() | (SDA_BIT | SCL_BIT)) });
     }
 
-    pub fn init(p: &Peripherals) {
+    pub fn init(p: &Peripherals, addr: u16) {
         route_pins(p); // chip-specific UCB1 pin mux (SEL=01); see route_pins above
         p.e_usci_b1.ucb1ctlw0().write(|w| unsafe { w.bits(UCSWRST) }); // hold in reset
         p.e_usci_b1
             .ucb1ctlw0()
             .modify(|r, w| unsafe { w.bits(r.bits() | UCMODE_3 | UCSYNC) }); // I2C SLAVE (no UCMST)
-        p.e_usci_b1.ucb1i2coa0().write(|w| unsafe { w.bits(STEM_ADDR | UCOAEN) });
+        p.e_usci_b1.ucb1i2coa0().write(|w| unsafe { w.bits(addr | UCOAEN) }); // role-based own-address
         p.e_usci_b1.ucb1ctlw0().modify(|r, w| unsafe { w.bits(r.bits() & !UCSWRST) }); // release
         p.e_usci_b1.ucb1ifg().write(|w| unsafe { w.bits(0) }); // clear stale flags
     }
@@ -108,21 +109,21 @@ mod hw {
 
 #[cfg(feature = "fr24xx")]
 mod hw {
-    use super::{Peripherals, STEM_ADDR, UCMODE_3, UCOAEN, UCSWRST, UCSYNC};
+    use super::{Peripherals, UCMODE_3, UCOAEN, UCSWRST, UCSYNC};
     // FR2433's single eUSCI_B0 as the MCU-bus slave. UCB0SDA=P1.2, UCB0SCL=P1.3 at SEL=01 — CONFIRMED
     // against the MSP430FR2433 datasheet (SLASE59F Table 6-17, Port P1 Pin Functions): P1.2 P1SELx=01 →
     // UCB0SIMO/UCB0SDA, P1.3 P1SELx=01 → UCB0SOMI/UCB0SCL. SEL=01 = SEL1:0 = 0,1 (routed below).
     const SDA_BIT: u8 = 0x04; // P1.2 = UCB0SDA
     const SCL_BIT: u8 = 0x08; // P1.3 = UCB0SCL
 
-    pub fn init(p: &Peripherals) {
+    pub fn init(p: &Peripherals, addr: u16) {
         p.p1.p1sel1().modify(|r, w| unsafe { w.bits(r.bits() & !(SDA_BIT | SCL_BIT)) });
         p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | (SDA_BIT | SCL_BIT)) });
         let b = &p.usci_b0_i2c_mode;
         b.ucb0ctlw0().write(|w| unsafe { w.bits(UCSWRST) }); // hold in reset
         b.ucb0ctlw0()
             .modify(|r, w| unsafe { w.bits(r.bits() | UCMODE_3 | UCSYNC) }); // I2C SLAVE (no UCMST)
-        b.ucb0i2coa0().write(|w| unsafe { w.bits(STEM_ADDR | UCOAEN) });
+        b.ucb0i2coa0().write(|w| unsafe { w.bits(addr | UCOAEN) }); // role-based own-address
         b.ucb0ctlw0().modify(|r, w| unsafe { w.bits(r.bits() & !UCSWRST) }); // release
         b.ucb0ifg_i2c().write(|w| unsafe { w.bits(0) }); // clear stale flags
     }
@@ -146,9 +147,10 @@ mod hw {
     }
 }
 
-/// Configure the node's eUSCI_B as an I²C slave at [`STEM_ADDR`] and route its pins (see [`hw`]).
-pub fn init(p: &Peripherals) {
-    hw::init(p);
+/// Configure the node's eUSCI_B as an I²C slave at the **role-based** `addr`
+/// (`model::Model::stem_addr()`; see I2C-API.md) and route its pins (see [`hw`]).
+pub fn init(p: &Peripherals, addr: u16) {
+    hw::init(p, addr);
 }
 
 /// Physical GPIO bank backing — the seam that makes the PCA9698 IP/OP/IOC banks touch real MSP430
@@ -434,8 +436,8 @@ pub const LOOPBACK_JUMPER_HINT: &str = "P4.6->P1.2, P4.7->P1.3";
 /// Requires **Sensing** (B0 must be up as master). With no jumpers the master reads just time out →
 /// `ran == false` (harmless). Console/bench only.
 #[cfg(all(feature = "console", feature = "_dual"))]
-pub fn loopback_selftest(p: &Peripherals, s: &mut Slave, rf: &mut RegFile) -> Loopback {
-    let addr = STEM_ADDR as u8;
+pub fn loopback_selftest(p: &Peripherals, s: &mut Slave, rf: &mut RegFile, addr: u16) -> Loopback {
+    let addr = addr as u8;
     let mut iface = [0u8; 1];
     let r1 = crate::i2c::read_reg_pumped(p, addr, regmap::DBG_IFACE, &mut iface, || poll(p, s, rf));
     let mut ver = [0u8; 1];

@@ -40,6 +40,36 @@ just example run   hello-c # build + flash one example
 host** (Docker on macOS has no USB passthrough) and need the msp430-macos-dev skill's one-time
 setup (x86_64 mspdebug + signed `libmsp430.dylib`).
 
+### One `just build <chip>`, two link toolchains
+
+Every stem firmware builds through **one chip-primary command** — `just build <chip>` — which routes
+to the right firmware module and the right linker toolchain. The split is by the target's linker, not
+by whim:
+
+| Firmware class | Reached by | Target | Linker | Where it builds |
+|---|---|---|---|---|
+| **MSP430** product (`prod`) / POST (`diag`) | `just build fr2355` · `just build fr2355 --diag` | `msp430-none-elf` | TI **msp430-elf-gcc** (external) | **Docker** image (or native-with-setup / in-CI) |
+| **Cortex-M** bench host (`probe`) | `just build rp2040` | `thumbv6m` (RP2040) | **rust-lld** (built into Rust) | **host cargo** — Linux **and** macOS, no container |
+
+```bash
+just build fr2355           # FR2355 product (prod)                 → Docker
+just build fr2355 --diag    # FR2355 POST/self-test (diag)          → Docker
+just build rp2040           # RP2040 bench host (stem-probe, debug) → host cargo
+just build-all              # every DEFAULT image (MSP430 products + the probe)
+```
+
+`just build <chip>` is **chip-primary** (default class = prod; `--diag`/`--debug` pick otherwise) and
+delegates to the per-firmware modules (`prod`/`diag`/`probe`) — no logic duplicated. MSP430 chips go
+through Docker; **rp2040 links with `rust-lld` (ships with Rust) → no external linker, no container —
+plain host `cargo`, identical on Linux and macOS** (the crate's `rust-toolchain.toml` pins channel +
+triple; rustup auto-installs it). Flashing is always host-side (no USB in containers): `just probe
+flash` (picotool) for RP2040, `just prod flash` (mspdebug/hwd) for MSP430.
+
+**Adding a new Cortex-M firmware (RP2350 / nRF52 / CYPM1111 PD controller):** create its crate (with a
+`rust-toolchain.toml`) + a sibling firmware module like `probe.just`, then add a `case` arm to the
+top-level `build` recipe. (A PD build via Infineon ModusToolbox C would need its own build verb, not
+the cargo path — decide when its crate lands.)
+
 First-time setup — build the toolchain image once:
 
 ```bash

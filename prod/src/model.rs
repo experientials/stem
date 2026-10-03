@@ -62,6 +62,24 @@ impl Model {
         }
     }
 
+    /// The node's Stem-bus I²C slave address, chosen by this model's **role** (see
+    /// [`../I2C-API.md`](../../I2C-API.md) "Stem address is ROLE-BASED"). The master reads *what it is
+    /// talking to* from the address alone; a dev stand-in cannot pose as the production supervisor.
+    /// Values live in the PCA9698 strap group 0x20–0x27. (0x21/0x22 are a derivation — adjust with the
+    /// I2C-API.md role table if the map changes.)
+    pub const fn stem_addr(self) -> u16 {
+        match self {
+            // Production sleep-supervisor
+            Model::Fr2355 | Model::Fr2155 => 0x20,
+            // DEV stand-in — SAME firmware as FR2355, distinct addr so it can't pose as the real one
+            Model::Fr2476 | Model::Fr2475 => 0x21,
+            // I/O-expander role — PLACEHOLDER until defined
+            Model::Fr2433 => 0x22,
+            // Unrecognised silicon: answer the supervisor base (boot already raises WRONG-FAMILY)
+            Model::Unknown(_) => 0x20,
+        }
+    }
+
     /// True if this model belongs to the family this image was compiled for (the active Cargo family
     /// feature). A mismatch = wrong-family flash → boot should refuse/flag rather than mis-drive pins.
     pub fn matches_build_family(self) -> bool {

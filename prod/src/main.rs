@@ -146,9 +146,19 @@ fn run_dual(p: &Peripherals) -> ! {
     bsp::board::route_console_uart_pins(p);
 
     let model = model::detect();
+    let stem_addr = model.stem_addr(); // role-based Stem I²C address (I2C-API.md): FR2355=0x20, FR2476=0x21
+
+    // Bring up the Stem-bus I²C SLAVE (eUSCI_B1) FIRST — it is the SoM's always-on control channel and
+    // must be reachable the instant we boot, regardless of sensor-bus state. (Previously it came up
+    // AFTER the Leaf enumerate, so a wedged/slow sensor bus — e.g. two masters contending — delayed or
+    // could indefinitely block the SoM's only way in. See DESIGN.md "Boot logic".) `stem::init` only
+    // configures eUSCI_B1 + its pins; the RegFile it serves is assembled once status is ready, below.
+    stem::init(p, stem_addr);
+    let mut slave = stem::Slave::new();
 
     // Enter the boot-default operating mode. In Sensing this ACQUIRES the sensor bus (B0 master); in
-    // Passive it ensures the bus is RELEASED (the SoM owns it). Runtime-switchable below.
+    // Passive it RELEASES it (the SoM owns it). Default is **Passive** — at boot the SoM/host is active
+    // and owns the buses; it commands Sensing only when it suspends (mode::Mode::default_boot).
     let mut mach = mode::ModeMachine::boot(p);
 
     // Sensor scan runs ONLY in Sensing (Passive never masters the sensor bus). It populates the
@@ -160,15 +170,14 @@ fn run_dual(p: &Peripherals) -> ! {
         enumerate::Scan::absent()
     };
 
-    // OLED boot splash — only when we master the sensor bus (Sensing) and an OLED answered. Shows the
-    // fw version + boot verdict for ~5 s, then turns the panel OFF (blank). In Passive the OLED is the
-    // SoM's to drive, so we don't touch it.
+    // OLED boot splash — only when we master the sensor bus (Sensing) and an OLED answered. In Passive
+    // the OLED is the SoM's to drive, so we don't touch it.
     if mach.is_sensing() {
         oled_splash(p, &last);
     }
 
-    // The Stem-bus I2C-slave surface (eUSCI_B1): the SoM reads this register file. `rf` holds the
-    // live status snapshot (+ PCA9698 shadow); `slave` is the per-transaction state. Polled below.
+    // Assemble the RegFile the Stem slave serves: live status snapshot (+ PCA9698 shadow). `slave` is
+    // the per-transaction state. Polled in the loop below.
     let mut st = if mach.is_sensing() {
         status::Status::from_scan(model, &last)
     } else {
@@ -176,8 +185,6 @@ fn run_dual(p: &Peripherals) -> ! {
     };
     st.set_mode(mach.current().code()); // publish the boot mode at MODE_CTRL (0x3E)
     let mut rf = stem::RegFile::new(st);
-    let mut slave = stem::Slave::new();
-    stem::init(p);
 
     // Dev observability: banner + human report + on-demand commands over the backchannel UART.
     #[cfg(feature = "console")]
@@ -203,9 +210,9 @@ fn run_dual(p: &Peripherals) -> ! {
         // — a short-lived agent reads the hwd console log but cannot send the `l` keystroke. No jumpers
         // → an honest "no response". Only meaningful in Sensing (B0 must be up as master).
         if mach.is_sensing() {
-            let lb = stem::loopback_selftest(p, &mut slave, &mut rf);
+            let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
             uart::puts(p, "loopback B0->B1 @0x");
-            uart::hex8(p, stem::STEM_ADDR as u8);
+            uart::hex8(p, stem_addr as u8);
             uart::puts(p, " (boot self-test): ");
             if !lb.ran {
                 uart::puts(p, "no response (fit jumpers ");
@@ -266,9 +273,9 @@ fn run_dual(p: &Peripherals) -> ! {
                     }
                     b'l' | b'L' => {
                         if mach.is_sensing() {
-                            let lb = stem::loopback_selftest(p, &mut slave, &mut rf);
+                            let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
                             uart::puts(p, "loopback B0->B1 @0x");
-                            uart::hex8(p, stem::STEM_ADDR as u8);
+                            uart::hex8(p, stem_addr as u8);
                             uart::puts(p, ": ");
                             if !lb.ran {
                                 uart::puts(p, "no response (jumper ");
@@ -390,7 +397,8 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     st.set_mode(regmap::MODE_CODE_PASSIVE);
     let mut rf = stem::RegFile::new(st);
     let mut slave = stem::Slave::new();
-    stem::init(p); // eUSCI_B0 as I²C slave @ STEM_ADDR on P1.2/P1.3
+    let stem_addr = model.stem_addr(); // role-based (I2C-API.md): FR2433 = 0x22 (I/O-expander placeholder)
+    stem::init(p, stem_addr); // eUSCI_B0 as I²C slave @ stem_addr on P1.2/P1.3
 
     // Dev console (`console` feature): a locked 1 MHz clock (clean UART baud) + the eUSCI_A0 backchannel
     // on P1.4/P1.5 (distinct from UCB0 on P1.2/P1.3 — no pin clash). Print the banner + debug window
@@ -410,7 +418,7 @@ fn run_fr24xx(p: &Peripherals) -> ! {
         uart::puts(p, " (");
         uart::puts(p, model_name(model));
         uart::puts(p, ") fr24xx Passive — I2C-slave @0x");
-        uart::hex8(p, stem::STEM_ADDR as u8);
+        uart::hex8(p, stem_addr as u8);
         uart::puts(p, " up ==\n");
         if !model.matches_build_family() {
             uart::puts(p, "!! WRONG-FAMILY FLASH: detected part is not in this image's family\n");

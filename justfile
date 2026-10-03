@@ -8,11 +8,12 @@
 # from the msp430-macos-dev skill (x86_64 mspdebug + signed libmsp430.dylib).
 #
 #   just                       list recipes
-#   just build                 build every example
-#   just probe                 read the connected FR2476 id (no flash)
+#   just build <chip>          build a board's firmware (fr2355|fr2476|fr2433|fr2155|rp2040; --diag = POST)
+#   just build-all             build every default firmware image
+#   just msp-id                read the connected MSP430 device id (no flash)
 #   just check deps            verify the toolchain
 #   just example build <name>  build one example (C make / Rust cargo, auto-detected)
-#   just example run   <name>  build + flash one example
+#   just examples              build every example (smoke test)
 
 # Default to the locally-built image. Only the HOST uses this (CI builds inside the
 # image, so it never pulls). Once toolchain-image.yml pushes to GHCR, you can set
@@ -25,30 +26,77 @@ libdir   := env_var_or_default("MSP430_LIBDIR", "/usr/local/lib")
 mod check
 mod example
 mod pac
-mod diag
-mod prod
+mod diag       # MSP430 POST/diagnostic firmware (Docker toolchain)
+mod prod       # MSP430 product Stembus node firmware (Docker toolchain; family axis)
+mod probe      # RP2040 bench-host firmware (debug/stem-probe) — host cargo, Linux+macOS
 mod usb
 mod bsp
 
 default:
     @just --list
 
+# Build a BOARD's firmware — chip-primary. `just build <chip>` builds its default image; `--diag` /
+# `--debug` select the POST or debug class instead. Routes to the prod/diag/probe module per chip+class
+# (no logic duplicated). MSP430 chips build via Docker; rp2040 via host cargo — both Linux + macOS.
+#   just build fr2355            FR2355 product (prod)                 → Docker toolchain
+#   just build fr2355 --diag     FR2355 POST/self-test (diag)          → Docker toolchain
+#   just build rp2040            RP2040 bench host (stem-probe, debug) → host cargo
+#   chips: fr2355 | fr2476 | fr2433 | fr2155 | rp2040   (default class = prod; rp2040 = debug)
+build target *flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cls=default
+    for f in {{flags}}; do case "${f#--}" in
+        diag) cls=diag;; debug) cls=debug;; prod) cls=prod;;
+        *) echo "unknown flag '$f' — use --diag | --debug" >&2; exit 1;; esac; done
+    case "{{target}}" in
+        fr2355|fr235x) fam=fr235x; diagt=fr2355; kind=msp ;;
+        fr2476|fr247x) fam=fr247x; diagt=fr2476; kind=msp ;;
+        fr2433|fr24xx) fam=fr24xx; diagt="";     kind=msp ;;  # no diag image for FR2433
+        fr2155|fr215x) fam=fr215x; diagt=fr2155; kind=msp ;;
+        rp2040)        kind=cortex ;;
+        *) echo "unknown chip '{{target}}' — fr2355|fr2476|fr2433|fr2155|rp2040" >&2; exit 1 ;;
+    esac
+    if [ "$kind" = msp ]; then
+        [ "$cls" = default ] && cls=prod
+        case "$cls" in
+            prod)  just prod build "$fam" ;;
+            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;
+            debug) echo "no debug firmware for MSP430 {{target}}" >&2; exit 1 ;;
+        esac
+    else  # cortex (rp2040): its only firmware is the debug bench host
+        case "$cls" in
+            default|debug|prod) just probe build ;;
+            diag) echo "no diag image for {{target}}" >&2; exit 1 ;;
+        esac
+    fi
+
+# Build every DEFAULT firmware image: MSP430 products (Docker) + the RP2040 bench host (host cargo).
+# One command, same justfile, Linux + macOS. Slow on macOS (MSP430 builds run under Rosetta amd64).
+build-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== MSP430 products (Docker toolchain) =="
+    for chip in fr2355 fr2476 fr2433; do just build "$chip"; done
+    echo "== RP2040 bench host (host cargo, rust-lld) =="
+    just build rp2040
+
 # build the toolchain Docker image locally (run once)
 bootstrap:
     docker build --platform linux/amd64 -t {{image}} docker/
 
-# build every example (in the container on a host; natively in CI)
-build:
+# build every example (smoke test; in the container on a host, natively in CI)
+examples:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -f /.dockerenv ]; then
         for d in examples/*/; do just example build "$(basename "$d")"; done
     else
-        docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work {{image}} just build
+        docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work {{image}} just examples
     fi
 
-# read the connected FR2476 device id (no flash)
-probe:
+# read the connected MSP430 device id (no flash)
+msp-id:
     DYLD_FALLBACK_LIBRARY_PATH={{libdir}} {{mspdebug}} tilib exit
 
 # watch the UART console (eZ-FET backchannel, 9600 8N1). Ctrl-C to stop.

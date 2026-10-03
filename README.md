@@ -23,36 +23,49 @@ battery/rail-monitoring supervisor part. Both builds are footprint-gated in CI
 
 ## Prerequisites
 
-- **Docker** — builds run inside a pinned Linux toolchain image (msp430-gcc + Rust nightly). On
-  Apple Silicon that image is amd64 under emulation.
-- **`just`** — the command runner.
-- **Flashing (macOS host):** a one-time `mspdebug` setup (x86_64 mspdebug + signed
-  `libmsp430.dylib`) from the **msp430-macos-dev** skill. USB never goes through Docker.
+- **`just`** — the command runner (one entry point: `just build <chip>`).
+- **Docker** — only for the **MSP430** build (TI's `msp430-elf-gcc` linker lives in the pinned image;
+  amd64, emulated on Apple Silicon). The **RP2040** build needs no container — host `cargo` + `rust-lld`.
+- **Flashing (host, USB — never through Docker):** MSP430 needs the one-time `mspdebug` setup (x86_64
+  mspdebug + signed `libmsp430.dylib`) from the **msp430-macos-dev** skill; RP2040 needs **picotool**
+  (`brew install picotool` on macOS).
 
 ## Build
 
+One **chip-primary** command builds any board's firmware — it routes to the right firmware class and
+link toolchain automatically:
+
 ```sh
-just bootstrap        # once: build the toolchain image locally (only needed for the Docker path)
-just diag build       # build diag/ — native if set up, else the Docker image
-just check deps       # verify the toolchain
+just build fr2355          # FR2355 product (prod)          → Docker toolchain
+just build fr2355 --diag   # FR2355 POST/self-test (diag)   → Docker toolchain
+just build rp2040          # RP2040 bench host (stem-probe) → host cargo (no container)
+just build-all             # every default image (MSP430 products + the RP2040 probe)
+
+just bootstrap             # once: build the MSP430 toolchain image (Docker path only)
+just check deps            # verify the toolchain
 ```
 
-`just diag build` auto-selects the fastest path: the **native** toolchain if it's installed (no
-emulation), otherwise the **Docker** image; inside CI it builds in-container. Override with
-`just diag build docker|native|fast|docker-fast`. This only sets the LOCAL default — shipped
-artifacts are always built on CI.
+Chips: `fr2355 | fr2476 | fr2433 | fr2155 | rp2040`. Default class = **prod**; `--diag` / `--debug`
+pick the POST or debug image instead. **Two link toolchains, one command:** MSP430 needs TI's
+`msp430-elf-gcc` → the **Docker** image (amd64, emulated on Apple Silicon); RP2040 links with
+`rust-lld` (ships with Rust) → plain **host `cargo`**, no container, Linux + macOS alike. Full detail:
+[TOOLCHAIN.md](TOOLCHAIN.md#one-just-build-chip-two-link-toolchains).
 
-**Faster local loop (macOS/Linux):** one-time `bash scripts/setup-native-macos.sh` installs the
-native toolchain (segregated — never your system `rustc`; check with `just diag doctor`). After that
-`just diag build` is native, and **`just diag dev`** is the sub-minute build+flash inner loop.
+Under the hood `just build <chip>` delegates to the per-firmware modules — `just prod build <family>`,
+`just diag build <part>`, `just probe build` — which you can also call directly.
+
+**Faster MSP430 local loop:** one-time `bash scripts/setup-native-macos.sh` installs a segregated
+native toolchain (never your system `rustc`; check with `just diag doctor`). After that the MSP430
+build is native (no emulation) and **`just diag dev`** is the sub-minute build+flash inner loop.
 Detail in [TOOLCHAIN.md](TOOLCHAIN.md#native-macos-build-optional-segregated).
 
 ## Flash
 
 ```sh
-just diag run         # build + flash + VERIFY the running firmware reports the stamp  ← everyday command
-just diag flash       # flash the last build (no rebuild); 'just diag flash fast' for the fast profile
-just monitor          # watch the 9600 8N1 backchannel UART (auto-detects the port)
+just diag run         # MSP430: build + flash + VERIFY the firmware reports the stamp  ← everyday bring-up
+just prod flash fr247x # MSP430: flash a built product image (host; mspdebug / thepia hwd)
+just probe flash      # RP2040: build + flash the bench host (picotool, USB BOOTSEL)
+just monitor          # watch the 9600 8N1 backchannel UART (MSP430; auto-detects the port)
 just usb status       # diagnose the eZ-FET USB if it drops off (hub/latch/short)
 ```
 
