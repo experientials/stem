@@ -8,12 +8,13 @@
 #   - The stable toolchain is invoked by ABSOLUTE path with RUSTC pinned, because an old
 #     /usr/local/bin/cargo (1.64) shadows rustup on PATH and cargo falls back to rustc 1.64.
 #
-# Usage: scripts/gen-pac.sh [device ...]   (default: msp430fr2433 msp430fr2476)
+# Usage: scripts/gen-pac.sh [device ...]
+#        (default: all four vendored PACs — msp430fr2433 msp430fr2476 msp430fr2155 msp430fr2355)
 set -eu
 
 SVD2RUST_VERSION=v0.37.1
 MSP430_SVD_REPO=https://github.com/pftbest/msp430_svd
-DEVICES="${*:-msp430fr2433 msp430fr2476}"
+DEVICES="${*:-msp430fr2433 msp430fr2476 msp430fr2155 msp430fr2355}"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)   # stem/
 WORK=$(mktemp -d)
