@@ -107,8 +107,35 @@ const fn parse_u8(s: &str) -> u8 {
 // Watchdog control (common across MSP430 FRAM parts). WDTPW is the write password; WDTHOLD stops it.
 const WDTPW: u16 = 0x5A00;
 const WDTHOLD: u16 = 0x0080;
+// Reset-mode hang backstop (mirrors diag/src/main.rs): ACLK(REFO)-clocked, /2^19 ≈ 16 s, WDTTMSEL=0
+// (reset mode). A hang past ~16 s resets the node instead of wedging it. ACLK=REFO is the default, so
+// this works even on the clock-less silent fr24xx path. WDTCNTCL reloads the counter ("pet").
+const WDTSSEL_ACLK: u16 = 0x0020;
+const WDTIS_DIV_2E19: u16 = 0x0003;
+const WDTCNTCL: u16 = 0x0008;
+const WDT_BACKSTOP: u16 = WDTPW | WDTSSEL_ACLK | WDTIS_DIV_2E19;
 // PM5CTL0.LOCKLPM5 — set out of reset on FRAM parts; must be cleared to make GPIO live.
 const LOCKLPM5: u16 = 0x0001;
+
+/// Arm the ~16 s reset-mode watchdog backstop — call ONCE, after the deterministic bring-up (so a
+/// slow-but-normal boot, e.g. the ~5 s OLED splash, doesn't trip it). Per-family field name only.
+#[inline(always)]
+fn arm_wdt_backstop(p: &Peripherals) {
+    #[cfg(feature = "_dual")]
+    p.wdt_a.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP) });
+    #[cfg(feature = "fr24xx")]
+    p.watchdog_timer.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP) });
+}
+
+/// Pet the backstop (reload its counter) — call every serve-loop pass. A loop that stops petting
+/// (a genuine hang) resets the node. Rewrites the full config + WDTCNTCL (the only safe WDTCTL write).
+#[inline(always)]
+fn pet_wdt(p: &Peripherals) {
+    #[cfg(feature = "_dual")]
+    p.wdt_a.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP | WDTCNTCL) });
+    #[cfg(feature = "fr24xx")]
+    p.watchdog_timer.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP | WDTCNTCL) });
+}
 
 #[entry]
 fn main() -> ! {
@@ -116,10 +143,10 @@ fn main() -> ! {
     // scaffold is single-threaded with no ISRs yet, so exclusive access is trivially upheld.
     let p = unsafe { Peripherals::steal() };
 
-    // Hold the watchdog during bring-up. The shipping node will instead run the WDT in reset mode as
-    // a hang backstop (see diag/src/main.rs WDT_BACKSTOP) and pet it from the main loop. (The only
-    // per-family delta in the scaffold: the WDT peripheral field name — fr247x `wdt_a` vs fr24xx
-    // `watchdog_timer`; same UCS/WDTCTL register underneath.)
+    // HOLD the watchdog during bring-up (deterministic, unguarded — clock/pins/enumerate/splash), then
+    // `arm_wdt_backstop` right before the serve loop switches it to the ~16 s reset-mode backstop which
+    // `pet_wdt` reloads each pass (see the helpers above; mirrors diag). (Per-family delta: the WDT
+    // field name — dual `wdt_a` vs fr24xx `watchdog_timer`; same WDTCTL register underneath.)
     #[cfg(feature = "_dual")]
     p.wdt_a.wdtctl().write(|w| unsafe { w.bits(WDTPW | WDTHOLD) });
     #[cfg(feature = "fr24xx")]
@@ -230,116 +257,104 @@ fn run_dual(p: &Peripherals) -> ! {
                 }
             }
         }
-        // Incremental Leaf enumerate state (ADR-0006): a Sensing switch arms this; the loop advances it
-        // a few probes per pass so the Stem slave + console never stall on the scan.
-        let mut scan_job: Option<enumerate::ScanJob> = None;
-        loop {
-            stem::poll(p, &mut slave, &mut rf); // service the SoM/Stem master
-            let _scan_done = pump_scan(p, &mach, &mut rf, model, &mut last, &mut scan_job); // advance scan
-            // --debug: when a Sensing scan COMPLETES (SoM/Pico commanded Sensing over Stem), auto-print
-            // what was found + the Leaf diagnostic — no keystroke needed (the node's own console is flaky).
-            #[cfg(feature = "debug")]
-            if _scan_done {
-                enumerate::report(p, &last);
-                post::debug_leaf(p);
-            }
-            // A SoM write to MODE_CTRL (0x3E) queues a mode switch; begin it here (non-blocking).
-            if let Some(code) = rf.take_mode_request() {
-                match mode::Mode::from_code(code) {
-                    Some(m) if m != mach.current() => {
-                        begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, m);
-                        #[cfg(feature = "debug")]
-                        {
-                            uart::puts(p, "mode (SoM) -> ");
-                            uart::puts(p, mach.current().name());
-                            uart::putc(p, b'\n');
-                        }
-                    }
-                    Some(_) => {} // already in that mode — nothing to do
-                    None => {
-                        #[cfg(feature = "debug")]
-                        {
-                            uart::puts(p, "mode (SoM): ignoring unsupported code 0x");
-                            uart::hex8(p, code);
-                            uart::putc(p, b'\n');
-                        }
+    }
+
+    // Arm the hang backstop now that the deterministic bring-up — incl. the ~5 s OLED splash and any
+    // console boot prints — is done. From here a hang past ~16 s resets the node instead of wedging it.
+    arm_wdt_backstop(p);
+
+    // ONE cooperative serve loop for EVERY dual build (ADR-0006): service the Stem slave and advance
+    // the Leaf enumerate incrementally each pass so neither a scan nor a mode switch stalls the SoM's
+    // control channel. The console/`debug` extras (auto-report + interactive s/r/d/m/l commands) are
+    // cfg-gated INSIDE this one loop — previously this was two near-identical loops (console vs silent).
+    let mut scan_job: Option<enumerate::ScanJob> = None;
+    loop {
+        pet_wdt(p); // reload the backstop; a genuine hang stops petting → reset
+        stem::poll(p, &mut slave, &mut rf); // service the SoM/Stem master
+        let _scan_done = pump_scan(p, &mach, &mut rf, model, &mut last, &mut scan_job); // advance scan
+        // --debug: when a Sensing scan COMPLETES (SoM/Pico commanded Sensing over Stem), auto-print
+        // what was found + the Leaf diagnostic — no keystroke needed (the node's own console is flaky).
+        #[cfg(feature = "debug")]
+        if _scan_done {
+            enumerate::report(p, &last);
+            post::debug_leaf(p);
+        }
+        // A SoM write to MODE_CTRL (0x3E) queues a mode switch; begin it here (non-blocking).
+        if let Some(code) = rf.take_mode_request() {
+            match mode::Mode::from_code(code) {
+                Some(m) if m != mach.current() => {
+                    begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, m);
+                    #[cfg(feature = "debug")]
+                    {
+                        uart::puts(p, "mode (SoM) -> ");
+                        uart::puts(p, mach.current().name());
+                        uart::putc(p, b'\n');
                     }
                 }
-            }
-            #[cfg(feature = "debug")]
-            if uart::rx_ready(p) {
-                match uart::getc(p) {
-                    b's' | b'S' => {
-                        if mach.is_sensing() {
-                            // Manual dev scan: synchronous is fine for an explicit keystroke. Cancel any
-                            // incremental job so it can't later overwrite this fresh result.
-                            scan_job = None;
-                            last = enumerate::scan(p);
-                            enumerate::report(p, &last);
-                            rf.status = status::Status::from_scan(model, &last);
-                            rf.status.set_mode(mach.current().code());
-                        } else {
-                            uart::puts(p, "  (passive: not mastering the sensor bus)\n");
-                        }
+                Some(_) => {} // already in that mode — nothing to do
+                None =>
+                {
+                    #[cfg(feature = "debug")]
+                    {
+                        uart::puts(p, "mode (SoM): ignoring unsupported code 0x");
+                        uart::hex8(p, code);
+                        uart::putc(p, b'\n');
                     }
-                    b'r' | b'R' => enumerate::report(p, &last),
-                    b'd' | b'D' => rf.status.dump(p),
-                    b'm' | b'M' => {
-                        let next = mach.current().toggled();
-                        begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, next);
-                        uart::puts(p, "mode -> ");
-                        uart::puts(p, mach.current().name());
-                        if mach.is_sensing() {
-                            uart::puts(p, "  (Leaf enumerate running incrementally; 'd'/'s' to see it)\n");
-                        } else {
-                            uart::puts(p, "  sensor bus released (SoM owns it)\n");
-                        }
-                    }
-                    b'l' | b'L' => {
-                        if mach.is_sensing() {
-                            let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
-                            uart::puts(p, "loopback B0->B1 @0x");
-                            uart::hex8(p, stem_addr as u8);
-                            uart::puts(p, ": ");
-                            if !lb.ran {
-                                uart::puts(p, "no response (jumper ");
-                                uart::puts(p, stem::LOOPBACK_JUMPER_HINT);
-                                uart::puts(p, "?)\n");
-                            } else {
-                                uart::puts(p, "iface=0x");
-                                uart::hex8(p, lb.iface);
-                                uart::puts(p, " verMaj=");
-                                uart::dec(p, lb.ver_major as u16);
-                                uart::puts(p, if lb.passed() { "  PASS\n" } else { "  FAIL\n" });
-                            }
-                        } else {
-                            uart::puts(p, "  (loopback needs Sensing: B0 must master the bus)\n");
-                        }
-                    }
-                    b'\r' | b'\n' => {}
-                    _ => uart::puts(p, "  (s=scan r=report d=debug m=mode l=loopback)\n"),
                 }
             }
         }
-    }
-
-    // Production (console off): state lives in the register file, served over the eUSCI_B1 I2C-slave
-    // surface. Poll it forever — this is the node's whole job until wake/INT logic lands.
-    #[cfg(not(feature = "console"))]
-    {
-        // Production: the boot-default mode is active (its entry action already ran in `boot`). Runtime
-        // switches arrive as a SoM write to MODE_CTRL (0x3E), begun here out of the slave poll
-        // (non-blocking — the Leaf enumerate is advanced incrementally by `pump_scan`, ADR-0006).
-        let mut scan_job: Option<enumerate::ScanJob> = None;
-        loop {
-            stem::poll(p, &mut slave, &mut rf);
-            pump_scan(p, &mach, &mut rf, model, &mut last, &mut scan_job);
-            if let Some(code) = rf.take_mode_request() {
-                if let Some(m) = mode::Mode::from_code(code) {
-                    if m != mach.current() {
-                        begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, m);
+        #[cfg(feature = "debug")]
+        if uart::rx_ready(p) {
+            match uart::getc(p) {
+                b's' | b'S' => {
+                    if mach.is_sensing() {
+                        // Manual dev scan: synchronous is fine for an explicit keystroke. Cancel any
+                        // incremental job so it can't later overwrite this fresh result.
+                        scan_job = None;
+                        last = enumerate::scan(p);
+                        enumerate::report(p, &last);
+                        rf.status = status::Status::from_scan(model, &last);
+                        rf.status.set_mode(mach.current().code());
+                    } else {
+                        uart::puts(p, "  (passive: not mastering the sensor bus)\n");
                     }
                 }
+                b'r' | b'R' => enumerate::report(p, &last),
+                b'd' | b'D' => rf.status.dump(p),
+                b'm' | b'M' => {
+                    let next = mach.current().toggled();
+                    begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, next);
+                    uart::puts(p, "mode -> ");
+                    uart::puts(p, mach.current().name());
+                    if mach.is_sensing() {
+                        uart::puts(p, "  (Leaf enumerate running incrementally; 'd'/'s' to see it)\n");
+                    } else {
+                        uart::puts(p, "  sensor bus released (SoM owns it)\n");
+                    }
+                }
+                b'l' | b'L' => {
+                    if mach.is_sensing() {
+                        let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
+                        uart::puts(p, "loopback B0->B1 @0x");
+                        uart::hex8(p, stem_addr as u8);
+                        uart::puts(p, ": ");
+                        if !lb.ran {
+                            uart::puts(p, "no response (jumper ");
+                            uart::puts(p, stem::LOOPBACK_JUMPER_HINT);
+                            uart::puts(p, "?)\n");
+                        } else {
+                            uart::puts(p, "iface=0x");
+                            uart::hex8(p, lb.iface);
+                            uart::puts(p, " verMaj=");
+                            uart::dec(p, lb.ver_major as u16);
+                            uart::puts(p, if lb.passed() { "  PASS\n" } else { "  FAIL\n" });
+                        }
+                    } else {
+                        uart::puts(p, "  (loopback needs Sensing: B0 must master the bus)\n");
+                    }
+                }
+                b'\r' | b'\n' => {}
+                _ => uart::puts(p, "  (s=scan r=report d=debug m=mode l=loopback)\n"),
             }
         }
     }
@@ -485,9 +500,12 @@ fn run_fr24xx(p: &Peripherals) -> ! {
         uart::puts(p, if gp { "PASS\n" } else { "FAIL\n" });
     }
 
-    // Serve the slave surface forever. A SoM write to MODE_CTRL (0x3E) has nowhere to go on a
-    // Passive-only part — drain and ignore it so the request can't wedge; reads still return PASSIVE.
+    // Arm the hang backstop (deterministic bring-up done). Serve the slave surface forever. A SoM write
+    // to MODE_CTRL (0x3E) has nowhere to go on a Passive-only part — drain and ignore it so the request
+    // can't wedge; reads still return PASSIVE.
+    arm_wdt_backstop(p);
     loop {
+        pet_wdt(p); // reload the backstop; a hang in the serve loop resets the node
         stem::poll(p, &mut slave, &mut rf);
         let _ = rf.take_mode_request();
     }
