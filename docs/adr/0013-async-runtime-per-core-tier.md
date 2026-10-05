@@ -1,6 +1,6 @@
 # ADR-0013 · Async runtime per core tier — embassy on Cortex-M/host, a `core`-only async `sched` on MSP430
 
-Status: Accepted (tier split) · Proposed (async-`sched` evolution — size spike DONE: code parity; stack-depth pass pending)
+Status: Accepted (tier split) · Proposed (async-`sched` evolution — spikes DONE: RAM/stack favorable, code ~+0.5 KB/subsystem; decide per-subsystem)
 Date: 2026-10-05   Source: Henrik 2026-10-05 ("can we use embassy on MSP prod?" → "can we write async/await and execute with our own sched, resolving it all at compile time to the same size?")
 
 ## Context
@@ -65,25 +65,44 @@ prove it by building a **minimal prototype** (`core`-only executor + one `async`
 hand-rolled `select`) and **comparing the FR2433 size gate** against the current hand-written loop
 before committing. Code-size parity is expected; the RAM delta is the risk to measure.
 
-### Spike result (2026-10-05) — MEASURED: code-size parity confirmed
-Built a throwaway crate (same target/profile/`memory-fr2433.x`, `opt="s"`+LTO, pinned nightly) doing
-identical work two ways: a hand-written incremental state machine vs the same work as `async fn` +
-a `core`-only no-op-waker join executor. `msp430-elf-size`:
+### Spike results (2026-10-05) — two models; the REALISTIC one is the one to trust
 
-| Build | text | data | bss | FRAM | static SRAM |
-|---|---|---|---|---|---|
-| hand-written state machine | 170 | 0 | 0 | **170 B** | 0 |
-| async + `core` executor | 174 | 0 | 0 | **174 B** | 0 |
+All builds: same target/profile/`memory-fr2433.x`, `opt="s"`+LTO, pinned nightly, pure `core`
+executor (no embassy). Two models, hand-written state machines vs the same work as `async fn`:
 
-**+4 bytes code, 0 static RAM.** The symbol dump shows the whole substrate (both futures, `yield_now`,
-waker, `Context`, join loop) collapsed under LTO into a single 64-byte `run` — the async machinery
-resolves at compile time to ~the same code the hand version emits. Built on pure `core` / the pinned
-nightly, confirming no toolchain blocker. **Caveats:** (1) this isolates the *substrate* cost; real
-firmware scales with the number of task state machines (the same ones you'd hand-write). (2) `bss=0`
-because the stack-pinned futures keep their state on the **stack**, which `size` doesn't measure — so
-*static*-RAM overhead is zero, but **stack-resident future-state depth is not yet quantified**; do a
-`-Z emit-stack-sizes` / high-water-mark pass before a full migration. Spike kept at
-`scratchpad/async-spike/`.
+**(a) Trivial substrate floor** (2 futures, one `.await` each): hand 170 B / async 174 B FRAM —
+**+4 B, 0 RAM**. The whole substrate collapsed into one 64-B `run`. *But this is unrepresentative* —
+too simple to exercise the per-future `poll`/resume/drop glue. Do not quote it as the real cost.
+
+**(b) Realistic model** (3 concurrent machines: HIGH-pri Stem-slave service with a 16-B shadow;
+LOWER-pri Leaf scan with a NESTED multi-`.await` `read_reg` + live buffer; mode/console):
+
+| Dimension | hand | async | delta |
+|---|---|---|---|
+| **Code** (FRAM text) | 506 B | 1042 B | **+536 B (~2.1×)** |
+| Static RAM (data+bss) | 0 | 0 | 0 |
+| Persistent state, all 3 machines | 29 B | 51 B | +22 B |
+| **Peak stack frame (shared, single)** | 28 B | 52 B | +24 B |
+
+Per-machine state (`-Z print-type-sizes`): async leaf_scan 26 / slave 21 / mode 4; hand ScanJob 12
+(Option<ReadReg> 10) / SlaveJob 16 / ModeJob 1.
+
+**Findings:**
+- **RAM model confirmed favorable — NO per-loop stacks.** Disassembly shows exactly ONE significant
+  stack adjustment per binary (`sub #52,r1` async / `sub #28,r1` hand): the three machines live as
+  locals in the single `run` frame (≈ the summed state), transient polls (`bus_*`, ~8–10 B leaves)
+  layer shallowly on top. Parallel cost per machine = its small state struct (4–26 B), summed into
+  one shared stack — not N reserved stacks. 0 static RAM.
+- **Code size is the real cost, and it is NOT parity.** Async ~doubles the code here (+536 B) — the
+  generated per-future poll/resume/drop glue + poll-after-complete guards for the nested
+  `xfer→read_reg→leaf_scan` chain. On FR2433's 15 KB that's ~3.5% (prod ≈ 5 KB today, so affordable),
+  but it **scales with the count + nesting depth of `async fn`s**. Budget it; don't assume free.
+- Ergonomic win is real: the hand version needed an explicit `RrPhase` enum + `Option<ReadReg>`
+  threaded through `ScanJob`; async expresses it as plain `.await`.
+
+**Verdict:** viable on MSP430 (pure `core`, no toolchain blocker, favorable RAM/stack model), but
+code-size costs ~+0.5 KB per realistic subsystem — acceptable at prod's current footprint, a real
+line item as async spreads. Decide per-subsystem, not wholesale. Spike kept at `scratchpad/async-spike/`.
 
 ## Consequences
 - **Consistent model, right-sized runtime per tier**: one async/await programming style; embassy on
