@@ -36,7 +36,11 @@ owner's requirements captured **verbatim** — it is the anchor; everything else
 > mode-sensing is a gating of existing prod behavior, but also an attempt to become master of the bus
 > when switching to it. The modes are a runtime switch assuming they are included in the build
 
-_(captured 2026-09-21; modes added 2026-09-24)_
+> Prod should just log the version + checksums for rows/sectors to console. Unless built with --debug
+> in which case it should show output after POST about what was found. Not a full diag, but some basic
+> info
+
+_(captured 2026-09-21; modes added 2026-09-24; console/--debug logging added 2026-10-04)_
 
 ---
 

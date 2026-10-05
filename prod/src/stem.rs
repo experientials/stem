@@ -237,6 +237,12 @@ pub struct RegFile {
     /// inside `poll` (it'd re-enter the bus mid-transfer). The CURRENT mode is read back via
     /// `status.mode` (kept live by `Status::set_mode`), so reads need no special-casing here.
     mode_request: Option<u8>,
+    /// Per-sector FRAM CRC16 (ADR-0010): `[sec0_hi, sec0_lo, …]`, computed once at boot by
+    /// `post::fram_crcs` and set via [`set_crc`]. Served read-only over I²C at `DBG_CRC` (0x3F) through
+    /// a windowed cursor (the MSP only reports; the M7 judges).
+    crc: [u8; regmap::DBG_CRC_BYTES],
+    /// Byte index selected by a master WRITE to `DBG_CRC` (0x3F); a READ returns `crc[crc_cursor]`.
+    crc_cursor: u8,
 }
 
 impl RegFile {
@@ -247,7 +253,14 @@ impl RegFile {
             op: [0; regmap::BANKS as usize],
             ioc: [0; regmap::BANKS as usize],
             mode_request: None,
+            crc: [0; regmap::DBG_CRC_BYTES],
+            crc_cursor: 0,
         }
+    }
+
+    /// Store the boot-computed per-sector FRAM CRCs (from `post::fram_crcs`) for the M7 to read at 0x3F.
+    pub fn set_crc(&mut self, crc: [u8; regmap::DBG_CRC_BYTES]) {
+        self.crc = crc;
     }
 
     /// Take any pending SoM-requested mode code, clearing it. The main loop decodes it via
@@ -261,6 +274,11 @@ impl RegFile {
     fn read(&self, p: &Peripherals, reg: u8) -> u8 {
         #[cfg(feature = "_dual")]
         let _ = p;
+        // CRC readout window (ADR-0010): a prior WRITE to 0x3F set the byte cursor; return that CRC byte.
+        // Intercept before the generic Extended→status path (0x3F would otherwise read as reserved 0).
+        if reg == regmap::DBG_CRC {
+            return self.crc[self.crc_cursor as usize % regmap::DBG_CRC_BYTES];
+        }
         match regmap::decode(reg) {
             // Debug/identity window — the real state (identical to the bench UART dump).
             regmap::RegSel::Extended(_) => self.status.read_reg(reg),
@@ -299,6 +317,12 @@ impl RegFile {
         // transaction (decode(0x3E) is Extended, which is otherwise read-only → this must precede it).
         if reg == regmap::MODE_CTRL {
             self.mode_request = Some(val);
+            return;
+        }
+        // CRC window cursor (0x3F, ADR-0010): a WRITE selects which CRC byte the next READ returns.
+        // Data is read-only (boot-computed); the write only moves the cursor.
+        if reg == regmap::DBG_CRC {
+            self.crc_cursor = val;
             return;
         }
         match regmap::decode(reg) {

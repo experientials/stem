@@ -90,14 +90,18 @@ fn derive(prefix: &str, is_dev: bool) -> String {
 /// OUT_DIR to the linker search path. Exactly one family feature must be enabled (Cargo `[features]`).
 fn emit_memory_x() {
     let has = |f: &str| std::env::var_os(f).is_some();
-    // fr215x and fr235x (FR2155/FR2355) share the same 32 KB/4 KB map. Exactly one family is active
-    // (Cargo `[features]` + the compile_error guards in main.rs).
+    // Per-chip memory maps, GENERATED from TI's .ld by scripts/gen-memory-x.sh (validated by
+    // scripts/lint-memory-x.sh). Exactly one family feature is active (Cargo `[features]` + the
+    // compile_error guards in main.rs). fr215x→fr2155 and fr235x→fr2355 are now DISTINCT files (even
+    // though byte-identical) — no more silent sharing.
     let src = if has("CARGO_FEATURE_FR247X") {
-        "memory-fr247x.x"
-    } else if has("CARGO_FEATURE_FR215X") || has("CARGO_FEATURE_FR235X") {
-        "memory-fr215x.x"
+        "memory-fr2476.x"
+    } else if has("CARGO_FEATURE_FR215X") {
+        "memory-fr2155.x"
+    } else if has("CARGO_FEATURE_FR235X") {
+        "memory-fr2355.x"
     } else if has("CARGO_FEATURE_FR24XX") {
-        "memory-fr24xx.x"
+        "memory-fr2433.x"
     } else {
         panic!("prod: no family feature — build with --features fr247x|fr215x|fr235x|fr24xx");
     };

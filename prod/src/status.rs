@@ -17,18 +17,10 @@ use crate::uart;
 #[cfg(feature = "console")]
 use crate::pac::Peripherals;
 
-/// `DBG_STATUS` (0x37) flag bits.
-pub mod flags {
-    pub const BOOTED: u8 = 1 << 0; // firmware reached the run loop
-    pub const ENUMERATED: u8 = 1 << 1; // a sensor-bus scan has completed
-    pub const BUS_OK: u8 = 1 << 2; // the sensor bus scanned cleanly (not wedged)
-    pub const WRONG_FAMILY: u8 = 1 << 3; // detected part isn't in this image's family (bad flash)
-}
-
-/// `DBG_FAULT` (0x3A) flag bits.
-pub mod fault {
-    pub const BUS_WEDGED: u8 = 1 << 0; // SDA stuck low / all-ACK — enumeration unreliable
-}
+// `DBG_STATUS` (0x37) / `DBG_FAULT` (0x3A) flag bits — the shared definitions (one source: the
+// `stembus::flags` codec, so a master decodes exactly what this server sets). Re-exported under the
+// existing `flags::` / `fault::` paths so the call sites below are unchanged.
+pub use stembus::flags::{fault, status as flags};
 
 /// The debug/status snapshot exposed at regmap 0x30–0x3F.
 pub struct Status {

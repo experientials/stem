@@ -75,6 +75,10 @@ mod stem;
 // eUSCI_A0 field-name difference (e_usci_a0 vs usci_a0_uart_mode) via a macro.
 #[cfg(feature = "console")]
 mod uart;
+// Boot POST: `post::fram_crcs` (per-sector FRAM CRC16) runs on EVERY build incl. silent (ADR-0010 —
+// the M7 reads the raw CRCs over I²C and judges). The UART echo (`boot_log`/`debug_leaf`) inside is
+// `console`/`debug`-gated. So the module is ALWAYS compiled.
+mod post;
 
 /// Compiled-in identity stamp (see build.rs). Printed at boot once the UART stub lands.
 const FW_BUILD: &str = env!("PROD_BUILD");
@@ -186,69 +190,90 @@ fn run_dual(p: &Peripherals) -> ! {
     st.set_mode(mach.current().code()); // publish the boot mode at MODE_CTRL (0x3E)
     let mut rf = stem::RegFile::new(st);
 
+    // POST integrity (ADR-0010): compute the per-sector FRAM CRCs ONCE, ALWAYS (even the silent image),
+    // and store them for the M7 to read over I²C at DBG_CRC (0x3F). The MSP only reports; the M7 judges.
+    let crc = post::fram_crcs();
+    rf.set_crc(crc);
+
     // Dev observability: banner + human report + on-demand commands over the backchannel UART.
     #[cfg(feature = "console")]
     {
         uart::init(p);
-        uart::puts(p, "\n== prod v");
-        uart::puts(p, FW_VERSION); // human-facing version number (also debug regs 0x3B–0x3D)
-        uart::putc(p, b' ');
-        uart::puts(p, FW_BUILD);
-        uart::puts(p, " (");
-        uart::puts(p, model_name(model));
-        uart::puts(p, ") mode=");
-        uart::puts(p, mach.current().name());
-        uart::puts(p, " ==\n");
-        if !model.matches_build_family() {
-            uart::puts(p, "!! WRONG-FAMILY FLASH: detected part is not in this image's family\n");
-        }
-        uart::puts(p, "commands: s=scan  r=report  d=debug regs  m=switch mode  l=loopback self-test\n");
-        enumerate::report(p, &last);
-        rf.status.dump(p);
-        // Boot self-test: drive the eUSCI_B1 SLAVE from the eUSCI_B0 MASTER (needs the chip's Stem↔Leaf
-        // jumpers — see stem::LOOPBACK_JUMPER_HINT). Auto-run so hwd's READ-ONLY console captures PASS/FAIL with NO keystroke
-        // — a short-lived agent reads the hwd console log but cannot send the `l` keystroke. No jumpers
-        // → an honest "no response". Only meaningful in Sensing (B0 must be up as master).
-        if mach.is_sensing() {
-            let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
-            uart::puts(p, "loopback B0->B1 @0x");
-            uart::hex8(p, stem_addr as u8);
-            uart::puts(p, " (boot self-test): ");
-            if !lb.ran {
-                uart::puts(p, "no response (fit jumpers ");
-                uart::puts(p, stem::LOOPBACK_JUMPER_HINT);
-                uart::puts(p, ")\n");
-            } else {
-                uart::puts(p, "iface=0x");
-                uart::hex8(p, lb.iface);
-                uart::puts(p, " verMaj=");
-                uart::dec(p, lb.ver_major as u16);
-                uart::puts(p, if lb.passed() { "  PASS\n" } else { "  FAIL\n" });
+        // LEAN default (DESIGN.md console log, Henrik 2026-10-04): version + per-sector FRAM checksums.
+        post::boot_log(p, model, mach.current().name(), &crc);
+
+        // --debug: the post-POST "what was found" (enumerate report + debug regs + Leaf/eUSCI diagnostic)
+        // + the interactive s/r/d/m/l commands. "Not a full diag, but some basic info."
+        #[cfg(feature = "debug")]
+        {
+            uart::puts(p, "commands: s=scan  r=report  d=debug regs  m=switch mode  l=loopback self-test\n");
+            enumerate::report(p, &last);
+            rf.status.dump(p);
+            post::debug_leaf(p);
+            // Boot loopback self-test: eUSCI_B0 MASTER → eUSCI_B1 SLAVE (needs Stem↔Leaf jumpers,
+            // stem::LOOPBACK_JUMPER_HINT). Only meaningful in Sensing (B0 up as master).
+            if mach.is_sensing() {
+                let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
+                uart::puts(p, "loopback B0->B1 @0x");
+                uart::hex8(p, stem_addr as u8);
+                uart::puts(p, " (boot self-test): ");
+                if !lb.ran {
+                    uart::puts(p, "no response (fit jumpers ");
+                    uart::puts(p, stem::LOOPBACK_JUMPER_HINT);
+                    uart::puts(p, ")\n");
+                } else {
+                    uart::puts(p, "iface=0x");
+                    uart::hex8(p, lb.iface);
+                    uart::puts(p, " verMaj=");
+                    uart::dec(p, lb.ver_major as u16);
+                    uart::puts(p, if lb.passed() { "  PASS\n" } else { "  FAIL\n" });
+                }
             }
         }
+        // Incremental Leaf enumerate state (ADR-0006): a Sensing switch arms this; the loop advances it
+        // a few probes per pass so the Stem slave + console never stall on the scan.
+        let mut scan_job: Option<enumerate::ScanJob> = None;
         loop {
             stem::poll(p, &mut slave, &mut rf); // service the SoM/Stem master
-            // A SoM write to MODE_CTRL (0x3E) queues a mode switch; apply it here, out of the poll.
+            let _scan_done = pump_scan(p, &mach, &mut rf, model, &mut last, &mut scan_job); // advance scan
+            // --debug: when a Sensing scan COMPLETES (SoM/Pico commanded Sensing over Stem), auto-print
+            // what was found + the Leaf diagnostic — no keystroke needed (the node's own console is flaky).
+            #[cfg(feature = "debug")]
+            if _scan_done {
+                enumerate::report(p, &last);
+                post::debug_leaf(p);
+            }
+            // A SoM write to MODE_CTRL (0x3E) queues a mode switch; begin it here (non-blocking).
             if let Some(code) = rf.take_mode_request() {
                 match mode::Mode::from_code(code) {
                     Some(m) if m != mach.current() => {
-                        apply_mode(p, &mut mach, &mut rf, model, &mut last, m);
-                        uart::puts(p, "mode (SoM) -> ");
-                        uart::puts(p, mach.current().name());
-                        uart::putc(p, b'\n');
+                        begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, m);
+                        #[cfg(feature = "debug")]
+                        {
+                            uart::puts(p, "mode (SoM) -> ");
+                            uart::puts(p, mach.current().name());
+                            uart::putc(p, b'\n');
+                        }
                     }
                     Some(_) => {} // already in that mode — nothing to do
                     None => {
-                        uart::puts(p, "mode (SoM): ignoring unsupported code 0x");
-                        uart::hex8(p, code);
-                        uart::putc(p, b'\n');
+                        #[cfg(feature = "debug")]
+                        {
+                            uart::puts(p, "mode (SoM): ignoring unsupported code 0x");
+                            uart::hex8(p, code);
+                            uart::putc(p, b'\n');
+                        }
                     }
                 }
             }
+            #[cfg(feature = "debug")]
             if uart::rx_ready(p) {
                 match uart::getc(p) {
                     b's' | b'S' => {
                         if mach.is_sensing() {
+                            // Manual dev scan: synchronous is fine for an explicit keystroke. Cancel any
+                            // incremental job so it can't later overwrite this fresh result.
+                            scan_job = None;
                             last = enumerate::scan(p);
                             enumerate::report(p, &last);
                             rf.status = status::Status::from_scan(model, &last);
@@ -261,12 +286,11 @@ fn run_dual(p: &Peripherals) -> ! {
                     b'd' | b'D' => rf.status.dump(p),
                     b'm' | b'M' => {
                         let next = mach.current().toggled();
-                        apply_mode(p, &mut mach, &mut rf, model, &mut last, next);
+                        begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, next);
                         uart::puts(p, "mode -> ");
                         uart::puts(p, mach.current().name());
-                        uart::putc(p, b'\n');
                         if mach.is_sensing() {
-                            enumerate::report(p, &last);
+                            uart::puts(p, "  (Leaf enumerate running incrementally; 'd'/'s' to see it)\n");
                         } else {
                             uart::puts(p, "  sensor bus released (SoM owns it)\n");
                         }
@@ -304,13 +328,16 @@ fn run_dual(p: &Peripherals) -> ! {
     #[cfg(not(feature = "console"))]
     {
         // Production: the boot-default mode is active (its entry action already ran in `boot`). Runtime
-        // switches arrive as a SoM write to MODE_CTRL (0x3E), applied here out of the slave poll.
+        // switches arrive as a SoM write to MODE_CTRL (0x3E), begun here out of the slave poll
+        // (non-blocking — the Leaf enumerate is advanced incrementally by `pump_scan`, ADR-0006).
+        let mut scan_job: Option<enumerate::ScanJob> = None;
         loop {
             stem::poll(p, &mut slave, &mut rf);
+            pump_scan(p, &mach, &mut rf, model, &mut last, &mut scan_job);
             if let Some(code) = rf.take_mode_request() {
                 if let Some(m) = mode::Mode::from_code(code) {
                     if m != mach.current() {
-                        apply_mode(p, &mut mach, &mut rf, model, &mut last, m);
+                        begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, m);
                     }
                 }
             }
@@ -318,28 +345,64 @@ fn run_dual(p: &Peripherals) -> ! {
     }
 }
 
-/// Apply a mode switch — from the bench `m` key OR a SoM write to `MODE_CTRL` (0x3E). Centralises what
-/// both triggers must do so they can't drift: hand off the sensor bus (`ModeMachine::switch`), refresh
-/// the scan + the status snapshot the SoM reads, and republish the live mode code at 0x3E.
+/// Leaf probes advanced per main-loop pass during an incremental enumerate (ADR-0006). Small enough
+/// that a mode switch never stalls the Stem slave / console for long (even on a wedged bus, where each
+/// probe pays a recovery); large enough that the full 0x08–0x77 window finishes in a handful of passes.
 #[cfg(feature = "_dual")]
-fn apply_mode(
+const SCAN_BUDGET: u8 = 8;
+
+/// BEGIN a mode switch — from the bench `m` key OR a SoM write to `MODE_CTRL` (0x3E) — WITHOUT blocking
+/// the Stem control channel (ADR-0006). Does only the **fast** part inline: hand off the sensor bus
+/// (`ModeMachine::switch` = pin mux + eUSCI bring-up/reset) and republish the live mode at 0x3E so the
+/// SoM's readback is correct immediately. For Sensing it **arms an incremental Leaf enumerate** (via
+/// `*job`) that `pump_scan` advances between `stem::poll`s; the full scan NEVER runs here. Centralises
+/// what both triggers do so they can't drift.
+#[cfg(feature = "_dual")]
+fn begin_mode(
     p: &Peripherals,
     mach: &mut mode::ModeMachine,
     rf: &mut stem::RegFile,
     model: model::Model,
     last: &mut enumerate::Scan,
+    job: &mut Option<enumerate::ScanJob>,
     new: mode::Mode,
 ) {
-    mach.switch(p, new); // sequenced bus acquire/release (no-op if already there)
-    let mut st = if mach.is_sensing() {
-        *last = enumerate::scan(p);
-        status::Status::from_scan(model, last)
+    mach.switch(p, new); // sequenced bus acquire/release (no-op if already there) — fast, no scan
+    if mach.is_sensing() {
+        // Publish Sensing NOW; dev_count stays at the booted default until the incremental scan lands.
+        rf.status = status::Status::booted(model);
+        *job = Some(enumerate::ScanJob::new()); // enumerate runs in the loop, not here
     } else {
         *last = enumerate::Scan::absent();
-        status::Status::booted(model)
-    };
-    st.set_mode(mach.current().code());
-    rf.status = st;
+        rf.status = status::Status::booted(model);
+        *job = None; // leaving Sensing cancels any in-flight scan
+    }
+    rf.status.set_mode(mach.current().code());
+}
+
+/// Advance an in-flight incremental Leaf enumerate a little (if any), and publish the full status once
+/// it completes. Call once per main-loop pass, right after `stem::poll`, so the Stem slave + console
+/// keep breathing while a Sensing-mode scan runs (ADR-0006).
+/// Returns `true` on the pass that COMPLETES a scan (so a `--debug` caller can print what was found).
+#[cfg(feature = "_dual")]
+fn pump_scan(
+    p: &Peripherals,
+    mach: &mode::ModeMachine,
+    rf: &mut stem::RegFile,
+    model: model::Model,
+    last: &mut enumerate::Scan,
+    job: &mut Option<enumerate::ScanJob>,
+) -> bool {
+    if let Some(j) = job.as_mut() {
+        if let Some(done) = j.step(p, SCAN_BUDGET) {
+            *last = done;
+            rf.status = status::Status::from_scan(model, last);
+            rf.status.set_mode(mach.current().code());
+            *job = None;
+            return true;
+        }
+    }
+    false
 }
 
 /// Boot splash on a connected OLED: firmware version + boot success for ~5 s, then blank the panel
@@ -373,14 +436,7 @@ fn oled_splash(p: &Peripherals, scan: &enumerate::Scan) {
 /// Model name for the banner (no core::fmt on this budget). Used by both node paths under `console`.
 #[cfg(feature = "console")]
 fn model_name(m: model::Model) -> &'static str {
-    match m {
-        model::Model::Fr2476 => "FR2476",
-        model::Model::Fr2475 => "FR2475",
-        model::Model::Fr2155 => "FR2155",
-        model::Model::Fr2355 => "FR2355",
-        model::Model::Fr2433 => "FR2433",
-        model::Model::Unknown(_) => "UNKNOWN",
-    }
+    stembus::role::model_name(m.device_id()) // shared codec (one source; same labels as the masters)
 }
 
 /// FR24xx (FR2433) single-I²C **slave-only** node. Its whole job: answer the SoM's PCA9698-emulation
@@ -396,6 +452,9 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     let mut st = status::Status::booted(model);
     st.set_mode(regmap::MODE_CODE_PASSIVE);
     let mut rf = stem::RegFile::new(st);
+    // POST integrity (ADR-0010): per-sector FRAM CRCs, always — the M7 reads them over I²C at 0x3F.
+    let crc = post::fram_crcs();
+    rf.set_crc(crc);
     let mut slave = stem::Slave::new();
     let stem_addr = model.stem_addr(); // role-based (I2C-API.md): FR2433 = 0x22 (I/O-expander placeholder)
     stem::init(p, stem_addr); // eUSCI_B0 as I²C slave @ stem_addr on P1.2/P1.3
@@ -411,18 +470,12 @@ fn run_fr24xx(p: &Peripherals) -> ! {
         p.p1.p1sel1().modify(|r, w| unsafe { w.bits(r.bits() & !P1_UART_PINS) });
         p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | P1_UART_PINS) });
         uart::init(p);
-        uart::puts(p, "\n== prod v");
-        uart::puts(p, FW_VERSION);
-        uart::putc(p, b' ');
-        uart::puts(p, FW_BUILD);
-        uart::puts(p, " (");
-        uart::puts(p, model_name(model));
-        uart::puts(p, ") fr24xx Passive — I2C-slave @0x");
+        // Lean boot log: version + per-sector FRAM checksums (same as the dual node). fr24xx is
+        // Passive-only (no mode machine), so the mode name is the constant "passive".
+        post::boot_log(p, model, "passive", &crc);
+        uart::puts(p, "fr24xx I2C-slave @0x");
         uart::hex8(p, stem_addr as u8);
-        uart::puts(p, " up ==\n");
-        if !model.matches_build_family() {
-            uart::puts(p, "!! WRONG-FAMILY FLASH: detected part is not in this image's family\n");
-        }
+        uart::putc(p, b'\n');
         rf.status.dump(p); // the exact 0x30–0x3F bytes a master would read
         // Prove the physical GPIO bank backing end-to-end (no I²C master needed): drive P1.0 via the
         // regmap OP/IOC path and sense it back on IP. Auto-runs so hwd's READ-ONLY console captures

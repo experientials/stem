@@ -84,6 +84,59 @@ pub fn scan(p: &Peripherals) -> Scan {
     Scan { present: pr, faulted }
 }
 
+/// An **incremental** sensor-bus scan (ADR-0006). Same probing as [`scan`], but split so the caller
+/// advances it a few addresses per main-loop pass — `stem::poll` runs between steps, so the Stem slave
+/// + console never stall on a mode switch (the inline `scan` blocked them; on a wedged bus, badly).
+/// One-shot bus recovery happens on the first [`step`](ScanJob::step); the result is published once, when
+/// the address window is exhausted.
+pub struct ScanJob {
+    pr: Presence,
+    next: u8,         // next 7-bit address to probe; the job is complete once this passes HI
+    recovered: bool,  // did the one-shot recovery leave SDA free?
+    started: bool,    // has the first step run the recovery yet?
+}
+
+impl ScanJob {
+    pub const fn new() -> Self {
+        Self {
+            pr: Presence::new(),
+            next: LO,
+            recovered: false,
+            started: false,
+        }
+    }
+
+    /// Advance up to `budget` address probes. Returns `Some(Scan)` exactly once — on the step that
+    /// finishes the window — and `None` while more probing remains (or if called again after finishing).
+    pub fn step(&mut self, p: &Peripherals, budget: u8) -> Option<Scan> {
+        if self.next > HI {
+            return None; // already complete (and reported)
+        }
+        if !self.started {
+            // One-shot recovery up front (a slave holding SDA low would false-ACK every probe).
+            let (sda0, _) = i2c::bus_levels(p);
+            self.recovered = sda0 || i2c::recover(p);
+            self.started = true;
+        }
+        let mut bus = EusciI2c::new(p);
+        let mut did = 0u8;
+        while self.next <= HI && did < budget {
+            if devices::present(&mut bus, self.next) {
+                self.pr.set(self.next);
+            }
+            self.next += 1;
+            did += 1;
+        }
+        if self.next > HI {
+            let (sda1, _) = i2c::bus_levels(p);
+            let faulted = !self.recovered || !sda1 || self.pr.count() > SANITY_MAX;
+            let present = core::mem::replace(&mut self.pr, Presence::new());
+            return Some(Scan { present, faulted });
+        }
+        None
+    }
+}
+
 /// Report the enumeration over UART (console only). Leads with the bus level; on a fault it says so
 /// and prints the ACK count instead of 112 bogus per-address lines. Known devices are labeled.
 #[cfg(feature = "console")]

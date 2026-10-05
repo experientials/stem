@@ -68,16 +68,9 @@ impl Model {
     /// Values live in the PCA9698 strap group 0x20–0x27. (0x21/0x22 are a derivation — adjust with the
     /// I2C-API.md role table if the map changes.)
     pub const fn stem_addr(self) -> u16 {
-        match self {
-            // Production sleep-supervisor
-            Model::Fr2355 | Model::Fr2155 => 0x20,
-            // DEV stand-in — SAME firmware as FR2355, distinct addr so it can't pose as the real one
-            Model::Fr2476 | Model::Fr2475 => 0x21,
-            // I/O-expander role — PLACEHOLDER until defined
-            Model::Fr2433 => 0x22,
-            // Unrecognised silicon: answer the supervisor base (boot already raises WRONG-FAMILY)
-            Model::Unknown(_) => 0x20,
-        }
+        // Delegate to the SHARED role map (one source: stembus) so the address logic can't drift from
+        // the masters. model → role → address; Unknown → supervisor base (boot raises WRONG-FAMILY).
+        stembus::role::role_for_model(self.device_id()).addr() as u16
     }
 
     /// True if this model belongs to the family this image was compiled for (the active Cargo family

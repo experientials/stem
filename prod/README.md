@@ -46,10 +46,14 @@ the family's program-FRAM window, static SRAM, or the stack floor. Footprint mod
 - **PAC:** optional deps `msp430fr2476` / `msp430fr2433`; the active family feature pulls exactly one
   (a `compile_error!` guards zero/both). `src/main.rs` `#[cfg]`-selects the import and the one
   differing peripheral field (fr247x `wdt_a` vs fr24xx `watchdog_timer`).
-- **Memory map:** [`build.rs`](build.rs) copies `memory-<family>.x` → `OUT_DIR/memory.x` and adds it to
-  the linker search path (`msp430-rt`'s `link.x` does `INCLUDE memory.x`). Maps:
-  [memory-fr247x.x](memory-fr247x.x) (32 KB window @ `0x8000`, 8 KB SRAM),
-  [memory-fr24xx.x](memory-fr24xx.x) (15 KB @ `0xC400`, 4 KB SRAM).
+- **Memory map:** [`build.rs`](build.rs) copies `memory-<chip>.x` → `OUT_DIR/memory.x` and adds it to
+  the linker search path (`msp430-rt`'s `link.x` does `INCLUDE memory.x`). The per-chip maps are
+  **GENERATED from TI's `.ld`** by [`../scripts/gen-memory-x.sh`](../scripts/gen-memory-x.sh) and validated
+  by [`../scripts/lint-memory-x.sh`](../scripts/lint-memory-x.sh) (`just memory gen` / `just memory lint`):
+  [memory-fr2476.x](memory-fr2476.x) (32 KB window @ `0x8000`, 8 KB SRAM),
+  [memory-fr2355.x](memory-fr2355.x) / [memory-fr2155.x](memory-fr2155.x) (32 KB @ `0x8000`, 4 KB SRAM —
+  byte-identical, enforced by the lint), [memory-fr2433.x](memory-fr2433.x) (15 KB @ `0xC400`, 4 KB SRAM).
+  `VECTORS` is an `msp430-rt`/PAC property (link-ASSERTed to end at `0x10000`), not taken from the `.ld`.
 - **Model detect:** [`src/model.rs`](src/model.rs) reads the TLV Device ID (0x1A04) at boot — FR2476
   `0x832A`, FR2475 `0x832B`, FR2433 `0x8240` — and `matches_build_family()` catches a wrong-family flash.
 - **Budgets:** selected by family in [`../prod.just`](../prod.just).

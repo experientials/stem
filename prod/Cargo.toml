@@ -27,10 +27,14 @@ _dual = []
 #   _stem_p4 → UCB1 on P4.6(SDA)/P4.7(SCL), P4SEL=01  — FR23xx/FR21xx (FR2355 ds p24 signal + p102 select)
 _stem_p3 = []
 _stem_p4 = []
-# `console` — dev-only UART logging (banner + enumerate report + debug-register dump + s/r/d). OFF =
-# silent production image; the node's state then lives only in the debug registers / I2C-slave
+# `console` — dev-only UART logging. Default (non-debug) = LEAN per DESIGN.md: version + per-sector FRAM
+# checksums only. OFF = silent production image; state lives only in the debug registers / I2C-slave
 # surface (smaller FRAM, no UART clocking). Orthogonal to the family axis. On by default for dev.
 console = []
+# `debug` — verbose build (implies console): adds the post-POST "what was found" (enumerate report +
+# status dump + a Leaf/eUSCI diagnostic) and the interactive s/r/d/m/l commands. Built via
+# `just build <chip> --debug`. "Not a full diag, but some basic info" (DESIGN.md, Henrik 2026-10-04).
+debug = ["console"]
 
 # OPERATING MODES (see DESIGN.md "Operating modes"). A build compiles in the modes it supports; the
 # active mode is a RUNTIME switch among them. At least ONE mode is required (compile_error guard).
@@ -48,6 +52,9 @@ panic-msp430 = "0.4"
 # driver. prod re-exports bsp::{pac,hal,i2c} (main.rs); the family feature forwards to bsp (above).
 bsp = { path = "../crates/bsp" }
 sched = { path = "../crates/sched" }
+# The Stem-bus wire contract (regmap constants) + shared codecs (FRAM CRC) — ONE definition this server
+# shares with the masters (stem-probe, M7). prod::regmap re-exports its constants; post.rs uses its CRC.
+stembus = { path = "../crates/stembus" }
 # Shared per-device drivers (one module per sensor, standard Device convention) — used by both diag
 # and prod via the embedded-hal I2c seam (bsp::hal).
 devices = { path = "../crates/devices" }
