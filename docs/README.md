@@ -37,6 +37,9 @@ the doc is for.
    boards, the Stem/Leaf wiring, and the `vstem`/`vleaf` test scenarios.
 7. **[../TOOLCHAIN.md](../TOOLCHAIN.md)** — the build system: one `just build <chip>`, MSP430→Docker /
    RP2040→host cargo.
+   - **[BUILD-PROFILES.md](BUILD-PROFILES.md)** — the four build axes (image / log verbosity / profile /
+     symbols), why `--debug` today is a *logging* feature not a debug build, the proposed
+     `--release`/`--log`/`--debug` scheme, and the `cargo-batch` evaluation.
 8. **[RP2040-BENCH-HOST.md](RP2040-BENCH-HOST.md)** · **[MCU_SELECTION.md](MCU_SELECTION.md)** ·
    **[DEV_BOARDS.md](DEV_BOARDS.md)** — bench host design, MCU choice, dev-board inventory.
 

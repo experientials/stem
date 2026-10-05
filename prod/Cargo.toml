@@ -64,6 +64,10 @@ devices = { path = "../crates/devices" }
 [profile.release]
 opt-level = "s"
 lto = true
+# Keep DWARF symbols: they land in non-loadable .debug_* sections, so they do NOT count against the
+# FRAM/SRAM budget (size-check.sh measures loadable text/data/bss only) — free on-device. Gains
+# addr2line on panic PCs, backtraces, and gdb-over-SBW source debugging. Only cost is a larger host ELF.
+debug = true
 
 # Fast-iteration profile: same size-opt, NO LTO, for a quicker edit→flash loop. Larger than
 # release — may exceed the budget; that's expected. Ship only `release` (LTO), which the gate checks.

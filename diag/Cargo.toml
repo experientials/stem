@@ -32,6 +32,9 @@ fr2155 = ["bsp/fr2155"]
 [profile.release]
 opt-level = "s"
 lto = true
+# Keep DWARF symbols — non-loadable .debug_* sections, so free on-device (size-check.sh counts only
+# loadable text/data/bss). Gains addr2line/backtraces/gdb-over-SBW. Only cost is a larger host ELF.
+debug = true
 
 # Fast-iteration profile: identical size-opt (opt-level "s", inherited) but NO LTO. LTO is the
 # dominant cost of the emulated amd64-on-arm64 build (a one-crate recompile took ~10 min, almost
