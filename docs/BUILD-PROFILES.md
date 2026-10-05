@@ -58,12 +58,24 @@ Implementation when adopted: rename the `debug` cargo feature → `log`; add `de
 debugging** — until then the free `debug = true` on release (done) delivers ~90% of the value
 (backtraces/addr2line) at zero cost, so the rename is deferred, not urgent.
 
-## Faster matrix builds — `cargo-batch` (under evaluation)
+## Faster matrix builds — `cargo-batch` (evaluated 2026-10-05: SHELVED)
 
-See the timing spike + decision in this doc's companion notes / commit log. Summary: embassy-rs
-`cargo-batch` runs many `cargo build`s in one invocation with a unified build graph, compiling shared
-deps once — promising for CI / `build-all` across the full variant matrix (esp. no-LTO `check`/`fast`),
-less so for single-image dev builds. Limits here: `prod`/`diag`/`probe` are separate projects (no root
-workspace) so sharing is within-project only; the per-binary LTO links and Rosetta emulation bound the
-win. It's a cargo *fork* (version-lag/maintenance cost). Decision pending a measured spike.
+embassy-rs `cargo-batch` runs many `cargo build`s in one invocation with a unified build graph,
+compiling shared deps once. Spiked it (ephemeral container, no change to the committed Dockerfile).
+**Verdict: not worth adopting now.** Three reasons:
+
+1. **Version blocker (measured).** Installing the current cargo-batch fails: `cargo 0.98.0 requires
+   rustc 1.95 or newer, while the currently active rustc is 1.90.0-nightly` — our pinned MSP430
+   toolchain (`nightly-2025-06-25`). Adoption needs an older cargo-batch rev *or* bumping the nightly
+   (which fights the reason we pin it: msp430 target + PAC/`msp430` crate compatibility).
+2. **Most of the win is already free.** Each project builds into one `target/`, so sequential `just`
+   builds across families/variants already reuse compiled shared deps via cargo's cache. cargo-batch's
+   extra over a warm shared target is single-resolve + cross-variant parallelism — which pays at
+   Embassy's *hundreds* of binaries, not this repo's ~4–12 variants.
+3. **Structural limits.** `prod`/`diag`/`probe` are separate projects (no root workspace) → sharing is
+   within-project only; the per-binary LTO links and Docker/Rosetta emulation bound the release win.
+
+Revisit only if the variant matrix grows large OR the MSP430 nightly later moves to rustc ≥1.95. The
+cheaper first lever if CI build time hurts: ensure CI reuses a warm `target/` per project. Spike
+script kept at `scratchpad/cargo-batch-spike.sh` for a future re-run.
 </content>
