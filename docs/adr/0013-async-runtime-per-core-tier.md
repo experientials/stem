@@ -100,9 +100,29 @@ Per-machine state (`-Z print-type-sizes`): async leaf_scan 26 / slave 21 / mode 
 - Ergonomic win is real: the hand version needed an explicit `RrPhase` enum + `Option<ReadReg>`
   threaded through `ScanJob`; async expresses it as plain `.await`.
 
-**Verdict:** viable on MSP430 (pure `core`, no toolchain blocker, favorable RAM/stack model), but
-code-size costs ~+0.5 KB per realistic subsystem — acceptable at prod's current footprint, a real
-line item as async spreads. Decide per-subsystem, not wholesale. Spike kept at `scratchpad/async-spike/`.
+### RAM amplifier + mitigation (measured 2026-10-05)
+RAM is favorable *by default* but async CAN eat significant SRAM: anything live **across an `.await`**
+is resident while suspended. Measured (`-Z print-type-sizes`):
+
+| Future | size | note |
+|---|---|---|
+| owns a `[u8;256]` across the await | **268 B** | the whole buffer sits in the future state |
+| borrows `&mut [u8;256]` across the await | **16 B** | only the pointer is held; buffer lives once in run()'s frame |
+
+Amplifies via **nesting** (top future = sum down the deepest await chain) and **`join`/concurrency**
+(all suspended futures coexist → sum; N tasks each owning a 256 B buffer = N×268 B). It all lands in
+the single executor stack frame (demo: `sub #580,r1`), so it reads as *stack*, not bss (static RAM 0).
+
+**Mitigation = the existing `sched` discipline, carried to async:** keep scratch in shared
+state/`&mut`, never own big locals across `.await` (268 B → 16 B just by borrowing); flatten nesting;
+don't `join` when sequential suffices. The irreducible RAM is whatever must be live across suspension
+summed over the concurrently-suspended set — a requirement hand code shares; async just makes
+"held across await" explicit and easy to trip over.
+
+**Verdict:** viable on MSP430 (pure `core`, no toolchain blocker, favorable RAM/stack model *with the
+borrow discipline*), but code-size costs ~+0.5 KB per realistic subsystem — acceptable at prod's
+current footprint, a real line item as async spreads. Decide per-subsystem, not wholesale. Spike kept
+at `scratchpad/async-spike/`.
 
 ## Consequences
 - **Consistent model, right-sized runtime per tier**: one async/await programming style; embassy on
