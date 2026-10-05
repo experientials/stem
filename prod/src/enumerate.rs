@@ -60,14 +60,15 @@ impl Scan {
     }
 }
 
-/// Scan the sensor bus. First checks/recovers a wedged bus (a low SDA makes every probe false-ACK),
-/// then probes 0x08..=0x77 via `devices::present`, and flags `faulted` if SDA is still stuck or the
-/// hit count is implausibly high. Populates state read by the debug registers — always runs (not
-/// console-gated); the *reporting* is what's gated.
+/// Scan the sensor bus. First recovers a wedged bus (either a slave holding SDA low or our own eUSCI
+/// holding SCL low both make the scan unreliable), then probes 0x08..=0x77 via `devices::present`, and
+/// flags `faulted` if the bus is still not idle-high on *both* lines or the hit count is implausibly
+/// high. Populates state read by the debug registers — always runs (not console-gated); the
+/// *reporting* is what's gated.
 pub fn scan(p: &Peripherals) -> Scan {
-    // A slave holding SDA low wedges the bus → recover before probing.
-    let (sda0, _) = i2c::bus_levels(p);
-    let recovered = sda0 || i2c::recover(p);
+    // Always attempt recovery (recover() fast-paths when already idle and clears an SCL-low wedge as
+    // well as SDA-low); its result is true only when BOTH lines ended idle-high.
+    let recovered = i2c::recover(p);
 
     let mut bus = EusciI2c::new(p);
     let mut pr = Presence::new();
@@ -79,8 +80,8 @@ pub fn scan(p: &Peripherals) -> Scan {
         a += 1;
     }
 
-    let (sda1, _) = i2c::bus_levels(p);
-    let faulted = !recovered || !sda1 || pr.count() > SANITY_MAX;
+    let (sda1, scl1) = i2c::bus_levels(p);
+    let faulted = !recovered || !(sda1 && scl1) || pr.count() > SANITY_MAX;
     Scan { present: pr, faulted }
 }
 
@@ -92,7 +93,7 @@ pub fn scan(p: &Peripherals) -> Scan {
 pub struct ScanJob {
     pr: Presence,
     next: u8,         // next 7-bit address to probe; the job is complete once this passes HI
-    recovered: bool,  // did the one-shot recovery leave SDA free?
+    recovered: bool,  // did the one-shot recovery leave the bus idle-high (both lines)?
     started: bool,    // has the first step run the recovery yet?
 }
 
@@ -113,9 +114,9 @@ impl ScanJob {
             return None; // already complete (and reported)
         }
         if !self.started {
-            // One-shot recovery up front (a slave holding SDA low would false-ACK every probe).
-            let (sda0, _) = i2c::bus_levels(p);
-            self.recovered = sda0 || i2c::recover(p);
+            // One-shot recovery up front — a wedged bus (SDA-low slave OR SCL-low master self-hold)
+            // would false-ACK every probe. recover() handles both and returns true only when idle-high.
+            self.recovered = i2c::recover(p);
             self.started = true;
         }
         let mut bus = EusciI2c::new(p);
@@ -128,8 +129,8 @@ impl ScanJob {
             did += 1;
         }
         if self.next > HI {
-            let (sda1, _) = i2c::bus_levels(p);
-            let faulted = !self.recovered || !sda1 || self.pr.count() > SANITY_MAX;
+            let (sda1, scl1) = i2c::bus_levels(p);
+            let faulted = !self.recovered || !(sda1 && scl1) || self.pr.count() > SANITY_MAX;
             let present = core::mem::replace(&mut self.pr, Presence::new());
             return Some(Scan { present, faulted });
         }
@@ -148,7 +149,7 @@ pub fn report(p: &Peripherals, scan: &Scan) {
     uart::putc(p, if scl { b'H' } else { b'L' });
 
     if scan.faulted {
-        uart::puts(p, "  !! BUS FAULT (SDA stuck / all-ACK) — scan unreliable [");
+        uart::puts(p, "  !! BUS FAULT (SDA/SCL stuck / all-ACK) — scan unreliable [");
         uart::dec(p, scan.present.count());
         uart::puts(p, " ACKs]\n");
         return;
