@@ -12,6 +12,17 @@ pub fn putc(p: &Peripherals, c: u8) {
     crate::board::console_uart_tx(p, c);
 }
 
+/// A byte is waiting in the console RX buffer (non-blocking). Same shared board primitive prod uses
+/// for its command console — so diag's menu is console-drivable (not only the S1 button).
+pub fn rx_ready(p: &Peripherals) -> bool {
+    crate::board::console_uart_rx_ready(p)
+}
+
+/// Read the pending RX byte (clears UCRXIFG). Call only when [`rx_ready`].
+pub fn getc(p: &Peripherals) -> u8 {
+    crate::board::console_uart_getc(p)
+}
+
 pub fn puts(p: &Peripherals, s: &str) {
     for &b in s.as_bytes() {
         if b == b'\n' {

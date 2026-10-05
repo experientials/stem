@@ -18,17 +18,32 @@ use crate::{i2c, uart, usec};
 use crate::pac::Peripherals;
 use sched::Task;
 
-/// A device we can read a fixed-value register from, so each transaction is checkable.
+/// A device we can read a fixed-value register from, so each transaction is checkable. `setup`:
+/// if `Some(v)`, WRITE `v` to `reg` before each read (and expect to read it back) — a write-verify.
+/// This matters when no register holds a datasheet-constant: a plain read of a reset default (0x00 /
+/// 0xFF) would **false-pass** a stuck-low / stuck-high bus. Writing a non-trivial pattern (0xA5) first
+/// means a stuck bus reads back the wrong value → FAIL, and it exercises the write path too.
 struct Target {
     addr: u8,
     reg: u8,
     val: u8,
+    setup: Option<u8>,
 }
 
 // WHO_AM_I / ID registers with datasheet-constant values (same ones the POST registry verifies).
+#[allow(dead_code)]
+static TARGETS_SENSORS: &[Target] = &[
+    Target { addr: 0x39, reg: 0x92, val: 0xAB, setup: None }, // APDS-9960
+    Target { addr: 0x29, reg: 0xC0, val: 0xEE, setup: None }, // VL53L0X
+];
+
+// BENCH DIAGNOSIS (Q-SENSING-ENUM, FR2355 Leaf): the only Leaf device is a PCA9698 I/O extender @0x20.
+// It has no datasheet-constant register, so we WRITE-VERIFY a non-trivial 0xA5 to the Polarity-Inversion
+// bank-0 reg (0x10, reset 0x00 — harmless, we don't use polarity inversion). 0xA5 ≠ 0x00/0xFF, so a
+// stuck-low/high or bit-corrupt bus FAILS at every clock instead of false-passing. Swap back to
+// TARGETS_SENSORS for sensor-bench runs.
 static TARGETS: &[Target] = &[
-    Target { addr: 0x39, reg: 0x92, val: 0xAB }, // APDS-9960
-    Target { addr: 0x29, reg: 0xC0, val: 0xEE }, // VL53L0X
+    Target { addr: 0x20, reg: 0x10, val: 0xA5, setup: Some(0xA5) },
 ];
 
 /// SCL = SMCLK (1 MHz) / brw.
@@ -37,6 +52,11 @@ struct Step {
     brw: u16,
 }
 static LADDER: &[Step] = &[
+    // Low end added for the FR2355 Leaf investigation: if a fault is rise-time/capacitance it clears as
+    // the clock drops; if it persists unchanged down to 10 kHz it is NOT a speed-margin problem.
+    Step { khz: 10, brw: 100 },
+    Step { khz: 25, brw: 40 },
+    Step { khz: 50, brw: 20 },
     Step { khz: 100, brw: 10 },
     Step { khz: 200, brw: 5 },
     Step { khz: 333, brw: 3 },
@@ -54,6 +74,13 @@ const FAIL_CUTOFF: u16 = 24; // consecutive NACKs at one clock ⇒ unusable, sto
 /// One verified read. `Ok(latency_us)`, or `Err(true)` on a corrupt value / `Err(false)` on
 /// NACK/timeout.
 fn verified_read(p: &Peripherals, t: &Target) -> Result<u16, bool> {
+    if let Some(v) = t.setup {
+        // Write-verify: set the register to a known non-trivial pattern first. A NACK here is a
+        // transport failure (Err false); the read below then confirms the value survived.
+        if !i2c::write(p, t.addr, &[t.reg, v]) {
+            return Err(false);
+        }
+    }
     let t0 = usec::now(p);
     let mut b = [0u8; 1];
     if !i2c::read_reg(p, t.addr, t.reg, &mut b) {
