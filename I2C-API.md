@@ -136,11 +136,26 @@ It could offer a way to set baud rate from master
 
 ### Extended Registers
 
-#### 30h 110000 - 
+#### 30h 110000 - Debug / identity / status window (0x30–0x3E)
 
-#### 3Fh 111111 - 
+See `prod/src/regmap.rs` (DBG_* constants): `0x30` iface magic (`0xD0`), `0x31/0x32` model id,
+`0x33–0x36` build id, `0x37` status, `0x38` dev-count, `0x39` known-present bitmap, `0x3A` fault,
+`0x3B–0x3D` fw version (maj/min/patch), `0x3E` MODE_CTRL (R: current mode; W: request Passive/Sensing).
 
+#### 3Fh 111111 - DBG_CRC: per-sector FRAM CRC16 readout (integrity; ADR-0010)
 
+A **windowed** register (the 6-bit command pointer leaves no room for the 8×u16 CRCs as separate
+addresses). Computed in POST on **every** boot (incl. the silent production image) — `post::fram_crcs`.
+
+- **WRITE `0x3F` = byte index 0..15** → moves the read cursor (`idx = 2·sector + {0=hi,1=lo}`).
+- **READ `0x3F`** → returns the CRC byte at the cursor.
+- So the M7 reads all 16 bytes as 16 × (write idx, read byte) and gets `[sec0_hi, sec0_lo, … sec7_hi,
+  sec7_lo]` = per-sector CRC16-CCITT (poly 0x1021, init 0xFFFF) over the program-FRAM window.
+
+**The MSP only reports; the M7 judges** (ADR-0010): the M7 holds the golden per-sector CRCs for the image
+it flashed, compares, and reflashes a mismatched sector over BSL. A buggy/corrupt MSP verifier can only
+cause a false "mismatch" (harmless reflash), never a false "OK". Reading it needs no UART (works on the
+silent build); the console echoes the same values when `console`/`--debug` is built.
 
 ### Custom Registers
 

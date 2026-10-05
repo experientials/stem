@@ -2,7 +2,9 @@
 
 The **target** power architecture, derived from the component datasheets + decisions. See the
 [docs index](README.md). Companion to [POWER-STATES.md](POWER-STATES.md) (the S0–S5 state ladder) —
-this is *how each part is fed*; that is *which rails are live when*. **Board-specific nets/regulators are marked TO-VERIFY against the actual
+this is *how each part is fed*; that is *which rails are live when*. For the **PD controller hardware
+hookup + firmware bring-up plan**, see
+[proposals/pd-controller-cypm1111.md](proposals/pd-controller-cypm1111.md). **Board-specific nets/regulators are marked TO-VERIFY against the actual
 292-power-module + carrier + 202 schematics** (`sb-ucmimx8plus_1v1.pdf`, the 292 design).
 
 ## Source chain
@@ -15,9 +17,9 @@ USB-C ──▶ CYPM1111 (PD ctrl) ──drives external PFETs──▶ VBUS
 ```
 - **NVDC power path:** when USB is in, the **system load on SYS is served from VBUS**, and the cell is
   charged separately — so carrier loads **don't leach the battery's charge current**. On a dead battery
-  the charger holds SYS at VSYS_MIN from VBUS (dead-battery boot). (DECISIONS.md D1/D3/D4.)
+  the charger holds SYS at VSYS_MIN from VBUS (dead-battery boot). ([ADR-0007](adr/0007-battery-native-sys-rail.md), [ADR-0008](adr/0008-tap-sys-never-raw-bat.md).)
 - **Never power the carrier from raw BAT** — only from SYS — else ship mode (BATFET open) can't
-  disconnect it and the cell drains in storage. (DECISIONS.md firm rule.)
+  disconnect it and the cell drains in storage. ([ADR-0008](adr/0008-tap-sys-never-raw-bat.md).)
 
 ## Per-component power
 | Component | Board | Supplied by | Voltage | Notes |
@@ -47,7 +49,7 @@ module↔carrier B2B. **Coarse domain gating at the PD controller; fine per-sens
 
 *(Optional — autonomous wake while **stored**: a **nanopower LDO off raw BAT** for the MSP + one wake
 sensor, alive even in ship mode. Cost: ship mode can't fully disconnect → continuous µA drain. Deferred
-— button/plug wake + ship mode covers most products. DECISIONS.md D5.)*
+— button/plug wake + ship mode covers most products. Deferred — not an accepted ADR; see [ADR-0008](adr/0008-tap-sys-never-raw-bat.md) consequences.)*
 
 ## Which rails are live per power state (ties to POWER-STATES.md)
 | Rail | S0 dead | S1 ship | S2 forced-suspend | S3 deep-standby | S4 M7-alive | S5 full |
@@ -61,7 +63,7 @@ The **SoM rail is the one big lever** (SoM-on vs SoM-off is the natural floor, P
 below the deep-standby reserve, enable it when the battery can run the M7.
 
 ## Design rules (carry into the schematic pass)
-1. **Battery-native rail** — present SYS ~3.6 V, don't boost to 5 V. (DECISIONS.md D3.)
+1. **Battery-native rail** — present SYS ~3.6 V, don't boost to 5 V. ([ADR-0007](adr/0007-battery-native-sys-rail.md).)
 2. **Tap SYS, never raw BAT** (except the optional nanopower storage-watcher) — keeps ship mode + charge
    clean; carrier loads run off VBUS during charging.
 3. **CYPM1111 runs direct off SYS/VBUS** — no regulator.

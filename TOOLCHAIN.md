@@ -65,10 +65,18 @@ plain host `cargo`, identical on Linux and macOS** (the crate's `rust-toolchain.
 triple; rustup auto-installs it). Flashing is always host-side (no USB in containers): `just probe
 flash` (picotool) for RP2040, `just prod flash` (mspdebug/hwd) for MSP430.
 
-**Adding a new Cortex-M firmware (RP2350 / nRF52 / CYPM1111 PD controller):** create its crate (with a
+**Adding a new Cortex-M *Rust* firmware (RP2350 / nRF52):** create its crate (with a
 `rust-toolchain.toml`) + a sibling firmware module like `probe.just`, then add a `case` arm to the
-top-level `build` recipe. (A PD build via Infineon ModusToolbox C would need its own build verb, not
-the cargo path — decide when its crate lands.)
+top-level `build` recipe.
+
+**Exception — the CYPM1111 PD controller is a C island, not the cargo path.** Its Cortex-M0 *is* a valid
+Rust `thumbv6m` target, but it builds in **Infineon ModusToolbox (C)**, not `cargo` — a practical, not
+architectural, choice: the USB-PD stack we rely on and the PMG1/PSoC peripheral support (PDL/HAL) are
+**C-only** (no Rust HAL/PAC for PMG1), so Rust would mean reimplementing USB-PD + the PAC from scratch,
+defeating the de-risk/speed reason we chose the part. It therefore gets its **own ModusToolbox build
+verb**, outside `just build <chip>`'s cargo path. See
+[docs/proposals/pd-controller-cypm1111.md](docs/proposals/pd-controller-cypm1111.md) and
+STEM-DIRECTION.md (§C-island).
 
 First-time setup — build the toolchain image once:
 

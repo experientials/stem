@@ -152,6 +152,21 @@ status**. Check the box when done. Keep newest context at the top of each item.
 
 ---
 
+## stem-probe (RP2040 bench host) — sniffer bring-up (2026-10-04)
+
+- [ ] **PROBE-1 · measure the Pico console-logging transfer speed** — *medium · perf/observability* —
+  Henrik 2026-10-04: measure the end-to-end throughput of how we LOG the Pico's console output (the
+  `sniff`/`taps` decoded frames over USB-CDC → `thepia hwd console`). Motivation: during sniffer
+  bring-up the decoded-frame output felt slow, and a slow/bottlenecked log path risks masking or
+  truncating results. Measure: (a) firmware-side CDC write throughput (bytes/s the
+  `write_packet` loop sustains in 64-byte chunks), (b) `hwd console tail`/`interact` readback rate,
+  and (c) whether either drops bytes under a full 512-event dump. Decide if we need batched writes /
+  a bigger CDC buffer / a terser frame format. NOTE: already confirmed NOT the cause of the truncated
+  FR2355 captures (the firmware's own `sniff:` summary counts the decode, independent of the log path).
+  - Evidence to date: `i2c_sniff` is a self-contained portable core (`debug/stem-probe/src/i2c_sniff.rs`);
+    `sniff <sda> <scl> [ms]` + `taps` added to stem-probe. See the FR2355 LESSONS for the capture-timing
+    gotchas that surfaced this.
+
 ## External — thepia `hwd` (report upstream, not fixed here)
 
 - [ ] **EXT-1 · re-file two thepia reports** — `thepia hwd report` was broken (`agent not embedded /

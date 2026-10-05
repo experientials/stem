@@ -70,6 +70,53 @@ sensing & product logic.**
 - All MCUs can ask SoM to read their registers to see what they want to report
 - The MCUs will log their boot state over UART so SoM M7 can verify that firmware is correct
 
+TODO expand Technical Scenarios based on how we provide real world value.
+
+
+## Test tracking (bench)
+
+High-level status of what the bench proves, driven by the **`stem-probe` UART console**. Detail + pass
+criteria + wiring live in **[MCU-BENCH.md](MCU-BENCH.md)** (the per-test matrix); this is the roadmap.
+`[x]` = runs & passes today · `[~]` = partially works (electrical only / needs a target wired) ·
+`[ ]` = blocked on firmware not yet written.
+
+**Identity & addressing** *(hardware-verified 2026-10-03 via `thepia hwd console`)*
+- [x] T1.1 bus census — `scan` sees exactly `0x20`/`0x21`/`0x22`, no collision (3 slaves coexist) ✓HW
+- [x] T1.2 role↔silicon — `vstem` maps each address to its model id (0x830C/0x832A/0x8240), `iface=0xD0` ✓HW
+- [x] T1.3 fw present — `vstem` shows a non-zero fw version on each node ✓HW
+
+**Mode control (Stem)**
+- [x] T2.1 Passive — `pass`/`vstem`: `0x3E` reads `0x00` at 0x20 ✓HW
+- [x] T2.2 single-I²C refusal — FR2433 (0x22) rejects Sensing (Passive-only), via `vstem` ✓HW
+- [~] T2.3 Sensing write — `sens`: `0x3E=0x01` **flaps on FR2355** (passes/fails run-to-run) — OPEN-QUESTIONS Q-SENSING-ENUM
+
+**Leaf mastering handoff** *(needs a Leaf I²C target wired to P1.2/3 + Pico GP4/5)*
+- [ ] T3.1 Sensing enumerate — **FAIL on HW**: `vleaf` reads `dev_count=0x00` though a device is present → Q-SENSING-ENUM
+- [x] T3.2 Passive handoff — `vleaf`: node releases, Pico masters Leaf, sees `0x01` — one-master invariant ✓HW
+
+**Sideband (SoM-run-status)**
+- [~] T4.1 continuity — `sound0/1`,`por0/1`,`pins` toggle & read back (wiring only)
+- [ ] T4.2 S1/S2 edge → mode — node acquires/releases Leaf on `SOUND_INT` edge *(FR2355 sideband fw)*
+- [ ] T4.3 S3 wake — node asserts `PMIC_ON_REQ` on a wake condition, Pico reads it *(sideband fw)*
+- [ ] T4.4 S4 soak — repeated edge toggles, no bus wedge *(sideband fw)*
+
+**Product-logic contracts** *(regmap + prod firmware not yet built)*
+- [ ] T5.1 POST — every boot emits a parseable pass/fail over UART (prod, not diag — OPEN-QUESTIONS Q-POST)
+- [ ] T5.2 attention interrupt — any node raises it → master queries all, reads reason/detail registers
+- [ ] T5.3 state transfer — supervisor's recent-events history is readable & M7-compatible
+- [ ] T5.4 health monitor — master reboots a node, parses POST, re-flashes a bad one
+
+**Console-driven automation** *(makes the above scriptable in CI)*
+- [x] T6.1 generic `r <addr> <reg>` / `w <addr> <reg> <val>` — exercise any register without a new build
+- [x] T6.2 `selftest` — runs T1–T3 and ends with one grep-able `RESULT pass=N fail=M` line
+- [x] T6.3 transport — **`thepia hwd console interact`** is the bench path (verified live 2026-10-03:
+  flashed via `thepia hwd pico flash`, ran `selftest` while hwd owned the CDC); reaches a
+  **CI-runner-attached bench over the thepia mesh**. `scripts/bench-run.py` (pyserial) is the hwd-free
+  fallback only. Caller parses `RESULT` for the verdict — `--expect` can't gate it (improvement filed via
+  `thepia report`).
+
+~~Known issue: legacy `read` expected FR2433 at `0x20`~~ — **resolved**: `read` retired (superseded by `vstem`).
+
 ## Clarifications & goals (captured 2026-10-03, verbatim where crafted)
 
 **Scope — we are building a SoM SIMULATOR, not the SoM:** "Right now we are not implementing the SoM

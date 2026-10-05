@@ -112,6 +112,51 @@ On the **other I²C controller** from the Stem master (distinct-controller rule)
 edge-trigger-on-`SOUND_INT`/`POR_B` mode logic; (3) Pico `stem-probe`: GPIO drive/read for the 4
 signals + a `write <reg> <val>` / `mode` command for the I²C override.
 
+## Console-driven test procedure (canonical)
+The bench is driven by the **`stem-probe` USB-CDC console** (the RP2040 is the Stem master / SoM
+stand-in). High-level status lives in **[STEM.md](STEM.md) → Test tracking**; this is the executable
+procedure. Each tier is a composite console command that prints `[PASS]`/`[FAIL]` lines.
+
+| # | Console cmd | Target(s) | Pass criterion | Proves | Status |
+|---|---|---|---|---|---|
+| **T1.1** | `scan` | all | exactly `0x20 0x21 0x22` respond | 3 slaves coexist, role addresses, no collision | ✅ |
+| **T1.2** | `vstem` | per node | `0x20`→model `0x830C`, `0x21`→`0x832A`, `0x22`→`0x8240`; each `iface=0xD0` | address *is* role, per node | ✅ |
+| **T1.3** | `vstem` | per node | fw version present (not `0.0.0`) | image ran, bus not wedged | ✅ |
+| **T2.1** | `sens`→`pass` | 0x20 | `0x3E` reads `0x01` then `0x00` | MODE_CTRL override live | ✅ |
+| **T2.2** | `vstem` | 0x22 | FR2433 Sensing **refused** (stays `0x00`) | Passive-only node won't master a bus it lacks | ✅ |
+| **T3.1** | `vleaf` | 0x20 | Sensing: node enumerated ≥1 Leaf device | FR2355 masters Leaf (UCB0 P1.2/3) + scans | 🟡 needs Leaf target |
+| **T3.2** | `vleaf` | 0x20 | Passive: Pico masters Leaf, sees ≥1 | one-master handoff invariant | 🟡 needs Leaf target |
+| **T4.1** | `sound0/1`,`por0/1`,`pins` | 0x20 | lines toggle; `pins` reflects node outputs | 4 sideband lines wired correctly | 🟡 electrical only |
+| **T4.2–4.4** | `sound1`→`pins`, soak | 0x20 | node acquires/releases Leaf on edge; asserts `PMIC_ON_REQ` on wake; no wedge over N cycles | edge-triggered mode logic | ⛔ FR2355 sideband fw pending |
+
+**Generic access** (no new build needed): `r <addr> <reg>` reads one register; `w <addr> <reg> <val>`
+writes one (hex, `0x` optional). Use these to exercise any regmap entry (identity, status, future
+state-transfer registers) directly from the console or a host script.
+
+**One-shot + automation:**
+- `selftest` runs T1–T3 across `0x20/0x21/0x22` and ends with a single machine-parseable
+  **`RESULT pass=N fail=M`** line.
+- **Transport = `thepia hwd` (primary).** hwd owns the Pico's CDC, so drive the console *through* it —
+  this is the only path that works without pre-empting the daemon, and it reaches a **CI-runner-attached
+  bench over the thepia mesh** (same commands, local or remote):
+  ```sh
+  thepia hwd console -b <pico-serial> interact --line "selftest" --expect "RESULT pass=" --timeout-ms 20000
+  thepia hwd console -b <pico-serial> interact --line "scan"     --expect "> "
+  ```
+  Flash via hwd too: `thepia hwd pico flash -b <serial> <fw>.elf` (needs a recognized extension;
+  byte-verified). Board handle = the Pico's USB serial from `thepia hwd list` (e.g. `E6614C311B471322`).
+  - ⚠️ **`--expect` is substring-PRESENT, not a pass/fail gate** — it returns on the first match and can't
+    assert `fail=0`. Parse the captured `RESULT pass=N fail=M` in the caller (grep/jq/pytest) for the
+    verdict. A proper `--require`/`--fail-on` assertion mode is requested via `thepia report`
+    (2026-10-03); until it lands, gate in the caller.
+- **hwd-free fallback:** `uv run scripts/bench-run.py` (auto-finds `2e8a:000a`, parses `RESULT`, exits
+  non-zero on fail) — for a host with the Pico on raw USB and **no hwd/thepia**. On the bench hwd owns the
+  port, so this path hits `Resource busy`; prefer the hwd route above.
+
+**Wiring prereqs by tier:** T1/T2 need only the Stem bus (GP18/19 ↔ P4.6/P4.7 + GND). T3 adds a Leaf
+I²C target on FR2355 P1.2/P1.3 + Pico GP4/GP5. T4 adds the 4 sideband lines (table above); T4.2–4.4 also
+need the FR2355 sideband firmware (DESIGN.md open-Q#4), not yet written.
+
 ## See also
 `RP2040-BENCH-HOST.md` (host firmware/design) · `ziloo/Hardware/pinmux/` (pin models) ·
 `bob-929/Hardware/bench/` (the separate big-bob-bench).
