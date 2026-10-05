@@ -1,5 +1,10 @@
 # I2C bus-wedge — ongoing investigation across hardware combinations
 
+> **Scope.** This is **level 1** (single-MCU state) of the broader bus recovery & mastery topic —
+> see [BUS-RECOVERY.md](BUS-RECOVERY.md) for the canonical 4-level ladder (levels 2–4 cover
+> SoM suspend/resume mastery transfer, coordinated multi-master, and true hardware-arbitrated
+> multi-master).
+>
 > **Purpose.** A living log for the Leaf-bus (eUSCI_B0, P1.2/P1.3) **wedge** phenomenon and its
 > recovery, tracked across MCU × LaunchPad × pull-up × device combinations. This is expected to be a
 > **recurring topic** as new parts/benches come online — capture each new observation here rather than
