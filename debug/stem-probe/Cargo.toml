@@ -18,6 +18,8 @@ embassy-time = { version = "0.5" }
 embassy-futures = { version = "0.1" }
 cortex-m = { version = "0.7.6", features = ["inline-asm"] }
 cortex-m-rt = "0.7"
+# Shared Stem-bus contract + codecs (regmap constants, FRAM CRC) — one definition with prod + the M7.
+stembus = { path = "../../crates/stembus" }
 # Cortex-M0 (thumbv6m) has no atomic CAS — route atomics through critical-section so embassy-sync /
 # executor / others compile. embassy-rp's `critical-section-impl` supplies the actual CS implementation.
 portable-atomic = { version = "1", features = ["critical-section"] }

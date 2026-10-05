@@ -1324,7 +1324,12 @@ dependencies = [
  "embassy-time",
  "embassy-usb",
  "portable-atomic",
+ "stembus",
 ]
+
+[[package]]
+name = "stembus"
+version = "0.1.0"
 
 [[package]]
 name = "string_cache"
