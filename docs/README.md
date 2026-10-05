@@ -40,6 +40,9 @@ the doc is for.
    - **[BUILD-PROFILES.md](BUILD-PROFILES.md)** — the four build axes (image / log verbosity / profile /
      symbols), why `--debug` today is a *logging* feature not a debug build, the proposed
      `--release`/`--log`/`--debug` scheme, and the `cargo-batch` evaluation.
+   - **[TASK-STYLE-GUIDE.md](TASK-STYLE-GUIDE.md)** — how to write concurrent work on the MSP430 tier:
+     cooperative `sched`/hand-written state machines vs `async`/`.await` on a `core`-only executor —
+     the rules for each, the SAME logic shown both ways, and the measured cost to choose between them.
 8. **[RP2040-BENCH-HOST.md](RP2040-BENCH-HOST.md)** · **[MCU_SELECTION.md](MCU_SELECTION.md)** ·
    **[DEV_BOARDS.md](DEV_BOARDS.md)** — bench host design, MCU choice, dev-board inventory.
 
