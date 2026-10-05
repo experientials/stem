@@ -69,38 +69,27 @@ simple one-shot. It's the smallest possible footprint (no executor, no futures) 
 
 ---
 
-## Style B — `async`/`.await` on a `core`-only executor — EMERGING (ADR-0013)
+## Style B — `async`/`.await` — EMERGING (ADR-0013)
 
-The same cooperative model, but the compiler generates the state machine from `async fn`. **No
-embassy, no alloc, pure `core`** — builds on the pinned nightly. A minimal executor polls the futures:
+The same cooperative model, but you write the task body with `.await` and **the compiler generates the
+state machine**. **No embassy, no alloc, pure `core`** — builds on the pinned nightly. The notation:
 
 ```rust
-use core::future::Future;
-use core::pin::pin;
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-// No-op waker: this executor re-polls every pass, so wake() need do nothing (one shared vtable).
-static VTABLE: RawWakerVTable = RawWakerVTable::new(|_| RAW, |_| {}, |_| {}, |_| {});
-const RAW: RawWaker = RawWaker::new(core::ptr::null(), &VTABLE);
-
-async fn yield_now() { /* Pending once, Ready next poll — hands control back */ }
-
 async fn slave_service(/* borrows shared state */) -> ! {
-    loop { /* service one slave event */ yield_now().await; }
-}
-
-pub fn run() -> ! {
-    let mut hi = pin!(slave_service());          // futures pinned in this frame (no heap)
-    let mut scan = pin!(leaf_scan());
-    let w = unsafe { Waker::from_raw(RAW) };
-    let mut cx = Context::from_waker(&w);
     loop {
-        pet_wdt();
-        let _ = hi.as_mut().poll(&mut cx);        // poll order = the only "priority" (cooperative)
-        let _ = scan.as_mut().poll(&mut cx);
+        // service one pending slave event …
+        yield_now().await;               // hand control back to the scheduler (one cooperative step)
     }
 }
 ```
+
+That's it — no phase enum, no index, no `-> Option<u32>`. Progress across `.await` points is the
+generated future's state; `yield_now().await` is the "return and run me again later" of Style A.
+
+> **Runtime (plumbing, not notation):** async needs a tiny `core`-only executor to poll the futures
+> (a no-op waker + `pin!`'d futures polled in the serve loop). This is the **evolved `sched`**, not a
+> second runtime (see "Supporting both" below + ADR-0013); a runnable example is at
+> `scratchpad/async-spike/`. You don't write it per task — you just write `async fn`s.
 
 ### Rules — Style B (the ones that matter on a 4 KB / 15 KB part)
 - ✅ **Borrow, don't own, large buffers across `.await`.** Anything live across a suspend point sits
@@ -184,6 +173,19 @@ choose per subsystem using the measured deltas (realistic 3-machine model, fr243
 **Default:** Style A for simple/periodic work and anything already one-shot. **Reach for Style B** when
 a subsystem is a genuinely nested multi-step I/O state machine that's error-prone by hand — and the
 ~0.5 KB fits the budget. When in doubt on a 15 KB FR2433 image, measure with the size gate.
+
+### Supporting both — ONE engine, not two
+
+Both styles are first-class, driven by **one** scheduler — `sched`, evolved to be async-native. The
+cooperative poll-step is then just the **degenerate case**: a one-line future (`poll_fn` / an
+`async fn` that does a step and yields). So the same `sched` loop drives a plain poll-task *and* an
+`async fn` task side by side; you pick per subsystem. This is deliberately **not** two parallel
+runtimes (a `Task::poll` engine beside a separate async executor) — that would be two idioms, two
+driver conventions, and a split loop to maintain. **One engine; cooperative = a trivial async task.**
+
+Prerequisite (shared infra, built once): **async leaf drivers** — `xfer(..).await` only exists if the
+eUSCI/Timer_A ops are wrapped as futures over the existing bounded, never-hang blocking drivers. And
+the engine is the one in `sched` (not a per-firmware loop), so diag + prod converge. See ADR-0013.
 
 ---
 

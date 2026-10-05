@@ -33,6 +33,20 @@ ergonomics **without embassy** by writing our own `core`-only executor.
    **`core`-only async executor** so task bodies can be written as `async fn … .await` and compile —
    via monomorphization + LTO — down to ~the same state machines we hand-write now.
 
+**Both authoring styles are supported — by ONE engine, not two.** `sched` becomes async-native; the
+existing cooperative poll-step is then just the **degenerate case** — a one-line future (`poll_fn` /
+an `async fn` that does a step and yields). So a task can be written either as a plain poll-step
+(smallest; for trivial/periodic work) **or** as `async fn … .await` (for nested multi-step I/O),
+and the *same* `sched` loop drives both. This is explicitly **not** two parallel runtimes (a
+`Task::poll` engine beside an async executor) — that would mean two idioms, two driver conventions,
+and a split loop to maintain; avoid it. One engine, cooperative = a trivial async task.
+
+**Prerequisite (the real work):** async leaf drivers. `xfer(..).await` only exists if the
+eUSCI/Timer_A ops are wrapped as futures over the existing bounded, never-hang blocking drivers (+ an
+interrupt or a yield). That's shared infrastructure built once; without it the async style has nothing
+to `.await`. The executor must be the one in `sched` (not a bespoke per-firmware loop), so diag + prod
+**converge** instead of diverging further (today prod doesn't even use `sched`).
+
 The **source-level programming model becomes consistent across tiers (async/await)**; only the
 executor differs by capability. This also fixes prod's divergence (adopt `sched`, drop the triplicated
 loop and the dead dep) and is the natural path to the **LPM-sleep** behavior a sleep-supervisor needs
