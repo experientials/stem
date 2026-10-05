@@ -1,6 +1,6 @@
 # ADR-0013 · Async runtime per core tier — embassy on Cortex-M/host, a `core`-only async `sched` on MSP430
 
-Status: Accepted (tier split) · Proposed (async-`sched` evolution — pending a size spike)
+Status: Accepted (tier split) · Proposed (async-`sched` evolution — size spike DONE: code parity; stack-depth pass pending)
 Date: 2026-10-05   Source: Henrik 2026-10-05 ("can we use embassy on MSP prod?" → "can we write async/await and execute with our own sched, resolving it all at compile time to the same size?")
 
 ## Context
@@ -64,6 +64,26 @@ Feasible on `core` alone — `core::future::Future`, `core::task::{Context,Waker
 prove it by building a **minimal prototype** (`core`-only executor + one `async` eUSCI leaf + a
 hand-rolled `select`) and **comparing the FR2433 size gate** against the current hand-written loop
 before committing. Code-size parity is expected; the RAM delta is the risk to measure.
+
+### Spike result (2026-10-05) — MEASURED: code-size parity confirmed
+Built a throwaway crate (same target/profile/`memory-fr2433.x`, `opt="s"`+LTO, pinned nightly) doing
+identical work two ways: a hand-written incremental state machine vs the same work as `async fn` +
+a `core`-only no-op-waker join executor. `msp430-elf-size`:
+
+| Build | text | data | bss | FRAM | static SRAM |
+|---|---|---|---|---|---|
+| hand-written state machine | 170 | 0 | 0 | **170 B** | 0 |
+| async + `core` executor | 174 | 0 | 0 | **174 B** | 0 |
+
+**+4 bytes code, 0 static RAM.** The symbol dump shows the whole substrate (both futures, `yield_now`,
+waker, `Context`, join loop) collapsed under LTO into a single 64-byte `run` — the async machinery
+resolves at compile time to ~the same code the hand version emits. Built on pure `core` / the pinned
+nightly, confirming no toolchain blocker. **Caveats:** (1) this isolates the *substrate* cost; real
+firmware scales with the number of task state machines (the same ones you'd hand-write). (2) `bss=0`
+because the stack-pinned futures keep their state on the **stack**, which `size` doesn't measure — so
+*static*-RAM overhead is zero, but **stack-resident future-state depth is not yet quantified**; do a
+`-Z emit-stack-sizes` / high-water-mark pass before a full migration. Spike kept at
+`scratchpad/async-spike/`.
 
 ## Consequences
 - **Consistent model, right-sized runtime per tier**: one async/await programming style; embassy on
