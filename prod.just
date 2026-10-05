@@ -36,16 +36,24 @@ build family="fr247x" mode="auto" console="console" modes="":
     if [ -n "{{modes}}" ]; then MODES="{{modes}}"; else
         case "{{family}}" in fr247x|fr215x|fr235x) MODES="mode-passive,mode-sensing";; fr24xx) MODES="mode-passive";; esac
     fi
+    # `console` arg: "console" (lean UART log) | "" (silent) | "debug" (verbose: post-POST found-info).
+    # The feature name IS the arg value (`debug` implies `console` in Cargo.toml), so it flows into FEATS.
     FEATS="{{family}},$MODES"; [ -n "{{console}}" ] && FEATS="$FEATS,{{console}}"
     feats="--no-default-features --features $FEATS"
-    label="{{family}}$([ -n "{{console}}" ] && echo '+console' || echo ' silent')"
+    label="{{family}}$([ -n "{{console}}" ] && echo "+{{console}}" || echo ' silent')"
     # VARIANT = the family (+ '-silent' when console is off). cargo always writes the same binary name
     # (`prod`) regardless of features, so both families — and console/silent — clobber one path. We copy
     # the built ELF to a variant-unique name `prod-<variant>` so a pinned artifact (hwd.toml image, CI
     # upload, `just prod flash`) CANNOT be silently overwritten by a later build of the other family.
     # This is what makes thepia's declaration-based cross-family guard reliable in practice (the guard
     # trusts a declared family; a stable per-family artifact keeps declaration and bytes from drifting).
-    variant="{{family}}$([ -z "{{console}}" ] && echo '-silent' || true)"  # `|| true`: keep set -e happy when the test is false
+    # VARIANT suffix per console arg: ''→'-silent', 'console'→'' (prod-<fam>), 'debug'→'-debug'. Keeps
+    # the lean image (prod-<fam>) and the verbose one (prod-<fam>-debug) as distinct, non-clobbering artifacts.
+    case "{{console}}" in
+        "")      variant="{{family}}-silent" ;;
+        console) variant="{{family}}" ;;
+        *)       variant="{{family}}-{{console}}" ;;  # e.g. debug → prod-<fam>-debug
+    esac
     finish() {  # $1 = cargo profile dir; copies to the variant artifact and gates THAT file
         local prof="$1" built art
         built="prod/target/msp430-none-elf/$prof/prod"

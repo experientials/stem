@@ -26,6 +26,7 @@ libdir   := env_var_or_default("MSP430_LIBDIR", "/usr/local/lib")
 mod check
 mod example
 mod pac
+mod memory     # per-chip linker memory maps (prod/memory-<chip>.x) — generate from TI .ld + lint
 mod diag       # MSP430 POST/diagnostic firmware (Docker toolchain)
 mod prod       # MSP430 product Stembus node firmware (Docker toolchain; family axis)
 mod probe      # RP2040 bench-host firmware (debug/stem-probe) — host cargo, Linux+macOS
@@ -62,7 +63,7 @@ build target *flags:
         case "$cls" in
             prod)  just prod build "$fam" ;;
             diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;
-            debug) echo "no debug firmware for MSP430 {{target}}" >&2; exit 1 ;;
+            debug) just prod build "$fam" auto debug ;;  # prod + `debug` feature (post-POST "what was found")
         esac
     else  # cortex (rp2040): its only firmware is the debug bench host
         case "$cls" in
