@@ -26,6 +26,7 @@ mod diag;
 mod is31;
 mod rcwl;
 mod regs;
+mod signature;
 mod ssd1306_raw;
 mod stress;
 mod tasks;
@@ -109,6 +110,7 @@ fn main() -> ! {
     uart::puts(&p, "  build ");
     uart::puts(&p, env!("DIAG_BUILD"));
     uart::putc(&p, b'\n');
+    uart::puts(&p, "keys (or S1): p=POST  m=I2C-SPEED sweep  s=I2C-SCAN soak  g=I2C-SIG patterns\n");
     // Basic board stats read from the silicon (chip id, revisions, die serial) — not a hardcoded
     // model. Then the live SFR dump (reset cause, clock lock, pin mux) we reason from all run.
     regs::stats(&p);
@@ -138,6 +140,7 @@ fn main() -> ! {
         let mut btn = tasks::ButtonTask::new();
         let mut ui = tasks::UiTask::new();
         let mut stress = stress::StressTask::new();
+        let mut sig = signature::SignatureTask::new();
         let mut slots = [
             sched::Slot::every(50, &mut radar), // self-adjusts to 5 ms while motion is asserted
             sched::Slot::every(200, &mut prox), // APDS-9960 proximity, 5 Hz (Post mode only)
@@ -145,6 +148,7 @@ fn main() -> ! {
             sched::Slot::every(25, &mut btn),   // button scan / menu navigation
             sched::Slot::every(200, &mut ui),   // OLED menu + stress status (raw driver)
             sched::Slot::every(5, &mut stress), // bounded stress batches; self-idles when inactive
+            sched::Slot::every(5, &mut sig),    // signature-pattern battery; self-idles when inactive
         ];
 
         let mut next_stats = 10_000u32; // scheduler deadline telemetry every ~10 s

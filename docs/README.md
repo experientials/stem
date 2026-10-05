@@ -18,7 +18,15 @@ the doc is for.
 5. **[../I2C-API.md](../I2C-API.md)** — the Stem-bus register map (PCA9698 emulation + Thepia ext) and the
    **role-based addressing** (model→address).
 
+> **PD controller (292 power module) — implementation plan:**
+> **[proposals/pd-controller-cypm1111.md](proposals/pd-controller-cypm1111.md)** — hardware hookup +
+> firmware bring-up for the **CYPM1111** node (derives from the power-module eval + ADR-0002/0003/0007/0008/0011;
+> bench-first on CY7111 + BQ25601EVM).
+
 ## Build & bench
+- **[FR2355-I2C-BRINGUP-PLAN.md](FR2355-I2C-BRINGUP-PLAN.md)** — active fault-isolation plan for the
+  FR2355 Leaf bus (UCB0 / P1.2·P1.3) as master **and** slave at 100 kHz: bisect electrical → clock →
+  master-vs-slave against the RP2040 known-good, driven by a signature-pattern library.
 6. **[MCU-BENCH.md](MCU-BENCH.md)** — the dev/test bench: the Pico as SoM/M7 **simulator**, the MSP
    boards, the Stem/Leaf wiring, and the `vstem`/`vleaf` test scenarios.
 7. **[../TOOLCHAIN.md](../TOOLCHAIN.md)** — the build system: one `just build <chip>`, MSP430→Docker /
@@ -26,10 +34,13 @@ the doc is for.
 8. **[RP2040-BENCH-HOST.md](RP2040-BENCH-HOST.md)** · **[MCU_SELECTION.md](MCU_SELECTION.md)** ·
    **[DEV_BOARDS.md](DEV_BOARDS.md)** — bench host design, MCU choice, dev-board inventory.
 
-## What's still open
-9. **[OPEN-QUESTIONS.md](OPEN-QUESTIONS.md)** — open strategy/research questions **with resolutions**
+## Why it's built this way / what's still open
+9. **[adr/](adr/README.md)** — **Architecture Decision Records**: the chronological *why* behind the
+   firmware + hardware design (single-binary-per-family, role-based addressing, Passive default,
+   control-channel-never-blocks, battery-native rail…). Decisions live here; other docs link in.
+10. **[OPEN-QUESTIONS.md](OPEN-QUESTIONS.md)** — open strategy/research questions **with resolutions**
    (addressing, persistence, POST-in-prod, anti-counterfeit (deferred), the I²C-collision questions).
-10. **[BACKLOG.md](BACKLOG.md)** — firmware backlog.
+11. **[BACKLOG.md](BACKLOG.md)** — firmware backlog.
 
 ## Key external references (in-repo PDFs / sibling docs)
 - **i.MX8MP** power/compute: `ziloo/Hardware/refs/i.MX 8/IMX8MPRM.pdf` (RM Ch.5 GPC/DSM), **`AN13400.pdf`**
