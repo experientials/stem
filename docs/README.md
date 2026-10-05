@@ -27,6 +27,9 @@ the doc is for.
 - **[FR2355-I2C-BRINGUP-PLAN.md](FR2355-I2C-BRINGUP-PLAN.md)** — active fault-isolation plan for the
   FR2355 Leaf bus (UCB0 / P1.2·P1.3) as master **and** slave at 100 kHz: bisect electrical → clock →
   master-vs-slave against the RP2040 known-good, driven by a signature-pattern library.
+- **[I2C-WEDGE-INVESTIGATION.md](I2C-WEDGE-INVESTIGATION.md)** — living log for the Leaf-bus **wedge**
+  phenomenon + recovery across MCU×LaunchPad×pull-up×device combos: the observation matrix, the open
+  FR2355-trigger question, discriminating tests, and the proposed on-demand wedge-injection tool.
 6. **[MCU-BENCH.md](MCU-BENCH.md)** — the dev/test bench: the Pico as SoM/M7 **simulator**, the MSP
    boards, the Stem/Leaf wiring, and the `vstem`/`vleaf` test scenarios.
 7. **[../TOOLCHAIN.md](../TOOLCHAIN.md)** — the build system: one `just build <chip>`, MSP430→Docker /
