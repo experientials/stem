@@ -171,18 +171,34 @@ Cargo's crate-scoping dictates one answer:
     (`git mv`, `poll()` now drains the seam, identical IFG sequence). bsp symmetric: `i2c` (Leaf master)
     ↔ `stem_i2c` (Stem slave). Builds in budget prod fr2476/fr2355/fr2433 (+`--debug`) + diag; zero
     warnings from moved/new code. HW on `@fr2476`: clean boot + banner + status dump + Passive→Sensing
-    (OLED `0x3C`) + serve-loop/loopback paths run without wedging. **NOT yet HW-proven:** an actual
-    master read/write landing on the slave (needs the Stem↔Leaf jumpers `P3.2→P1.2, P3.6→P1.3`, or a SoM
-    master) — a verbatim-preserving refactor, so register behavior is unchanged, but the end-to-end
-    master proof is deferred to 1b.
+    (OLED `0x3C`) + serve-loop/loopback paths run without wedging. **MASTER-FACING PROOF — ✅ RETIRED
+    2026-10-06** via the RP2040 **stem-probe** on the MCU bench (docs/MCU-BENCH.md — the Pico IS the Stem
+    master, no jumpers/SoM needed): `scan` → `0x21` ACKs; `vstem 0x21` + `r 0x21 …` read back
+    iface=`0xD0`, model=`0x832A`, build-id=`0x66D9D2CF` (== `@fr2476`'s boot stamp, bit-stable across
+    passes → the right board, no collision), ver=`0.1.0`; `0x3E` Passive↔Sensing writes land. So a real
+    external master reads **and** writes the regmap through the new `next_event`/`provide_tx` seam.
   - **1b — NEXT: add the ISR + LPM wake.** `init` enables the eUSCI_B slave IE; add the single shared
     eUSCI_B `#[interrupt]` (dual → `EUSCI_B1`; fr2433 → `USCI_B0`, verified in `pac/*/src/lib.rs`) that
     **masks its own IE + sets a wake flag + exits LPM, doing no byte work** (§3 + the 1a refinement);
     the serve loop enables GIE and drops to LPM when idle; the woken `poll()`/dispatch services via
-    `next_event()` and re-enables IE. **Open design point:** the console/`debug` build polls the UART
-    menu, so a console build can't deep-sleep identically — either the UART RX IE also wakes, or console
-    builds stay in the degenerate no-sleep loop. **Verify (needs a master on the bench):** master
-    read/write over Stem lands; CPU sleeps between transactions and wakes on the slave ISR.
+    `next_event()` and re-enables IE.
+    - **Design point 1 — WDT backstop vs LPM (safety-relevant, surfaced in 1a verify).** A CPU asleep in
+      LPM does NOT run the serve loop, so it can't `wdt_pet()` — the ~16 s reset-mode backstop
+      (`bsp::board::wdt_arm_backstop`) would RESET an idle-but-healthy sleeping node. The backstop can't
+      just be dropped (it's the hang-recovery safety). **Recommended:** a periodic **timer wake** —
+      enable a TB0 interrupt (TB0 is already the free-running ms base, ACLK/REFO, alive in LPM0–3) at a
+      few-second cadence whose ISR wakes the CPU; the serve-loop top pets the WDT then resleeps. A true
+      hang still stops the pet → reset. (Alternatives: WDT **interval** mode as the heartbeat — but §3
+      notes it's mutually exclusive with the reset backstop, trading away hang-recovery; rejected.)
+    - **Design point 2 — console vs sleep.** The console/`debug` build polls the UART menu, so it can't
+      deep-sleep identically. **Recommended:** console builds stay in the degenerate no-sleep loop; LPM
+      engages in the silent production image (you don't deep-sleep a board you're interactively poking).
+      This is fine for verification — the stem-probe reads over I²C, not the console, so LPM-wake is
+      proven on the silent build via the probe.
+    - **Verify (via the stem-probe, now the proven path):** flash the silent fr247x image; `scan`/
+      `vstem 0x21`/`r 0x21 …` return correct, stable data → the CPU woke from LPM on the slave ISR,
+      serviced, and reslept. (Remote limit: can't meter current to *see* LPM; functional wake + code
+      path is the evidence — stated plainly.)
   - **1c — adopt the async dispatch task.** Move the drain into a `sched` async task `.await`ing the
     seam; the ISR-set flag drives the waker; executor drops to LPM when all tasks Pending (ADR-0013).
 - **Phase 2 — command surface.** One `Command` enum + `execute`; Stem-regmap face + UART face. Keep the
@@ -203,7 +219,9 @@ FR2433 15 KB image pulls only what it ships.
 Prereqs **done**: `bsp::model`, CONV-1 (clock/uart/fmt → bsp), `stembus`, ADR-0014. **Phase 0 DONE**
 (2026-10-06) — `deepsleep` holds regmap/enumerate/status/post/mode. **Phase 1a DONE** (2026-10-06,
 `a1633a7`) — Stem-slave transport split into `bsp::stem_i2c` behind the `SlaveEvent` seam, dispatch in
-`deepsleep::stem`, still polled (no behavior change). **Next actionable: Phase 1b** (add the eUSCI_B ISR
-+ LPM wake — the first behavioral change; the servicing path is unchanged, only *when* it runs). 1b's
-HW verify needs a **master on the bench** (the Stem↔Leaf jumpers for the loopback self-test, or a SoM /
-the Pico stem-probe as master) — which also retires 1a's one deferred proof (master read/write landing).
+`deepsleep::stem`, still polled (no behavior change); **master-facing proof retired via the stem-probe**
+(real Pico master reads+writes `@fr2476`'s regmap over the Stem bus). **Next actionable: Phase 1b** (add
+the eUSCI_B ISR + LPM wake — the first behavioral change; servicing path unchanged, only *when* it runs).
+1b carries two design points — WDT-backstop-vs-LPM (recommend a TB0 timer wake to keep petting) and
+console-vs-sleep (recommend LPM in the silent image only) — both logged under Phase 1b above. HW verify
+is unblocked: the stem-probe is the proven master path (no jumpers/SoM needed).

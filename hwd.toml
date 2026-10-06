@@ -1,5 +1,18 @@
 # thepia hwd board aliases — the fault-resistant identity map for the current bench.
 #
+# THE BENCH = 3 MSP430 + 1 Pico (the MCU bench, docs/MCU-BENCH.md). One shared Stem I²C bus:
+#   • RP2040 Pico  — Stem-bus MASTER (stem-probe fw), the SoM/M7 stand-in. Drive via its running-CDC
+#                    serial E6614C311B471322 (NOT the BOOTSEL serial below). `thepia hwd console -b … `.
+#   • FR2476 @0x21 — dual-I²C dev node   (Stem on P3.2/P3.6).
+#   • FR2355 @0x20 — dual-I²C sensing node (Stem on P4.6/P4.7).
+#   • FR2433 @0x22 — single-I²C passive expander (Stem on P1.2/P1.3; its only bus).
+# Addresses are ROLE-based (stembus::role); a clean `scan` on the Pico shows exactly `0x20 0x21 0x22`.
+#
+# NOTE: a second FR2476 may show up in `thepia hwd list` — it belongs to a DIFFERENT, unrelated bench
+# and is NOT on this Stem bus. THIS bench's FR2476 is serial 0E5D… (below); that is the only one wired
+# to the shared bus here. (If ever in doubt which board answered a Stem read, the per-flash build-id in
+# regs 0x33–0x36 identifies it — it matches that board's boot stamp.)
+#
 # IDENTITY = two hardwired, firmware-independent facts:
 #   • which board = the eZ-FET USB serial (below)   — from USB enumeration
 #   • which chip  = the JTAG silicon device-id       — 0x0210 FR2476, 0x01ff FR2355, 0x01c6 FR2433
