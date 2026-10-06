@@ -33,6 +33,9 @@ pub use msp430fr2433 as pac;
 compile_error!("bsp: select ONE chip feature (fr2476|fr2355|fr2155|fr2433) via the consumer (diag/prod)");
 
 pub mod board;
+// Shared console text formatting (puts/hex/dec/fixed2) over `board::console_uart_tx` — one copy for
+// diag + prod (was duplicated in both `uart.rs`). Consumers re-export it and keep only init/rx/getc.
+pub mod fmt;
 // Runtime silicon identity + hardware-capability map (one image per compatible family). PAC-agnostic
 // (a volatile TLV read); shared by prod's boot and diag's POST/`chip` command so there is ONE detector.
 pub mod model;
