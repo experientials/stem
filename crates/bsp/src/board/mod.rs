@@ -60,3 +60,43 @@ mod leaf {
 }
 #[cfg(feature = "_leaf")]
 pub use leaf::*;
+
+// ── Watchdog role (chip-common): the ONE place the WDT field-name delta lives — dual `wdt_a` vs
+// fr2433 `watchdog_timer` — so callers (diag, prod) are role-based, not model-hardcoded, and the
+// backstop policy + constants aren't duplicated per firmware. Pattern: HOLD during deterministic
+// bring-up, ARM the ~16 s ACLK(REFO) reset-mode backstop before the serve/scheduler loop, then PET
+// every pass; a hang past ~16 s resets the node instead of wedging it. ACLK=REFO is the default, so
+// this works even on the clock-less silent fr24xx path.
+mod wdt {
+    use crate::pac::Peripherals;
+
+    const WDTPW: u16 = 0x5A00;
+    const WDTHOLD: u16 = 0x0080;
+    const WDTSSEL_ACLK: u16 = 0x0020; // WDTSSEL_1: clock from ACLK (REFO, 32768 Hz)
+    const WDTIS_DIV_2E19: u16 = 0x0003; // WDTIS_3: /2^19 ≈ 16 s
+    const WDTCNTCL: u16 = 0x0008; // reload the counter ("pet")
+    const BACKSTOP: u16 = WDTPW | WDTSSEL_ACLK | WDTIS_DIV_2E19; // reset mode (WDTTMSEL=0)
+
+    /// The ONLY per-chip delta: the WDTCTL field name. Everything else is identical silicon.
+    #[inline(always)]
+    fn write(p: &Peripherals, bits: u16) {
+        #[cfg(feature = "_leaf")]
+        p.wdt_a.wdtctl().write(|w| unsafe { w.bits(bits) });
+        #[cfg(not(feature = "_leaf"))]
+        p.watchdog_timer.wdtctl().write(|w| unsafe { w.bits(bits) });
+    }
+
+    /// Stop (hold) the WDT — during deterministic bring-up, before the backstop is armed.
+    pub fn wdt_hold(p: &Peripherals) {
+        write(p, WDTPW | WDTHOLD);
+    }
+    /// Arm the ~16 s reset-mode backstop — call ONCE, after bring-up, before the serve/scheduler loop.
+    pub fn wdt_arm_backstop(p: &Peripherals) {
+        write(p, BACKSTOP);
+    }
+    /// Pet the backstop (reload its counter) — call every loop pass; a hang that stops petting resets.
+    pub fn wdt_pet(p: &Peripherals) {
+        write(p, BACKSTOP | WDTCNTCL);
+    }
+}
+pub use wdt::*;

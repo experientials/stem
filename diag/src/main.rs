@@ -33,16 +33,10 @@ mod tasks;
 mod uart;
 mod usec;
 
-// Watchdog / power-management / clock-system bits (msp430fr2476.h).
-const WDTPW: u16 = 0x5A00;
-const WDTHOLD: u16 = 0x0080;
-const WDTSSEL_ACLK: u16 = 0x0020; // WDTSSEL_1: clock the WDT from ACLK (REFO, 32768 Hz here)
-const WDTIS_DIV_2E19: u16 = 0x0003; // WDTIS_3: /2^19 -> ~16 s timeout at 32768 Hz
-const WDTCNTCL: u16 = 0x0008; // clear the counter ("pet")
-// Backstop config: watchdog (reset) mode — WDTTMSEL=0 — ACLK, ~16 s. Far longer than a worst-case
-// POST cycle (3 s delay + a few s of I2C/recovery/flush), so normal running never trips it; a real
-// hang (or a panic-msp430 infinite loop) does, and the board resets and retries instead of dying.
-const WDT_BACKSTOP: u16 = WDTPW | WDTSSEL_ACLK | WDTIS_DIV_2E19;
+// WDT control (hold/arm/pet + the ~16 s reset-mode backstop policy) now lives in the `board` role
+// (`board::wdt_hold`/`wdt_arm_backstop`/`wdt_pet`) — one definition shared with prod, field-name delta
+// owned there. Backstop is far longer than a worst-case POST cycle (3 s delay + a few s of I2C), so
+// normal running never trips it; a real hang (or a panic-msp430 loop) does → the board resets + retries.
 const LOCKLPM5: u16 = 0x0001;
 
 // The eUSCI bus pins (Leaf-I2C P1.2/3, console-UART) are routed via the `board` module now.
@@ -61,12 +55,11 @@ const BANNER: &str = "\n\
 ###    ###   #  #    ###\n\
 ========================================\n";
 
-/// Pet the watchdog backstop (reload its counter). Called every scheduler pass, and inside the
-/// stress runner's long loops so a multi-second soak doesn't trip the ~16 s reset.
+/// Pet the watchdog backstop — every scheduler pass, and inside the stress runner's long loops so a
+/// multi-second soak doesn't trip the ~16 s reset. Thin delegate to the `board` WDT role (one shared
+/// definition); kept so existing `crate::pet_wdt` callers (stress.rs / signature.rs) are unchanged.
 fn pet_wdt(p: &Peripherals) {
-    p.wdt_a
-        .wdtctl()
-        .write(|w| unsafe { w.bits(WDT_BACKSTOP | WDTCNTCL) });
+    board::wdt_pet(p);
 }
 
 #[entry]
@@ -74,7 +67,7 @@ fn main() -> ! {
     // Single-threaded, no ISRs -> steal is fine and avoids the critical-section feature.
     let p = unsafe { Peripherals::steal() };
 
-    p.wdt_a.wdtctl().write(|w| unsafe { w.bits(WDTPW | WDTHOLD) }); // stop watchdog
+    board::wdt_hold(&p); // stop watchdog during deterministic bring-up
     board::clock_init_1mhz(&p);
 
     // Bus pins, by semantic role, from the board: Leaf-I²C (sensors, P1.2/3 → UCB0) and the
@@ -123,7 +116,7 @@ fn main() -> ! {
     // unguarded). Every scheduler pass pets it; anything that wedges past ~16 s resets the board —
     // which is exactly the backstop cooperative scheduling needs, since one task that ignores the
     // never-block contract has no other way to be preempted.
-    p.wdt_a.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP) });
+    board::wdt_arm_backstop(&p);
 
     // µs time base (TA0 off SMCLK) — the stress task times each I²C transaction with it.
     usec::start(&p);

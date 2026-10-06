@@ -108,38 +108,11 @@ const fn parse_u8(s: &str) -> u8 {
     v
 }
 
-// Watchdog control (common across MSP430 FRAM parts). WDTPW is the write password; WDTHOLD stops it.
-const WDTPW: u16 = 0x5A00;
-const WDTHOLD: u16 = 0x0080;
-// Reset-mode hang backstop (mirrors diag/src/main.rs): ACLK(REFO)-clocked, /2^19 ≈ 16 s, WDTTMSEL=0
-// (reset mode). A hang past ~16 s resets the node instead of wedging it. ACLK=REFO is the default, so
-// this works even on the clock-less silent fr24xx path. WDTCNTCL reloads the counter ("pet").
-const WDTSSEL_ACLK: u16 = 0x0020;
-const WDTIS_DIV_2E19: u16 = 0x0003;
-const WDTCNTCL: u16 = 0x0008;
-const WDT_BACKSTOP: u16 = WDTPW | WDTSSEL_ACLK | WDTIS_DIV_2E19;
+// WDT hold/arm/pet + the ~16 s reset-mode backstop policy now live in the `board` role
+// (`bsp::board::wdt_hold`/`wdt_arm_backstop`/`wdt_pet`) — one definition shared with diag, with the
+// field-name delta (dual `wdt_a` vs fr2433 `watchdog_timer`) owned there, so prod is role-based.
 // PM5CTL0.LOCKLPM5 — set out of reset on FRAM parts; must be cleared to make GPIO live.
 const LOCKLPM5: u16 = 0x0001;
-
-/// Arm the ~16 s reset-mode watchdog backstop — call ONCE, after the deterministic bring-up (so a
-/// slow-but-normal boot, e.g. the ~5 s OLED splash, doesn't trip it). Per-family field name only.
-#[inline(always)]
-fn arm_wdt_backstop(p: &Peripherals) {
-    #[cfg(feature = "_dual")]
-    p.wdt_a.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP) });
-    #[cfg(feature = "fr24xx")]
-    p.watchdog_timer.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP) });
-}
-
-/// Pet the backstop (reload its counter) — call every serve-loop pass. A loop that stops petting
-/// (a genuine hang) resets the node. Rewrites the full config + WDTCNTCL (the only safe WDTCTL write).
-#[inline(always)]
-fn pet_wdt(p: &Peripherals) {
-    #[cfg(feature = "_dual")]
-    p.wdt_a.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP | WDTCNTCL) });
-    #[cfg(feature = "fr24xx")]
-    p.watchdog_timer.wdtctl().write(|w| unsafe { w.bits(WDT_BACKSTOP | WDTCNTCL) });
-}
 
 #[entry]
 fn main() -> ! {
@@ -147,14 +120,10 @@ fn main() -> ! {
     // scaffold is single-threaded with no ISRs yet, so exclusive access is trivially upheld.
     let p = unsafe { Peripherals::steal() };
 
-    // HOLD the watchdog during bring-up (deterministic, unguarded — clock/pins/enumerate/splash), then
-    // `arm_wdt_backstop` right before the serve loop switches it to the ~16 s reset-mode backstop which
-    // `pet_wdt` reloads each pass (see the helpers above; mirrors diag). (Per-family delta: the WDT
-    // field name — dual `wdt_a` vs fr24xx `watchdog_timer`; same WDTCTL register underneath.)
-    #[cfg(feature = "_dual")]
-    p.wdt_a.wdtctl().write(|w| unsafe { w.bits(WDTPW | WDTHOLD) });
-    #[cfg(feature = "fr24xx")]
-    p.watchdog_timer.wdtctl().write(|w| unsafe { w.bits(WDTPW | WDTHOLD) });
+    // HOLD the watchdog during bring-up (deterministic, unguarded — clock/pins/enumerate/splash);
+    // `bsp::board::wdt_arm_backstop` before the serve loop switches it to the ~16 s reset-mode backstop
+    // that `bsp::board::wdt_pet` reloads each pass. The per-chip WDT field-name delta lives in the role.
+    bsp::board::wdt_hold(&p);
 
     // Unlock the I/O from the LPM5 default so port config takes effect (both families have PMM).
     p.pmm.pm5ctl0().modify(|r, w| unsafe { w.bits(r.bits() & !LOCKLPM5) });
@@ -265,7 +234,7 @@ fn run_dual(p: &Peripherals) -> ! {
 
     // Arm the hang backstop now that the deterministic bring-up — incl. the ~5 s OLED splash and any
     // console boot prints — is done. From here a hang past ~16 s resets the node instead of wedging it.
-    arm_wdt_backstop(p);
+    bsp::board::wdt_arm_backstop(p);
 
     // ONE cooperative serve loop for EVERY dual build (ADR-0006): service the Stem slave and advance
     // the Leaf enumerate incrementally each pass so neither a scan nor a mode switch stalls the SoM's
@@ -284,7 +253,7 @@ fn run_dual(p: &Peripherals) -> ! {
     let mut acx = core::task::Context::from_waker(&waker);
 
     loop {
-        pet_wdt(p); // reload the backstop; a genuine hang stops petting → reset
+        bsp::board::wdt_pet(p); // reload the backstop; a genuine hang stops petting → reset
         stem::poll(p, &mut slave, &mut rf); // service the SoM/Stem master
         let _ = scanner.as_mut().poll(&mut acx); // advance the Leaf scan (forever task → always Pending)
         // A completed scan deposits its result; publish it into the RegFile — but ONLY while still
@@ -509,9 +478,9 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     // Arm the hang backstop (deterministic bring-up done). Serve the slave surface forever. A SoM write
     // to MODE_CTRL (0x3E) has nowhere to go on a Passive-only part — drain and ignore it so the request
     // can't wedge; reads still return PASSIVE.
-    arm_wdt_backstop(p);
+    bsp::board::wdt_arm_backstop(p);
     loop {
-        pet_wdt(p); // reload the backstop; a hang in the serve loop resets the node
+        bsp::board::wdt_pet(p); // reload the backstop; a hang in the serve loop resets the node
         stem::poll(p, &mut slave, &mut rf);
         let _ = rf.take_mode_request();
     }
