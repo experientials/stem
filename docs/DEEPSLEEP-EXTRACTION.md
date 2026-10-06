@@ -21,11 +21,19 @@ implementations — they are **NOT** in one crate. Two compounding reasons:
 2. **Different MCUs** — lowvision/bluetooth aren't MSP430 (different PAC/HAL/transport); a crate of
    MSP430 eUSCI/FRAM code can't be shared with them anyway.
 
-**The only crate shared across modules is `stembus`** (the wire vocabulary). A master talks to a
-deepsleep node and a bluetooth node with the *same* protocol crate, but each node **implements** its
-commands in its own module crate. The command-dispatch pattern (UART byte / Stem regmap-write →
-`Command` → `execute`) is a **convention each module repeats**, NOT a shared crate — transports and
-command sets differ. Do **not** pre-abstract the dispatch into a shared crate.
+`stembus` is shared across **all** modules (incl. the masters) — the wire vocabulary — but it is **not
+the only** shareable crate. Others are shared across *subsets* of modules:
+- **`bsp`** (board/model/hal/fmt) — across **MSP430** modules;
+- **`sched`** (the `core`-only async executor, ADR-0013) — across the **MSP430 tier**;
+- **`devices`** (sensor drivers) — across **sensor-driving** modules;
+- plausibly a future **connective/serving layer** (the gated "stem" lib) — across any module that speaks
+  the Stem bus.
+
+What stays **module-specific** is the command *set* + handlers and the module's own state: each node
+implements its commands in its own module crate (a master writes the *same* regmap, but the behaviour is
+the module's). The command-dispatch *pattern* (UART byte / Stem regmap-write → `Command` → `execute`) is
+a convention each module repeats **for now**; if a second module genuinely needs the same scaffold, lift
+it into a shared crate **then** — just don't build it speculatively before there are two real consumers.
 
 **`deepsleep`** = the MSP430 deepsleep-supervisor module crate: MCU state (status/identity, mode,
 GPIO shadow, FRAM integrity) + command implementations (UART + Stem adapters → one `execute`) +
@@ -37,6 +45,21 @@ sketches: one module crate, not an endpoint/role split.
 (The gated "stem" library vision — connective tissue every module uses to speak the Stem bus — if it
 ever materialises, is a thin layer under `stembus`, separate from this. Keep it gated;
 [[stem-nervous-system-vision]].)
+
+### `deepsleep` is module-specific ONLY — not a dumping ground
+A per-module crate is **not** an excuse to pile all MSP430 code here. Each piece defaults to the
+**lowest layer that can hold it**; only genuinely deepsleep-specific code lands in `deepsleep`. Kept OUT:
+- **hardware** — eUSCI/Stem-slave transport, clock, console, pins → **`bsp`**. `deepsleep` holds the
+  RegFile *dispatch* (what a register read/write means), **never** the register plumbing.
+- **wire vocabulary** — regmap addresses, command codes, role/crc → **`stembus`**.
+- **sensor drivers** → **`devices`**.
+- **anything a second module would also want** — the command-dispatch *pattern*, any slave-serving
+  scaffold that lowvision/bluetooth would reuse → stays generic (a shared layer or a repeated
+  convention), **not trapped** in `deepsleep`.
+
+**Test:** *if lowvision/bluetooth would need it, it belongs below `deepsleep`, not in it.* And if a piece
+already in `deepsleep` turns out reusable, move it **down** to the shared layer — don't copy it up into
+the next module crate.
 
 ---
 
