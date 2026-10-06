@@ -16,13 +16,23 @@ exercise the real capability, and the same-boot/master-commanded behaviour falls
 > passive on both I2C busses, and mainly just reacts to interrupts from I2C contacting it and
 > analog/trigger sensors asking it to reflect a change
 
+> (refinement, Henrik 2026-10-06) MSP in passive mode is reachable on both Leaf and Stem I2C.
+
 Derivation (drives §3): **Active** = masters the Leaf (sensor) I²C bus (today's Sensing — enumerate /
-monitor). **Passive** = passive on BOTH I²C buses (Stem = slave, Leaf = released/tri-stated); it SLEEPS
-and is **reactive** — wake sources are (a) the **Stem I²C slave** interrupt (a master contacting it) and
-(b) **analog/trigger sensor** interrupts (eCOMP threshold / GPIO edge) "asking it to reflect a change"
-→ it updates the reflected state (the PCA9698-style InputPort/IntMask banks, §2) and may notify the SoM
-(`STEM_INT`). So LPM + interrupt-wake is the **Passive** posture; Active is the busy Leaf-master loop.
-This is the authority if the phased text below drifts from it.
+monitor), Stem = slave. **Passive** = the MSP is an I²C **SLAVE on BOTH buses** (Stem=UCB1 slave AND
+Leaf=UCB0 slave on dual parts) — reachable on either — and never *masters* Leaf (so the one-master-on-Leaf
+invariant holds: a slave doesn't contend). It SLEEPS and is **reactive**; wake sources are (a) the **Stem
+slave** ISR, (b) on dual the **Leaf slave** ISR, and (c) **analog/trigger sensor** interrupts (eCOMP /
+GPIO edge) "asking it to reflect a change" → it updates the reflected state (PCA9698-style
+InputPort/IntMask banks, §2) and may notify the SoM (`STEM_INT`). So LPM + interrupt-wake is the
+**Passive** posture; Active is the busy Leaf-master loop. This is the authority if the phased text drifts.
+>
+> **⚠️ Supersedes DESIGN.md L76** ("Passive → it releases / never drives the sensor-bus pins"): a slave
+> DOES drive SDA to ACK, so Passive is **UCB0-as-slave**, not the Phase-0 tri-state release
+> (`bsp::board::leaf_i2c_release` → GPIO high-Z). That release makes the node UNreachable on Leaf in
+> Passive — it must become "bring UCB0 up as a slave" instead. **Scope:** this is a DUAL-part change
+> (two eUSCI_B slaves in Passive + the UCB0 `EUSCI_B0` ISR as a 2nd wake source); **fr2433 is unaffected**
+> (one bus, already its slave bus, Passive-only) → build/prove 1b on fr2433 first, then reshape dual.
 
 ---
 
