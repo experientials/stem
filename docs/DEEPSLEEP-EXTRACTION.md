@@ -42,11 +42,18 @@ across FR2433/FR2476/FR2355** (same `stembus` regmap + `deepsleep::stem` dispatc
 FR2476 + `0x22` FR2433 via the probe). Everything **Leaf** — Active/Sensing, UCB0-as-master, the
 enumerate/sensor scan, the mode machine, AND the "reachable on both" UCB0-as-slave-in-Passive — is a
 **nice-to-have**, implement when convenient. Re-scoping the remaining dual work accordingly:
-- **Important (dual):** extend the proven 1b/1c Stem-slave LPM sleep from fr2433's UCB0 to the dual's
-  **UCB1** (same hand-rolled `br` trampoline + `sched` pender + `serve`/`handle`; different instance =
-  `e_usci_b1`, vector = `EUSCI_B1`). That makes FR2476/FR2355 deepsleep-sleepers on the common command
-  interface — the product-relevant behaviour. (Console/debug builds stay no-sleep per §1b design pt 2.)
-- **Nice-to-have (dual):** the Leaf second bus + Sensing + UCB0-as-slave-in-Passive + the 2nd ISR.
+- **Important (dual) — ✅ DONE + HW-proven 2026-10-06.** Extended the Stem-slave LPM to the dual's
+  **UCB1**: new `EUSCI_B1` wake ISR (same hand-rolled `br` trampoline; inner masks UCB1 IE), and the
+  silent dual serve loop sleeps in LPM0 when Passive (disable GIE → `irq_enable` → `WDTHOLD` →
+  `bis #0x18,r2`). Used the **1b-style hand loop** (not 1c's `run_pended`) — the dual loop still carries
+  the Leaf scanner/mode/console, so a full async convergence is deferred with the nice-to-have Leaf
+  reshape; the sleep is the proven pattern inserted at the loop's idle point. Build: `rt` (device vector
+  table) moved to a single **`bsp/rt`** feature (`dep?/rt`) that PROD enables and DIAG does not (fixes a
+  diag regression); `memory-fr2476.x` VECTORS `0xFF80/0x80`, fr2355/fr2155 `0xFFA4/0x5C`. HW on `@fr2476`
+  (silent) + stem-probe: `scan 0x21`, 2× `r 0x21` bit-stable (`0xD0`/`0x832A`/`0.1.0`) → wakes from LPM on
+  the `EUSCI_B1` slave ISR. Console/debug builds stay no-sleep (ISR installed, GIE off → unchanged).
+- **Nice-to-have (dual):** the Leaf second bus + Sensing + UCB0-as-slave-in-Passive + its 2nd ISR, AND
+  the async convergence of the dual loop onto `run_pended` (where the multi-task pender earns its keep).
 
 ---
 
@@ -153,6 +160,13 @@ Implications (these ELEVATE the command API and RE-RANK PCA9698 — §2 above):
   firmware patches, every MCU a slave); the **sensor bus** = Leaf, carrying sensors **and** the MSP as a
   passive slave (SoM masters it directly while the MSP is Passive — the "reachable on both" refinement in
   the behaviour-model block). If this mapping is off, the behaviour-model block is the authority; fix here.
+
+- **Build order (Henrik 2026-10-06):** *"We will redesign the command system anyway starting with
+  commands over I2C and then commands over UART."* So Phase 2 sequences **I²C-commands first, UART
+  second** — and the whole command system is a deliberate redesign (don't retrofit the current regmap).
+  Corollary: the existing **polled console menu is throwaway** — the UART command path gets redesigned,
+  so the "UART-RX wake leaf so console builds can sleep" item is MOOT (don't invest in the current
+  `getc`/`rx_ready` menu; it's replaced, not extended).
 
 ---
 
