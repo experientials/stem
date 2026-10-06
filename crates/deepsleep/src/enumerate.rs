@@ -5,10 +5,10 @@
 
 use core::cell::Cell;
 
-use crate::i2c;
-use crate::hal::EusciI2c;
+use bsp::i2c;
+use bsp::hal::EusciI2c;
 #[cfg(feature = "console")]
-use crate::uart;
+use bsp::fmt as uart; // shared console formatters (puts/putc/hex8/dec/fixed2/dec_i16) over board UART
 #[cfg(feature = "console")]
 use devices::{
     apds9960::Apds9960,
@@ -21,7 +21,7 @@ use devices::{
 // identity read) — gate them on `debug` so a console-but-not-debug build has no unused imports.
 #[cfg(feature = "debug")]
 use devices::vl53l0x::{Attention, RangeTracker, Vl53l0xRanging};
-use crate::pac::Peripherals;
+use bsp::pac::Peripherals;
 
 const LO: u8 = 0x08; // first 7-bit I2C address we scan
 const HI: u8 = 0x77; // last (0x00-0x07 and 0x78-0x7F are reserved)

@@ -65,7 +65,8 @@ pub use deepsleep::regmap; // I²C-slave register-map contract (PCA9698 emulatio
 // Clock init (locked 1 MHz SMCLK for a clean UART) now lives in `bsp::board::clock_init_1mhz`, per
 // family — including an fr2433 module (ADR-0014 / CONV-1). prod no longer carries its own copy.
 #[cfg(feature = "_dual")]
-mod enumerate;
+pub use deepsleep::enumerate; // Leaf sensor-bus enumeration — now in `deepsleep` (Phase 0a); re-export
+                             // keeps `crate::enumerate::*` resolving for main.rs/status.rs unchanged.
 // The I²C-slave surface (status + stem transport + regmap) serves BOTH the dual node (eUSCI_B1) and
 // the fr24xx Passive node (its single eUSCI_B0) — it's the fr24xx node's whole job. `enumerate`/`mode`
 // stay dual-only (no sensor bus / mode machine on the single-I²C part).

@@ -7,6 +7,27 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # The Stem-bus wire vocabulary (regmap addresses/codes, role/crc). The register-map decode here
-# re-exports + extends it. More deps (bsp, devices, sched) + the chip-feature forwarding land as the
-# bsp-touching modules (enumerate, status, mode) move in — kept minimal until then.
+# re-exports + extends it.
 stembus = { path = "../stembus" }
+# MSP430 hw (PAC alias, board semantic map, hal I2c seam, Leaf-I2C driver, fmt). The chip feature
+# forwards to bsp (below), which owns the PAC alias; `enumerate` drives `bsp::{i2c,hal}` + `bsp::fmt`.
+bsp = { path = "../bsp" }
+# Shared per-sensor drivers (the `devices` convention) — `enumerate` probes/identifies through them.
+devices = { path = "../devices" }
+# The cooperative/async executor (ADR-0013): `enumerate`'s async scan `.await`s `sched::yield_now`.
+sched = { path = "../sched" }
+# For `msp430::asm::nop()` in the (--debug) VL53L0X ranging pacing loop.
+msp430 = "0.4"
+
+[features]
+# Chip select — forwarded by the consumer; each enables the matching bsp PAC (bsp owns the alias +
+# board/hal/i2c). bsp's dual PACs also turn on bsp/_leaf (the Leaf-master bus enumerate needs).
+fr2476 = ["bsp/fr2476"]
+fr2355 = ["bsp/fr2355"]
+fr2155 = ["bsp/fr2155"]
+fr2433 = ["bsp/fr2433"]
+# Dual-I²C marker — gates the Leaf-master sensing code (`enumerate`). fr2433 is slave-only → never set.
+_dual = []
+# `console` = UART report paths; `debug` = the extra wake-on-approach ranging demo (implies console).
+console = []
+debug = ["console"]

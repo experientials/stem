@@ -14,3 +14,8 @@
 /// server-internal decode (`RegSel`/`decode`/`next_ai`) + `ShadowState`. (PCA9698-shaped layout kept so
 /// the optional Linux-userland adapter stays implementable; see DEEPSLEEP-EXTRACTION.md §2.)
 pub mod regmap;
+
+/// Sensor-bus enumeration (Leaf-I²C master) + the async scan task. **Dual-I²C families only** — fr2433
+/// is slave-only (no sensor bus), so this is gated `_dual`. Phase 0a (DEEPSLEEP-EXTRACTION.md).
+#[cfg(feature = "_dual")]
+pub mod enumerate;
