@@ -56,6 +56,24 @@ mod leaf {
         p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | P1_LEAF_I2C_PINS) }); // SEL0=1
     }
 
+    /// **ACQUIRE** the Leaf (sensor) bus: route the pins to UCB0 and bring the master up (with the
+    /// stuck-bus recovery in `i2c::init`). The semantic "enter Sensing" action — the mode machine calls
+    /// this instead of poking P1 + eUSCI directly, so it stays chip-agnostic.
+    pub fn leaf_i2c_acquire(p: &Peripherals) {
+        route_leaf_i2c_pins(p);
+        crate::i2c::init(p);
+    }
+
+    /// **RELEASE** the Leaf (sensor) bus: hold UCB0 in reset (driver half) and return P1.2/P1.3 to GPIO
+    /// inputs (high-Z), so the SoM — or nobody — owns the bus. Idempotent; safe at boot before UCB0 was
+    /// ever brought up. The semantic "enter Passive / leave Sensing" action.
+    pub fn leaf_i2c_release(p: &Peripherals) {
+        crate::i2c::release(p); // hold UCB0 in reset → releases SDA/SCL to the pull-ups
+        p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() & !P1_LEAF_I2C_PINS) }); // → GPIO
+        p.p1.p1sel1().modify(|r, w| unsafe { w.bits(r.bits() & !P1_LEAF_I2C_PINS) });
+        p.p1.p1dir().modify(|r, w| unsafe { w.bits(r.bits() & !P1_LEAF_I2C_PINS) }); // input = high-Z
+    }
+
     /// The Leaf-I²C bus as an `embedded-hal` `I2c` master — the acquisition point drivers use, so
     /// they name the role, never the raw `e_usci_b0`. Backed by `hal::EusciI2c` → `crate::i2c` (UCB0).
     /// `allow(dead_code)`: retained seam for `crates/devices` drivers + prod (LTO-stripped, ~0 ROM);

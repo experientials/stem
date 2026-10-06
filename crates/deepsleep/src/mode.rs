@@ -12,11 +12,11 @@
 
 #![allow(dead_code)] // some paths are unused depending on which mode features are compiled in.
 
-use crate::pac::Peripherals;
 use crate::regmap;
+use bsp::pac::Peripherals;
 
-const SENSOR_PINS: u8 = 0x0C; // P1.2 (UCB0SDA) | P1.3 (UCB0SCL) — the sensor-master bus
-const UCSWRST: u16 = 0x0001;
+// Sensor-bus acquire/release is now the `bsp::board::leaf_i2c_{acquire,release}` role — no raw P1/eUSCI
+// pokes here (the pin/instance specifics live in bsp, keeping this module chip-agnostic).
 
 /// The MSP's operating posture. A variant exists only for a mode that was compiled in.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -165,18 +165,11 @@ fn exit(p: &Peripherals, m: Mode) {
 /// recovery runs; a persistently wedged bus surfaces as a scan fault, it does not fight a 2nd master.
 #[cfg(feature = "mode-sensing")]
 fn acquire_sensor_bus(p: &Peripherals) {
-    p.p1.p1sel1().modify(|r, w| unsafe { w.bits(r.bits() & !SENSOR_PINS) });
-    p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | SENSOR_PINS) }); // → UCB0 primary function
-    crate::i2c::init(p);
+    bsp::board::leaf_i2c_acquire(p); // route P1.2/3 → UCB0 + bring up the master (with stuck-bus recovery)
 }
 
 /// RELEASE the sensor bus: hold eUSCI_B0 in reset and return P1.2/P1.3 to GPIO inputs (high-Z), so
 /// the SoM (or nobody) owns the bus. Idempotent — safe to call at boot before B0 was ever brought up.
 fn release_sensor_bus(p: &Peripherals) {
-    p.e_usci_b0
-        .ucb0ctlw0()
-        .modify(|r, w| unsafe { w.bits(r.bits() | UCSWRST) }); // hold in reset (releases the pins)
-    p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() & !SENSOR_PINS) }); // → GPIO
-    p.p1.p1sel1().modify(|r, w| unsafe { w.bits(r.bits() & !SENSOR_PINS) });
-    p.p1.p1dir().modify(|r, w| unsafe { w.bits(r.bits() & !SENSOR_PINS) }); // input = high-Z
+    bsp::board::leaf_i2c_release(p); // driver reset + tri-state the pins (chip specifics in bsp::board)
 }

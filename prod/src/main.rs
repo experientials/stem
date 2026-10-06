@@ -73,7 +73,7 @@ pub use deepsleep::enumerate; // Leaf sensor-bus enumeration — now in `deepsle
 #[cfg(any(feature = "_dual", feature = "fr24xx"))]
 pub use deepsleep::status; // identity/status model (regmap 0x30–0x3F) — now in deepsleep (Phase 0b)
 #[cfg(feature = "_dual")]
-mod mode;
+pub use deepsleep::mode; // operating-mode machine (Passive↔Sensing) — now in deepsleep (Phase 0c)
 #[cfg(any(feature = "_dual", feature = "fr24xx"))]
 mod stem;
 // UART logging is the `console` feature (dev only). Off = silent production image; state then lives

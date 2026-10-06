@@ -101,6 +101,15 @@ pub fn recover(p: &Peripherals) -> bool {
     bus_idle(p)
 }
 
+/// Take the Leaf master OFF the bus: hold UCB0 in reset, which releases SDA/SCL to the pull-ups. The
+/// pin-mux return to GPIO is the caller's (board) concern — this is the driver half of a bus release
+/// (the mode machine's Passive handoff: `board::leaf_i2c_release`).
+pub fn release(p: &Peripherals) {
+    p.e_usci_b0
+        .ucb0ctlw0()
+        .modify(|r, w| unsafe { w.bits(r.bits() | UCSWRST) });
+}
+
 pub fn init(p: &Peripherals) {
     p.e_usci_b0.ucb0ctlw0().write(|w| unsafe { w.bits(UCSWRST) }); // hold in reset (releases pins)
     recover(p); // free a slave holding SDA low before we master the bus

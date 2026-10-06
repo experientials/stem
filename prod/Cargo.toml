@@ -41,9 +41,9 @@ debug = ["console", "deepsleep/debug"]
 # active mode is a RUNTIME switch among them. At least ONE mode is required (compile_error guard).
 # `mode-sensing` needs a 2nd I²C to master the sensor bus → NOT valid on fr24xx (compile_error).
 # `mode-passive` — SoM masters; MSP is a pure I/O-extender on the B1 slave, never touches the sensor bus.
-mode-passive = []
+mode-passive = ["deepsleep/mode-passive"]
 # `mode-sensing` — SoM suspended; MSP acquires the sensor bus (B0 master), monitors, wakes the PMIC.
-mode-sensing = []
+mode-sensing = ["deepsleep/mode-sensing"]
 
 [dependencies]
 msp430 = "0.4"

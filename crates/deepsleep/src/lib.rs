@@ -20,6 +20,10 @@ pub mod regmap;
 #[cfg(feature = "_dual")]
 pub mod enumerate;
 
+/// Operating-mode machine (Passive ↔ Sensing) + the sensor-bus acquire/release handoff. Dual-I²C only
+/// (fr2433 is Passive-only, no sensor bus to master) → gated `_dual`.
+#[cfg(feature = "_dual")]
+pub mod mode;
 pub mod post;
 pub mod status;
 
