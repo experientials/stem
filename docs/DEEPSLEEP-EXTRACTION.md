@@ -76,8 +76,9 @@ a task `.await`s an event (Stem request / GPIO edge / timer); the **ISR fires th
 does no work); the executor **drops to LPM when all tasks are Pending**; the next interrupt wakes it.
 `poll()` is the **degenerate, never-sleeps** version of this. The async-keyword task style *is* the
 deepsleep model — this is why task-handling is vital, and it ties directly back to the async-`sched`
-evaluation (ADR-0013). (This interrupt-driven+LPM decision may warrant its own ADR; for now it extends
-ADR-0013's follow-up #5, the LPM pender.)
+evaluation (ADR-0013). **No separate ADR:** this is ADR-0013's own "real waker / LPM pender" (its §"The
+valuable hard part is LPM sleep" + follow-up #5) — ADR-0013 holds the *decision*, this plan is the
+*application* to `deepsleep`.
 
 ---
 

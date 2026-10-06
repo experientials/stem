@@ -161,5 +161,7 @@ at `scratchpad/async-spike/`.
   interrupt-driven async eUSCI/**timer** leaves when a subsystem needs true `.await`-on-IFG or real
   timed pacing (enumerate used probe-then-yield; the VL53 demo uses nop-chunk pacing — both avoid
   needing a timer leaf, but active sensor monitoring will want one); the LPM pender for real
-  sleep-between-events.
+  sleep-between-events. **The subsystem that commits to #5 is the `deepsleep` module** — the
+interrupt-driven eUSCI-slave leaf + LPM waker are its execution model, built per the phased plan
+[../DEEPSLEEP-EXTRACTION.md](../DEEPSLEEP-EXTRACTION.md) (§3 Execution model, §A Phase 1).
 </content>
