@@ -14,9 +14,13 @@ use devices::{
     apds9960::Apds9960,
     mc6470::{Mc6470, Mc6470Mag},
     si7021::Si7021,
-    vl53l0x::{Attention, RangeTracker, Vl53l0x, Vl53l0xRanging},
+    vl53l0x::Vl53l0x,
     Device, Error,
 };
+// Ranging types are used ONLY by the --debug async `vl53l0x_range_demo` (report keeps just the
+// identity read) — gate them on `debug` so a console-but-not-debug build has no unused imports.
+#[cfg(feature = "debug")]
+use devices::vl53l0x::{Attention, RangeTracker, Vl53l0xRanging};
 use crate::pac::Peripherals;
 
 const LO: u8 = 0x08; // first 7-bit I2C address we scan
@@ -134,6 +138,12 @@ pub async fn leaf_scanner(
         }
         cancel.set(false);
         if let Some(scan) = scan_async(p, cancel).await {
+            // --debug: async wake-on-approach ranging demo if a VL53L0X answered. It yields between
+            // samples, so the Stem slave stays responsive during the ~5 s window (ADR-0006). Then publish.
+            #[cfg(feature = "debug")]
+            if !scan.faulted && scan.present.get(Vl53l0x::ADDR) && !cancel.get() {
+                vl53l0x_range_demo(p, cancel).await;
+            }
             out.set(Some(scan)); // the loop applies it (only while still Sensing)
         }
     }
@@ -289,46 +299,63 @@ pub fn report(p: &Peripherals, scan: &Scan) {
             Err(_) => uart::puts(p, "read err"),
         }
         uart::putc(p, b'\n');
+        // The ~5 s wake-on-approach ranging demo moved OUT of this synchronous report into the async
+        // `vl53l0x_range_demo` (run by `leaf_scanner` on a Sensing scan completion, --debug only) — so
+        // it no longer blocks the Stem slave for 5 s (ADR-0006).
+    }
+}
 
-        // Supervisor wake-on-approach: init ranging, then a short burst so a hand moving toward/away
-        // shows APPROACHING / receding / near. (Coarse ToF trend — see devices::vl53l0x.)
-        match Vl53l0xRanging::init(&mut bus) {
-            Ok(rng) => {
-                uart::puts(p, "VL53L0X range (move a hand toward it):\n");
-                let mut tracker = RangeTracker::new(300, 30); // near <30cm, 3cm trend hysteresis
-                let mut i = 0u8;
-                while i < 40 {
-                    // ~100 ms between samples → a ~5 s window to move a hand and watch the trend.
-                    for _ in 0..30_000u16 {
+/// Async VL53L0X wake-on-approach ranging demo (--debug). Moved out of the synchronous `report` so it
+/// no longer stalls the Stem slave for ~5 s (ADR-0006): the per-sample pacing burns the ~100 ms in
+/// nop-chunks separated by `sched::yield_now().await`, so the serve loop services `stem::poll`
+/// ~10×/sample while the ~5 s hand-wave window is preserved. Aborts immediately if `cancel` is set
+/// (we left Sensing → must stop driving the bus). Run by [`leaf_scanner`] on a Sensing scan completion.
+#[cfg(feature = "debug")]
+async fn vl53l0x_range_demo(p: &Peripherals, cancel: &Cell<bool>) {
+    let mut bus = EusciI2c::new(p);
+    match Vl53l0xRanging::init(&mut bus) {
+        Ok(rng) => {
+            uart::puts(p, "VL53L0X range (move a hand toward it):\n");
+            let mut tracker = RangeTracker::new(300, 30); // near <30cm, 3cm trend hysteresis
+            let mut i = 0u8;
+            while i < 40 {
+                if cancel.get() {
+                    break; // left Sensing mid-demo — stop driving the sensor bus
+                }
+                // ~100 ms pacing that STILL services the slave: burn the time in nop-chunks with a
+                // cooperative yield between each, so `stem::poll` runs ~10×/sample (vs the old 5 s stall).
+                for _ in 0..10u16 {
+                    for _ in 0..3_000u16 {
                         msp430::asm::nop();
                     }
-                    match rng.read_range(&mut bus) {
-                        Ok(mm) => {
-                            tracker.push(mm);
-                            uart::puts(p, "  ");
-                            uart::dec(p, mm);
-                            uart::puts(p, "mm ");
-                            uart::puts(
-                                p,
-                                match tracker.classify() {
-                                    Attention::NoTarget => "-",
-                                    Attention::Approaching => "APPROACHING",
-                                    Attention::Receding => "receding",
-                                    Attention::Stationary => "stationary",
-                                },
-                            );
-                            if tracker.is_near() {
-                                uart::puts(p, " NEAR");
-                            }
-                            uart::putc(p, b'\n');
-                        }
-                        Err(_) => uart::puts(p, "  read err\n"),
-                    }
-                    i += 1;
+                    sched::yield_now().await;
                 }
+                match rng.read_range(&mut bus) {
+                    Ok(mm) => {
+                        tracker.push(mm);
+                        uart::puts(p, "  ");
+                        uart::dec(p, mm);
+                        uart::puts(p, "mm ");
+                        uart::puts(
+                            p,
+                            match tracker.classify() {
+                                Attention::NoTarget => "-",
+                                Attention::Approaching => "APPROACHING",
+                                Attention::Receding => "receding",
+                                Attention::Stationary => "stationary",
+                            },
+                        );
+                        if tracker.is_near() {
+                            uart::puts(p, " NEAR");
+                        }
+                        uart::putc(p, b'\n');
+                    }
+                    Err(_) => uart::puts(p, "  read err\n"),
+                }
+                i += 1;
             }
-            Err(_) => uart::puts(p, "VL53L0X ranging init FAILED\n"),
         }
+        Err(_) => uart::puts(p, "VL53L0X ranging init FAILED\n"),
     }
 }
 
