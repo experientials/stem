@@ -80,15 +80,18 @@ status**. Check the box when done. Keep newest context at the top of each item.
     - [x] **uart:** formatters moved to `bsp::fmt` (shared, one copy — 5a246b6); the fr2433 console
       folded into `bsp::board::fr2433_launchpad` (b9ef0e2); both `uart.rs` collapse to
       `pub use bsp::fmt::*` + init/rx/getc board delegates. HW-verified @fr2433.
-  - **Unblocked by this:** the **`prod-core` bucket** (Stem slave CONV-3, `mode`/`status`/`post` lift,
-    Leaf-scan convergence) — see ADR-0014's crate-boundary table.
+  - **Unblocked by this:** the **`deepsleep` extraction** (Stem slave CONV-3, `mode`/`status`/`post`
+    lift, Leaf-scan convergence) — **full plan: [DEEPSLEEP-EXTRACTION.md](DEEPSLEEP-EXTRACTION.md)**
+    (derives from ADR-0014).
 - [ ] **CONV-2 · `bootrec.rs` de-hardcode** — *low (dormant); PAC import DONE, full agnosticism open*
   - DONE 2026-09-30: `diag/src/bootrec.rs` now uses `crate::pac::Peripherals` (via diag's bsp re-export),
     not the hardcoded `msp430fr2355`. Not build-exercised (still `mod`-undeclared/dormant).
   - Still open: making it *truly* chip-agnostic — its snapshot fields assume the fr2355 board
     (UCA1 ctlw0, p4sel0). Finish when it's actually wired in.
-- [ ] **CONV-3 · Stem-I²C slave in `bsp::board`** — *feature (prod milestone)* · [GitHub #2](https://github.com/experientials/stem/issues/2)
-  - Add the slave/target uplink (`stem_i2c`) role; needs a non-embedded-hal target abstraction.
+- [ ] **CONV-3 · Stem-I²C slave driver + dispatch split** — *feature (prod milestone)* · [GitHub #2](https://github.com/experientials/stem/issues/2) · **plan: [DEEPSLEEP-EXTRACTION.md §A](DEEPSLEEP-EXTRACTION.md)**
+  - Split `stem.rs`: slave **driver + ISR → `bsp/src/stem_i2c.rs`** (sibling to `i2c.rs`, event seam),
+    **pins → `board`**, **dispatch → `deepsleep`** (async over `SlaveEvent`). Non-embedded-hal target;
+    interrupt-driven + LPM. See the plan for the event-seam decision and the wake model.
 - [x] **CONV-6 · fr24xx (FR2433) I²C-SLAVE / regmap surface — the node's real role** — *DONE (boot-
   verified) 2026-09-30; physical GPIO/ADC backing + master-reads-slave proof still open*
   - Built the fr24xx node's whole job: answer the SoM's PCA9698-emulation register file on the single

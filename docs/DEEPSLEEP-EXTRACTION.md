@@ -14,9 +14,9 @@ exercise the real capability, and the same-boot/master-commanded behaviour falls
 
 ## 1. Crate shape — one crate PER PRODUCT MODULE, shared layers beneath
 
-Each product module is its **own crate** — `deepsleep` (MSP430), later `lowvision`, `bluetooth` (their
-own MCUs). Not one crate: command sets differ *and* the MCUs differ (PAC/HAL/transport). Named for the
-module, not the build axis (reject `node`/`prod-core`: too generic / names prod-vs-diag).
+Each product module is its **own crate** — `deepsleep` (MSP430), later `lowvision`, etc (their
+own MCUs). Not one crate: command sets differ *and* the MCUs differ (PAC/HAL/transport). 
+Named for the module, not the build axis (reject `node`/`prod-core`: too generic / names prod-vs-diag).
 
 **`deepsleep`** = MSP430 deepsleep-supervisor: MCU state (status/identity, mode, FRAM integrity) + the
 semantic command/state model + command dispatch + the Stem-slave dispatch. Both prod-bin and diag-bin
@@ -62,7 +62,7 @@ The node is a *deep-sleep* supervisor: it sits in LPM and **wakes on interrupts*
 
 | wake source | from LPM? | grounding (verified) |
 |---|---|---|
-| **Stem I²C slave** | LPM0–4 | `slau445i` §23.3.7/§24.3: eUSCI auto-clock-activation; master drives SCL; slave **clock-stretches** until the CPU services RX/TX → the RX/TX interrupt wakes the CPU, stretch covers latency |
+| **Stem I²C slave** | LPM0–4 | `slau445i` §24.3.10 (verbatim): "operate the eUSCI_B in I2C slave mode while the device is in LPM4 and all internal clock sources are disabled. The receive or transmit interrupts can wake up the CPU from any low-power mode." Clock-stretch (§24.3) covers wake latency. **One shared eUSCI_B I²C interrupt vector** (§24.3.11) — the ISR dispatches TX/RX/state by flag |
 | **GPIO** | any LPM (incl LPM4) | port edge interrupts — asynchronous |
 | **Analog** | LPM via **eCOMP** | device DS: FR2476 ×1 eCOMP, FR2355 ×2 eCOMP (+ ADC). Threshold-wake = comparator; bare ADC needs a clock (not idle-wake) |
 | **Watchdog** | LPM3 (interval mode) | `WDTTMSEL=1` → periodic `WDTIFG`; **mutually exclusive** with the reset-backstop (one timer) — prefer a Timer/RTC tick, keep WDT as backstop |
@@ -106,8 +106,9 @@ contract → `stembus` (ADR-0012).
 
 - **Transport = a driver → `bsp/src/stem_i2c.rs`** (NEW, sibling to the Leaf-master `i2c.rs` — **not**
   `board`; drivers live at the `i2c.rs` layer). eUSCI_B *slave* register programming, **family** cfg-split
-  (UCB1 dual / UCB0 mode-split fr2433) — plus **its ISR**, which fires the waker. No `embedded-hal`
-  slave trait exists, so this file exposes the invented seam.
+  (UCB1 dual / UCB0 mode-split fr2433) — plus **its ISR** (the single shared eUSCI_B I²C vector,
+  `slau445i` §24.3.11 — dispatch TX/RX/state by flag), which fires the waker. No `embedded-hal` slave
+  trait exists, so this file exposes the invented seam.
 - **Pin routing → `board/<chip>_<module>`** `route_stem_i2c_pins()` — **module** cfg-split (P3.2/3.6
   FR2476, P4.6/4.7 FR2355, P1.2/3 FR2433), like `route_console_uart_pins`. (The code already has this
   seam: `hw::route_pins` is the only chip-split; `init`+accessors are family-shared.)

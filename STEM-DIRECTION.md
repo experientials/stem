@@ -324,6 +324,12 @@ code**, not a parallel reimplementation, so the maximum prod surface is under te
 - **Size:** the FR2433 15 KB gate applies to the **prod binary**; diag (32 KB budget) carries prod-core
   + test harness and is expected to be larger — no conflict.
 
+**Named + scoped since (2026-10-06):** this "prod-core library" is the **`deepsleep` crate** — the MSP430
+deepsleep-supervisor module (per-product-module crates, siblings `lowvision`/`bluetooth` on their own
+MCUs; *not* a generic `prod-core`/`node`). The slave **driver → `bsp/src/stem_i2c.rs`**, dispatch +
+semantic command/state → `deepsleep`; execution is **interrupt-driven + LPM** via the async `sched`
+executor. Full phased plan: **[docs/DEEPSLEEP-EXTRACTION.md](docs/DEEPSLEEP-EXTRACTION.md)**.
+
 **Sharper still (Henrik 2026-09-29):** *"I would not treat any/much of the prod code as a distinct
 codebase but rather diag as the special case on top of 'normal'."* · *"prod should just be seen as a
 build target/axis."* So **prod is the "normal" baseline**, and **diag is a special-case build axis on

@@ -77,6 +77,11 @@ eUSCI-slave hardware half → `bsp::board` and the RegFile/dispatch half → `pr
 scanner converge onto one shared probe core. This is what lets **diag host prod functionality** and the
 **same-boot + master-commanded mode** behaviour (STEM-DIRECTION.md) fall out.
 
+> **Scoped since (2026-10-06):** this "bucket" is now the **`deepsleep` crate** — the MSP430 module
+> (per-product-module crates, not a generic `prod-core`), with the slave **driver → `bsp/src/stem_i2c.rs`**
+> (not `bsp::board`) and the dispatch + semantic command/state model → `deepsleep`. Full phased plan +
+> the interrupt-driven/LPM execution model: [../DEEPSLEEP-EXTRACTION.md](../DEEPSLEEP-EXTRACTION.md).
+
 **Costs / caveats carried forward:**
 - `pin_map` per-member is still **thin placeholders** (`bank_count: 5` for both dual rows). Because the
   one-image goal means the image must drive the *correct* hardware on a second-sourced part, these must
