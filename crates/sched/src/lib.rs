@@ -132,3 +132,49 @@ pub fn tick<C>(slots: &mut [Slot<'_, C>], cx: &mut C, now: u32) -> u16 {
     }
     ran
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Async primitives (ADR-0013) — the SAME cooperative, never-block, one-stack model, but a task body
+// can be written as an `async fn … .await` and the compiler generates the state machine (vs the
+// hand-written [`Task`] above). Additive: a build uses `Task`/[`tick`] OR these, or both.
+//
+// There is no task arena and no real wake machinery: this is a cooperative executor that RE-POLLS its
+// futures every main-loop pass, so a `Waker` need do nothing. The caller pins its task futures
+// (`core::pin::pin!`), builds a `Context` from [`noop_waker`], and polls them each pass — exactly as
+// the hand-written loop calls `Task::poll`. `.await`ing [`yield_now`] is the async form of a
+// cooperative step returning so its peers get a turn. Pure `core`: no alloc, no embassy. See the
+// measured cost + the borrow rule ("never hold shared `&mut` state across `.await`") in ADR-0013 and
+// docs/TASK-STYLE-GUIDE.md.
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(|_| NOOP_RAW, |_| {}, |_| {}, |_| {});
+const NOOP_RAW: RawWaker = RawWaker::new(core::ptr::null(), &NOOP_VTABLE);
+
+/// A no-op [`Waker`]: this executor re-polls every pass, so `wake()` is inert. One shared vtable (4
+/// fn pointers) — the entire runtime cost beyond the generated futures (ADR-0013 spike: ~free).
+pub fn noop_waker() -> Waker {
+    // SAFETY: NOOP_VTABLE's fns are all no-ops / return the same no-op RawWaker; the data ptr is
+    // null and never dereferenced. This satisfies the RawWaker contract trivially.
+    unsafe { Waker::from_raw(NOOP_RAW) }
+}
+
+/// Yield control back to the executor exactly once: `Pending` now, `Ready` on the next poll. The
+/// async equivalent of a cooperative [`Task::poll`] returning so its peers run (the never-block
+/// contract, ADR-0006). `.await` this between units of work in a long async task.
+pub async fn yield_now() {
+    struct Yield(bool);
+    impl Future for Yield {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                Poll::Ready(())
+            } else {
+                self.0 = true;
+                Poll::Pending
+            }
+        }
+    }
+    Yield(false).await
+}

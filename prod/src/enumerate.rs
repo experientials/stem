@@ -3,6 +3,8 @@
 //! phantom devices. The scan result feeds the debug registers (always); the human report is
 //! `console`-gated (dev only). This is the enumerate-the-bus / report-state slice.
 
+use core::cell::Cell;
+
 use crate::i2c;
 use crate::hal::EusciI2c;
 #[cfg(feature = "console")]
@@ -85,56 +87,55 @@ pub fn scan(p: &Peripherals) -> Scan {
     Scan { present: pr, faulted }
 }
 
-/// An **incremental** sensor-bus scan (ADR-0006). Same probing as [`scan`], but split so the caller
-/// advances it a few addresses per main-loop pass — `stem::poll` runs between steps, so the Stem slave
-/// + console never stall on a mode switch (the inline `scan` blocked them; on a wedged bus, badly).
-/// One-shot bus recovery happens on the first [`step`](ScanJob::step); the result is published once, when
-/// the address window is exhausted.
-pub struct ScanJob {
-    pr: Presence,
-    next: u8,         // next 7-bit address to probe; the job is complete once this passes HI
-    recovered: bool,  // did the one-shot recovery leave the bus idle-high (both lines)?
-    started: bool,    // has the first step run the recovery yet?
+/// Async Leaf scan (ADR-0013 — replaces the hand-written `ScanJob` state machine). Same probing /
+/// recovery / fault logic as [`scan`], but `.await`s [`sched::yield_now`] after each probe so
+/// `stem::poll` + the console keep breathing (the never-block contract, ADR-0006). Checks `cancel`
+/// each probe and aborts (returns `None`) the instant we leave Sensing — critical: a released sensor
+/// bus must never be driven against its new owner. Holds only `p` (shared `&`) + its own small state
+/// across awaits — never `rf` — and RETURNS the `Scan`, so it can't conflict with the slave's
+/// `&mut rf` (the borrow rule; docs/TASK-STYLE-GUIDE.md).
+pub async fn scan_async(p: &Peripherals, cancel: &Cell<bool>) -> Option<Scan> {
+    let recovered = i2c::recover(p);
+    let mut pr = Presence::new();
+    let mut a = LO;
+    while a <= HI {
+        if cancel.get() {
+            return None; // left Sensing mid-scan — drop the bus immediately
+        }
+        {
+            let mut bus = EusciI2c::new(p);
+            if devices::present(&mut bus, a) {
+                pr.set(a);
+            }
+        } // `bus` dropped before the await — nothing borrowed across the yield but `p`/`pr`/`a`
+        a += 1;
+        sched::yield_now().await;
+    }
+    let (sda1, scl1) = i2c::bus_levels(p);
+    let faulted = !recovered || !(sda1 && scl1) || pr.count() > SANITY_MAX;
+    Some(Scan { present: pr, faulted })
 }
 
-impl ScanJob {
-    pub const fn new() -> Self {
-        Self {
-            pr: Presence::new(),
-            next: LO,
-            recovered: false,
-            started: false,
+/// Long-lived Leaf-scan TASK (pinned once by the caller, polled every main-loop pass). Idles —
+/// yielding — until `arm` is set (a switch into Sensing), runs one [`scan_async`], deposits the
+/// result in `out` for the loop to publish into the RegFile, then re-arms for the next Sensing entry.
+/// This is the async-native `sched` task that replaces the loop's manual `ScanJob` threading: ONE
+/// future, no per-arm re-creation, no `alloc`, no unsafe pin. The `Cell`s are the mailbox — touched
+/// only at yield boundaries, never held across `.await`.
+pub async fn leaf_scanner(
+    p: &Peripherals,
+    arm: &Cell<bool>,
+    cancel: &Cell<bool>,
+    out: &Cell<Option<Scan>>,
+) -> ! {
+    loop {
+        while !arm.replace(false) {
+            sched::yield_now().await; // idle until a Sensing switch arms a scan
         }
-    }
-
-    /// Advance up to `budget` address probes. Returns `Some(Scan)` exactly once — on the step that
-    /// finishes the window — and `None` while more probing remains (or if called again after finishing).
-    pub fn step(&mut self, p: &Peripherals, budget: u8) -> Option<Scan> {
-        if self.next > HI {
-            return None; // already complete (and reported)
+        cancel.set(false);
+        if let Some(scan) = scan_async(p, cancel).await {
+            out.set(Some(scan)); // the loop applies it (only while still Sensing)
         }
-        if !self.started {
-            // One-shot recovery up front — a wedged bus (SDA-low slave OR SCL-low master self-hold)
-            // would false-ACK every probe. recover() handles both and returns true only when idle-high.
-            self.recovered = i2c::recover(p);
-            self.started = true;
-        }
-        let mut bus = EusciI2c::new(p);
-        let mut did = 0u8;
-        while self.next <= HI && did < budget {
-            if devices::present(&mut bus, self.next) {
-                self.pr.set(self.next);
-            }
-            self.next += 1;
-            did += 1;
-        }
-        if self.next > HI {
-            let (sda1, scl1) = i2c::bus_levels(p);
-            let faulted = !self.recovered || !(sda1 && scl1) || self.pr.count() > SANITY_MAX;
-            let present = core::mem::replace(&mut self.pr, Presence::new());
-            return Some(Scan { present, faulted });
-        }
-        None
     }
 }
 

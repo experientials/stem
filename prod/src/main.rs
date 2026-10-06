@@ -47,6 +47,10 @@ pub(crate) use bsp::pac;
 use crate::pac::Peripherals;
 #[cfg(feature = "_dual")]
 pub(crate) use bsp::{hal, i2c};
+#[cfg(feature = "_dual")]
+use core::cell::Cell; // async Leaf-scanner mailbox (arm/cancel/result) — see run_dual's serve loop
+#[cfg(feature = "_dual")]
+use core::future::Future; // for `.poll()` on the pinned scanner future in the serve loop
 
 mod model; // Runtime MSP430 model detection + pin mapping (one image per compatible family).
 mod regmap; // I²C-slave register-map contract (PCA9698 emulation + Thepia extensions). See regmap.rs.
@@ -267,23 +271,43 @@ fn run_dual(p: &Peripherals) -> ! {
     // the Leaf enumerate incrementally each pass so neither a scan nor a mode switch stalls the SoM's
     // control channel. The console/`debug` extras (auto-report + interactive s/r/d/m/l commands) are
     // cfg-gated INSIDE this one loop — previously this was two near-identical loops (console vs silent).
-    let mut scan_job: Option<enumerate::ScanJob> = None;
+    // Leaf-scan TASK (ADR-0013): ONE async `leaf_scanner` future, pinned once and polled every pass,
+    // replaces the hand-written `ScanJob`/`pump_scan` threading. The `Cell` mailbox arms it (on a
+    // Sensing switch), cancels it (on leaving Sensing — so a released bus is never driven), and carries
+    // its result out for us to publish. It borrows only `p` + these Cells — never `rf` — so it never
+    // conflicts with the slave's `&mut rf` (the borrow rule; docs/TASK-STYLE-GUIDE.md).
+    let arm = Cell::new(false);
+    let cancel = Cell::new(false);
+    let out: Cell<Option<enumerate::Scan>> = Cell::new(None);
+    let mut scanner = core::pin::pin!(enumerate::leaf_scanner(p, &arm, &cancel, &out));
+    let waker = sched::noop_waker();
+    let mut acx = core::task::Context::from_waker(&waker);
+
     loop {
         pet_wdt(p); // reload the backstop; a genuine hang stops petting → reset
         stem::poll(p, &mut slave, &mut rf); // service the SoM/Stem master
-        let _scan_done = pump_scan(p, &mach, &mut rf, model, &mut last, &mut scan_job); // advance scan
-        // --debug: when a Sensing scan COMPLETES (SoM/Pico commanded Sensing over Stem), auto-print
-        // what was found + the Leaf diagnostic — no keystroke needed (the node's own console is flaky).
-        #[cfg(feature = "debug")]
-        if _scan_done {
-            enumerate::report(p, &last);
-            post::debug_leaf(p);
+        let _ = scanner.as_mut().poll(&mut acx); // advance the Leaf scan (forever task → always Pending)
+        // A completed scan deposits its result; publish it into the RegFile — but ONLY while still
+        // Sensing (a result that lands after we left Sensing is stale and must not overwrite status).
+        if let Some(scan) = out.take() {
+            if mach.is_sensing() {
+                last = scan;
+                rf.status = status::Status::from_scan(model, &last);
+                rf.status.set_mode(mach.current().code());
+                // --debug: auto-print what the completed Sensing scan found (no keystroke needed).
+                #[cfg(feature = "debug")]
+                {
+                    enumerate::report(p, &last);
+                    post::debug_leaf(p);
+                }
+            }
         }
         // A SoM write to MODE_CTRL (0x3E) queues a mode switch; begin it here (non-blocking).
         if let Some(code) = rf.take_mode_request() {
             match mode::Mode::from_code(code) {
                 Some(m) if m != mach.current() => {
-                    begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, m);
+                    begin_mode(p, &mut mach, &mut rf, model, &mut last, m);
+                    arm_scan(&arm, &cancel, mach.is_sensing()); // arm/cancel the async scanner
                     #[cfg(feature = "debug")]
                     {
                         uart::puts(p, "mode (SoM) -> ");
@@ -308,9 +332,11 @@ fn run_dual(p: &Peripherals) -> ! {
             match uart::getc(p) {
                 b's' | b'S' => {
                     if mach.is_sensing() {
-                        // Manual dev scan: synchronous is fine for an explicit keystroke. Cancel any
-                        // incremental job so it can't later overwrite this fresh result.
-                        scan_job = None;
+                        // Manual dev scan: synchronous for an explicit keystroke. Cancel the async
+                        // scan + drain any pending result so it can't overwrite this fresh one.
+                        cancel.set(true);
+                        arm.set(false);
+                        let _ = out.take();
                         last = enumerate::scan(p);
                         enumerate::report(p, &last);
                         rf.status = status::Status::from_scan(model, &last);
@@ -323,11 +349,12 @@ fn run_dual(p: &Peripherals) -> ! {
                 b'd' | b'D' => rf.status.dump(p),
                 b'm' | b'M' => {
                     let next = mach.current().toggled();
-                    begin_mode(p, &mut mach, &mut rf, model, &mut last, &mut scan_job, next);
+                    begin_mode(p, &mut mach, &mut rf, model, &mut last, next);
+                    arm_scan(&arm, &cancel, mach.is_sensing());
                     uart::puts(p, "mode -> ");
                     uart::puts(p, mach.current().name());
                     if mach.is_sensing() {
-                        uart::puts(p, "  (Leaf enumerate running incrementally; 'd'/'s' to see it)\n");
+                        uart::puts(p, "  (Leaf enumerate running async; 'd'/'s' to see it)\n");
                     } else {
                         uart::puts(p, "  sensor bus released (SoM owns it)\n");
                     }
@@ -360,18 +387,12 @@ fn run_dual(p: &Peripherals) -> ! {
     }
 }
 
-/// Leaf probes advanced per main-loop pass during an incremental enumerate (ADR-0006). Small enough
-/// that a mode switch never stalls the Stem slave / console for long (even on a wedged bus, where each
-/// probe pays a recovery); large enough that the full 0x08–0x77 window finishes in a handful of passes.
-#[cfg(feature = "_dual")]
-const SCAN_BUDGET: u8 = 8;
-
 /// BEGIN a mode switch — from the bench `m` key OR a SoM write to `MODE_CTRL` (0x3E) — WITHOUT blocking
-/// the Stem control channel (ADR-0006). Does only the **fast** part inline: hand off the sensor bus
+/// the Stem control channel (ADR-0006). Does only the **fast** part: hand off the sensor bus
 /// (`ModeMachine::switch` = pin mux + eUSCI bring-up/reset) and republish the live mode at 0x3E so the
-/// SoM's readback is correct immediately. For Sensing it **arms an incremental Leaf enumerate** (via
-/// `*job`) that `pump_scan` advances between `stem::poll`s; the full scan NEVER runs here. Centralises
-/// what both triggers do so they can't drift.
+/// SoM's readback is correct immediately. Arming/cancelling the async Leaf enumerate is the caller's
+/// job via [`arm_scan`] (the scanner is a long-lived async task polled in the loop, ADR-0013).
+/// Centralises what both triggers do so they can't drift.
 #[cfg(feature = "_dual")]
 fn begin_mode(
     p: &Peripherals,
@@ -379,45 +400,30 @@ fn begin_mode(
     rf: &mut stem::RegFile,
     model: model::Model,
     last: &mut enumerate::Scan,
-    job: &mut Option<enumerate::ScanJob>,
     new: mode::Mode,
 ) {
     mach.switch(p, new); // sequenced bus acquire/release (no-op if already there) — fast, no scan
-    if mach.is_sensing() {
-        // Publish Sensing NOW; dev_count stays at the booted default until the incremental scan lands.
-        rf.status = status::Status::booted(model);
-        *job = Some(enumerate::ScanJob::new()); // enumerate runs in the loop, not here
-    } else {
-        *last = enumerate::Scan::absent();
-        rf.status = status::Status::booted(model);
-        *job = None; // leaving Sensing cancels any in-flight scan
+    if !mach.is_sensing() {
+        *last = enumerate::Scan::absent(); // leaving Sensing: we hold no sensor data
     }
+    // dev_count stays at the booted default until the async scan lands (Sensing) / stays absent (Passive).
+    rf.status = status::Status::booted(model);
     rf.status.set_mode(mach.current().code());
 }
 
-/// Advance an in-flight incremental Leaf enumerate a little (if any), and publish the full status once
-/// it completes. Call once per main-loop pass, right after `stem::poll`, so the Stem slave + console
-/// keep breathing while a Sensing-mode scan runs (ADR-0006).
-/// Returns `true` on the pass that COMPLETES a scan (so a `--debug` caller can print what was found).
+/// Arm or cancel the async Leaf [`enumerate::leaf_scanner`] on a mode transition: entering Sensing
+/// arms a fresh scan; leaving Sensing cancels any in-flight scan IMMEDIATELY (so the just-released
+/// sensor bus is never driven against its new owner — a two-master fault). The scanner itself is
+/// polled every pass in the serve loop; this only flips its mailbox flags.
 #[cfg(feature = "_dual")]
-fn pump_scan(
-    p: &Peripherals,
-    mach: &mode::ModeMachine,
-    rf: &mut stem::RegFile,
-    model: model::Model,
-    last: &mut enumerate::Scan,
-    job: &mut Option<enumerate::ScanJob>,
-) -> bool {
-    if let Some(j) = job.as_mut() {
-        if let Some(done) = j.step(p, SCAN_BUDGET) {
-            *last = done;
-            rf.status = status::Status::from_scan(model, last);
-            rf.status.set_mode(mach.current().code());
-            *job = None;
-            return true;
-        }
+fn arm_scan(arm: &Cell<bool>, cancel: &Cell<bool>, sensing: bool) {
+    if sensing {
+        cancel.set(false);
+        arm.set(true);
+    } else {
+        cancel.set(true);
+        arm.set(false);
     }
-    false
 }
 
 /// Boot splash on a connected OLED: firmware version + boot success for ~5 s, then blank the panel
