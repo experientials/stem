@@ -123,6 +123,17 @@ interrupt-driven + LPM via async, events come from the **ISR** and are consumed 
 raw-accessor/poll shape (the old option a) can't express ISR→waker→async, so it's out. `poll()` survives
 only as the degenerate fallback feed.
 
+**Refinement adopted in 1a (reconciling §3 with §A).** A naive reading of §A ("async task consumes
+per-**byte** events") would put a byte-level SPSC queue in the ISR — but that contradicts §3's "the ISR
+fires the waker (**sets a flag, does no work**)" *and* forces sharing the `RegFile` into the ISR
+(critical sections + footprint). The correct reading that satisfies both: the **ISR only masks its own
+eUSCI_B source + wakes** (no byte work, no `RegFile`); the transport's **`next_event()` decodes the IFG
+into `SlaveEvent`s** when the woken dispatch services it, with eUSCI auto-clock-stretch absorbing the
+wake→service latency (`slau445i` §24.3). `RegFile` stays entirely in the main context — only the eUSCI
+IE register and a wake flag cross the ISR boundary. So `SlaveEvent` lives at the `next_event()` seam, NOT
+in the ISR; this is what 1a built (polled), and 1b adds the ISR on top unchanged in servicing — only
+*when* `next_event()` runs changes.
+
 **Not decisions:** clock-stretch is automatic (hw) — only servicing latency matters; and the transport
 must let **diag bring the slave up identically** (both call `bsp::stem_i2c` + `deepsleep` dispatch).
 
@@ -151,10 +162,29 @@ Cargo's crate-scoping dictates one answer:
   `stem.rs` still fused in prod. Verified: prod fr2476/fr2355/fr2433 + `--debug` + diag build in budget;
   HW on `@fr2476` — boot/status/enumerate + build-identity correct; mode role proven by Passive
   (`MST=0 SWRST=1`) → Sensing (`MST=1 SWRST=0`, OLED `0x3C` found).
-- **Phase 1 — split the Stem slave (§A) + go interrupt-driven.** *(the hard one)* Driver+ISR+waker →
-  `bsp/src/stem_i2c.rs`; dispatch → `deepsleep` async task over `SlaveEvent`; adopt the `sched` async
-  executor + LPM waker (ADR-0013). **Verify:** master read/write over Stem; CPU sleeps between
-  transactions and wakes on the slave ISR.
+- **Phase 1 — split the Stem slave (§A) + go interrupt-driven.** *(the hard one)* Done in verifiable
+  sub-steps:
+  - **1a — ✅ DONE 2026-10-06** (`a1633a7`). Pure relocation into the event seam, NO behavior change,
+    still polled. Transport → NEW `bsp/src/stem_i2c.rs` (`hw` instance seam copied verbatim + the
+    `SlaveEvent`/`next_event`/`provide_tx` seam); pins → `board::route_stem_i2c_pins` (per-module, keyed
+    on the chip feature — dropped the prod-only `_stem_p3`/`_stem_p4`); dispatch → `deepsleep::stem`
+    (`git mv`, `poll()` now drains the seam, identical IFG sequence). bsp symmetric: `i2c` (Leaf master)
+    ↔ `stem_i2c` (Stem slave). Builds in budget prod fr2476/fr2355/fr2433 (+`--debug`) + diag; zero
+    warnings from moved/new code. HW on `@fr2476`: clean boot + banner + status dump + Passive→Sensing
+    (OLED `0x3C`) + serve-loop/loopback paths run without wedging. **NOT yet HW-proven:** an actual
+    master read/write landing on the slave (needs the Stem↔Leaf jumpers `P3.2→P1.2, P3.6→P1.3`, or a SoM
+    master) — a verbatim-preserving refactor, so register behavior is unchanged, but the end-to-end
+    master proof is deferred to 1b.
+  - **1b — NEXT: add the ISR + LPM wake.** `init` enables the eUSCI_B slave IE; add the single shared
+    eUSCI_B `#[interrupt]` (dual → `EUSCI_B1`; fr2433 → `USCI_B0`, verified in `pac/*/src/lib.rs`) that
+    **masks its own IE + sets a wake flag + exits LPM, doing no byte work** (§3 + the 1a refinement);
+    the serve loop enables GIE and drops to LPM when idle; the woken `poll()`/dispatch services via
+    `next_event()` and re-enables IE. **Open design point:** the console/`debug` build polls the UART
+    menu, so a console build can't deep-sleep identically — either the UART RX IE also wakes, or console
+    builds stay in the degenerate no-sleep loop. **Verify (needs a master on the bench):** master
+    read/write over Stem lands; CPU sleeps between transactions and wakes on the slave ISR.
+  - **1c — adopt the async dispatch task.** Move the drain into a `sched` async task `.await`ing the
+    seam; the ISR-set flag drives the waker; executor drops to LPM when all tasks Pending (ADR-0013).
 - **Phase 2 — command surface.** One `Command` enum + `execute`; Stem-regmap face + UART face. Keep the
   PCA9698 region layout reserved (§2).
 - **Phase 3 — diag consumes `deepsleep` + same-boot.** diag brings up the slave identically; ~1 s grace
@@ -171,6 +201,9 @@ FR2433 15 KB image pulls only what it ships.
 
 ## Status
 Prereqs **done**: `bsp::model`, CONV-1 (clock/uart/fmt → bsp), `stembus`, ADR-0014. **Phase 0 DONE**
-(2026-10-06) — `deepsleep` holds regmap/enumerate/status/post/mode. **Next actionable: Phase 1** (the
-Stem-slave `stem.rs` split, §A), which needs the `sched` async executor + LPM waker (ADR-0013 follow-up)
-— now clearly the `deepsleep` foundation, not an optional nicety. (`stem.rs` remains fused in prod until then.)
+(2026-10-06) — `deepsleep` holds regmap/enumerate/status/post/mode. **Phase 1a DONE** (2026-10-06,
+`a1633a7`) — Stem-slave transport split into `bsp::stem_i2c` behind the `SlaveEvent` seam, dispatch in
+`deepsleep::stem`, still polled (no behavior change). **Next actionable: Phase 1b** (add the eUSCI_B ISR
++ LPM wake — the first behavioral change; the servicing path is unchanged, only *when* it runs). 1b's
+HW verify needs a **master on the bench** (the Stem↔Leaf jumpers for the loopback self-test, or a SoM /
+the Pico stem-probe as master) — which also retires 1a's one deferred proof (master read/write landing).
