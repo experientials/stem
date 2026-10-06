@@ -39,3 +39,4 @@ Date: YYYY-MM-DD   Source: <where the decision was made / canonical home>
 | [0012](0012-stembus-shared-contract-crate.md) | 2026-10-04 | `stembus` — one shared crate for the Stem-bus contract + codecs (M7/stem-probe/prod) | Accepted |
 | [0011](0011-ship-mode-is-the-off-state.md) | 2026-10-04 | Ship mode (BATFET open) is the product's off / storage state | Accepted |
 | [0013](0013-async-runtime-per-core-tier.md) | 2026-10-05 | Async runtime per core tier: embassy on Cortex-M/host, `core`-only async `sched` on MSP430 | Accepted (tier) · Proposed (async-sched) |
+| [0014](0014-board-layer-structure.md) | 2026-10-06 | Board-layer structure: compile-time family module + runtime model-detect; LaunchPad = product-board module (resolves CONV-1 gate) | Accepted |

@@ -47,6 +47,24 @@ status**. Check the box when done. Keep newest context at the top of each item.
 
 ---
 
+- [ ] **BUG-5 · FR2355 Leaf `read_reg` fails on a device the probe ACKs (marginal pull-ups?)** — *low (bench/electrical; not blocking)*
+  - Evidence (2026-10-06, MCP23017 I/O expander @0x20 on the FR2355 Leaf, 5.6 kΩ pull-ups): the address
+    **probe ACKs** (`I2C scan: 0x20`, inventory `present`) but `read_reg(0x20, 0x00)` (IODIRA) returns
+    `false` → `id-read FAILED`. A **transaction** failure (NACK/timeout mid-sequence), not an `id=XX
+    MISMATCH`.
+  - Likely cause: NOT the code — `i2c.rs` is shared `bsp` and the same `read_reg` is proven on **FR2476**
+    (VL53L0X WHO_AM_I-style reads + ranging, 2026-10-06). `read_reg` does a **repeated-START read** with a
+    master-TX→slave-TX turnaround, far more rise-time-demanding than a bare address probe — so weak 5.6 kΩ
+    pull-ups into the bus capacitance ACK the probe but fail the read. Consistent with the long-open FR2355
+    Leaf electrical root-trigger (see [[i2c-scl-low-wedge-recovery]]).
+  - Confirm (A/B): move the MCP23017 to the **FR2476 Leaf** (clean bus) OR fit **2.2 kΩ** pull-ups on the
+    FR2355 Leaf and re-run. `id=FF OK` on the stronger bus confirms electrical AND closes the FR2355 Leaf
+    root-cause with a concrete reproduction. (MCP23017 added to diag's `DEVICES` manifest @0x20 with IODIRA
+    POR=0xFF as a POST-time signature — recognition works; only the read is unconfirmed on this bench.)
+  - Optional aid: finer-grained `read_reg` logging (which phase NACKs) — hold until the pull-up test.
+
+---
+
 - [x] **BUG-4 · prod `model.rs` FR2355 id was a placeholder → false "WRONG-FAMILY FLASH"** — *FIXED
   2026-09-30*. `DEVICE_ID_FR2355 = 0x830C` (was placeholder `0xF235`); FR2476 `0x832A` / FR2433 `0x8240`
   were already correct. Verified on hardware: FR2355 now boots `(FR2355)`, no wrong-family warning,
@@ -54,12 +72,20 @@ status**. Check the box when done. Keep newest context at the top of each item.
 
 ## Convergence / tech-debt — from the diag/prod → bsp work (STEM-DIRECTION.md)
 
-- [ ] **CONV-1 · prod `clock.rs`/`uart.rs` → `bsp::board`** — *medium · DESIGN-GATED (not short-term)* · [GitHub #5](https://github.com/experientials/stem/issues/5)
-  - The hal/i2c fork is eliminated (both use `bsp`), but prod still has its own family-generic
-    `clock.rs`/`uart.rs`. Folding them into `bsp::board` is **not just effort** — it embeds a design
-    decision: prod uses **runtime model-detect + pin-map** (`model.rs`, one image per family) vs
-    `bsp::board`'s **compile-time per-`<chip>_<module>`**; and prod targets the **product PCB** while
-    `board` has only LaunchPad modules. Decide the board-layer philosophy first (see #5).
+- [ ] **CONV-1 · prod `clock.rs`/`uart.rs` → `bsp::board`** — *GATE RESOLVED 2026-10-06 ([ADR-0014](adr/0014-board-layer-structure.md)); now mechanical* · [GitHub #5](https://github.com/experientials/stem/issues/5)
+  - The design question ("runtime model-detect vs compile-time `<chip>_<module>`"; "product PCB vs
+    LaunchPad modules") is **decided** by ADR-0014: the two are complementary axes (`bsp::board` =
+    compile-time family, `bsp::model` = runtime member), and **LaunchPad modules serve as the
+    product-board modules** until a product PCB exists. So folding no longer embeds an undecided choice.
+  - Remaining work (mechanical):
+    - [ ] **clock:** prod/`clock.rs::init_1mhz` is a verbatim copy of `bsp::board::clock_init_1mhz`
+      (already does per-module trim) → prod calls board's, delete the copy. Compile-time-per-family, so
+      the runtime-model axis never applied here.
+    - [ ] **uart:** text formatters (`puts`/`hex`/`dec`/`fixed2`) are byte-identical in prod+diag → one
+      shared `fmt`; the fr2433 console (inline in prod only) → a `bsp::board` fr2433 console module;
+      prod/`uart.rs` collapses to formatters + delegation.
+  - Unblocks the **`prod-core` bucket** (Stem slave CONV-3, `mode`/`status`/`post` lift, Leaf-scan
+    convergence) — see ADR-0014's crate-boundary table.
 - [ ] **CONV-2 · `bootrec.rs` de-hardcode** — *low (dormant); PAC import DONE, full agnosticism open*
   - DONE 2026-09-30: `diag/src/bootrec.rs` now uses `crate::pac::Peripherals` (via diag's bsp re-export),
     not the hardcoded `msp430fr2355`. Not build-exercised (still `mod`-undeclared/dormant).

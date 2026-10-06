@@ -334,6 +334,57 @@ behaviour is the baseline; diag layers the test harness on top. **Immediate bloc
 wrongly live inside `diag/` — they move into `bsp` first, and both prod and diag build on it (de-forking
 prod's parallel `hal.rs`/`i2c.rs`).
 
+**Same-boot + master-commanded mode (verbatim · Henrik 2026-10-06):** *"It is conceptually built on
+top. I understand that prod is the root dir for the prod images and diag for the diag images. The
+implementation should be using common crates, so the functionality present in prod firmware is also
+running in diag, or can be enabled to run by flipping a register. We should be able to install diag
+firmware and test prod functionality with some diag capability run on top. Obviously diag has extended
+the POST and tests, but it would probably be good if diag essentially boots the same and waits a second
+before running the diag suites automatically. This would allow the Pico/M7 to detect that it rebooted
+and instruct what it should do via Stem I2C or UART."*
+
+Derived requirements (from the verbatim above):
+- **Common crates, prod functionality live in diag:** prod's functionality runs in diag too (shared
+  crates), or **can be enabled at runtime by flipping a register** — not a compile-time fork. Installing
+  the **diag** image must let you **test prod functionality**, with diag capability layered on top.
+- **Identical boot:** diag **boots the same as prod** (same init sequence, same early Stem-slave
+  presence), then **waits ~1 s before auto-running the diag suites**. The default-after-timeout is the
+  diag suite run (for the diag image); the grace window is the hook.
+- **Master-commanded mode:** during that window the **Pico/M7 master detects the reboot** (the node
+  reappears on the bus) and **instructs what to do via Stem I²C or UART** — i.e. the "flip a register"
+  control is the Stem regmap mode/control register the master writes, before the auto-run fires.
+- **Commands over I²C *and* UART (verbatim · Henrik 2026-10-06):** *"It would make sense to support
+  commands routed over I2C as well as UART. I2C could be a pattern supported on prod."* So the command
+  surface is **transport-agnostic**: the same command set is reachable over the **Stem I²C** regmap and
+  over the **console UART**. The **I²C command pattern** is itself a **prod** capability (not diag-only)
+  — prod already owns the Stem slave + regmap, so command-over-I²C belongs in the shared prod-core and
+  diag inherits it; UART command routing (diag has it today) becomes the second transport over the same
+  dispatch.
+
+## One image per product module — avoid chip-specific firmware (verbatim · Henrik 2026-10-06)
+
+*"my ideal outcome is one image per product module. In real world products it's common to swap specific
+chip models due to supplies/bugs/new-features. This is why I prefer avoiding chip specific firmware
+images."*
+
+**Decision:** the artifact is **per product module**, not per chip model. The image **runtime-detects
+the concrete model and adjusts** (the `model.rs` seam: `detect()` → `pin_map()` hardware-capability
+flags + `stem_addr()` role). This commits to **true multi-model family images** (not model-specific
+builds) — because second-sourcing (supply / errata / new variant) is routine and per-chip firmware is a
+BOM liability.
+
+**Boundary condition (not negotiable, physics):** "one image" holds only across chips that share a PAC
+/ register-/memory-map-compatible **family**. Within a family (e.g. FR2476 ⇄ FR2475) it is literally one
+binary; a swap to a **different** family (e.g. FR235x ⇄ FR24xx) is the **same source, a different
+family build**, module-bundle-selected — not one binary. So each product module's **substitution set**
+should be chosen within one family where possible; cross-family second-sources cost a build axis, not a
+rebuild of logic.
+
+**Cost this imposes:** because the image must drive the *correct* hardware on a swapped chip,
+`pin_map()`/capability detection must be **real and tested per family member** — the current thin
+placeholders (`bank_count: 5` for both dual-I²C rows) must be filled from the BOM/`connections.toml`
+before multi-model portability is trusted in the field.
+
 ## Expanders & semantic pin identity (verbatim)
 
 Expanders keep a **current state** on connected pins. An expander also keeps **topical identity** of
