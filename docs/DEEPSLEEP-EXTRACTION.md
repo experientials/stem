@@ -262,15 +262,17 @@ Cargo's crate-scoping dictates one answer:
           pattern + investigation: **`docs/references/msp430-lpm-wake-pattern.md`**. (Optional follow-up:
           upstream a `jmp`→`br` PR to `rust-embedded/msp430-rt`.)
 
-  - **1b (fr2433) — ✅ mechanism DONE + boot-verified 2026-10-06; wake-proof pending bus.** Implemented the
-    interrupt-driven LPM path on fr2433: `bsp::stem_i2c::irq_{enable,disable}` (slave IE), the hand-rolled
-    `br` wake trampoline + `usci_b0_inner` (masks IE, no byte work), and the `run_fr24xx` serve loop
-    (service → disable GIE → irq_enable → `WDTHOLD` → atomic `bis #0x18,r2` LPM0+GIE). rt/device wiring +
-    `memory-fr2433.x` VECTORS `0xFF88/0x78`. Builds in budget (4332/15360); fr2476/fr2355/diag green (no
-    regression). HW on `@fr2433`: boots, full init (banner/status/gpio PASS), enters LPM, and does **not**
-    reset-loop → `WDTHOLD`-across-LPM proven. **NOT yet proven:** wake on a real master — needs fr2433 on
-    the Stem bus (probe `scan` showed only `0x21`). Full detail in the pattern doc.
-        - (ii) **fr2433 isn't answering on the bench** — flash + wire it to the Stem bus to probe-prove wake.
+  - **1b (fr2433) — ✅ DONE + fully HW-proven 2026-10-06.** Implemented the interrupt-driven LPM path on
+    fr2433: `bsp::stem_i2c::irq_{enable,disable}` (slave IE), the hand-rolled `br` wake trampoline +
+    `usci_b0_inner` (masks IE, no byte work), and the `run_fr24xx` serve loop (service → disable GIE →
+    irq_enable → `WDTHOLD` → atomic `bis #0x18,r2` LPM0+GIE). rt/device wiring + `memory-fr2433.x` VECTORS
+    `0xFF88/0x78`. Builds in budget (4332/15360); fr2476/fr2355/diag green (no regression). **HW on
+    `@fr2433` + the RP2040 stem-probe:** boots → full init (banner/status/gpio PASS) → enters LPM, NO
+    ~16 s reset-loop (`WDTHOLD`-across-LPM proven); then the Pico master `scan`→`0x21 0x22` and 20× `r 0x22`
+    reads each WOKE the sleeper via the eUSCI_B0 slave ISR, serviced, and returned bit-stable correct
+    identity (iface `0xD0`, model `0x8240`, build `0xFDA60711` == boot stamp, ver `0.1.0`). So sleep →
+    wake-on-slave-ISR → service → resleep is proven end-to-end. Pattern + investigation:
+    `docs/references/msp430-lpm-wake-pattern.md`.
     - **Verify (via the stem-probe, now the proven path):** flash the silent fr247x image; `scan`/
       `vstem 0x21`/`r 0x21 …` return correct, stable data → the CPU woke from LPM on the slave ISR,
       serviced, and reslept. (Remote limit: can't meter current to *see* LPM; functional wake + code
