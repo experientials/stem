@@ -240,12 +240,28 @@ Cargo's crate-scoping dictates one answer:
         main re-enables after `poll()` drains.
       - **WDT:** arm backstop only while awake; `WDTHOLD` in the idle→LPM step; re-arm on wake (Design
         point 1).
-      - **OPEN integration questions to settle when coding (not yet resolved):** (i) an ISR defined in a
-        **lib crate (`bsp`)** must land in the vector table and survive dead-code elimination — confirm
-        the vendored PAC re-exports `#[interrupt]` + whether an `rt`/force-keep is needed, else the ISR
-        may need to live in the bin. (ii) **fr2433 is not currently answering on the bench** — the
-        2026-10-06 probe `scan` showed only `0x21` (FR2476), not `0x22` — so fr2433 must be flashed +
-        confirmed wired to the Stem bus before its LPM-wake can be probe-proven.
+      - **Integration dry-run (2026-10-06) — SOLVED up to one upstream blocker.** Probed the full wiring
+        on fr2433; findings (so the next attempt is fast):
+        - ISR goes in the **bin** (prod), not `bsp` — this is the first ISR in the codebase (no handlers
+          existed; PAC `rt` was off everywhere). The PAC does NOT re-export `#[interrupt]` → use
+          `msp430_rt::interrupt` directly, with `use bsp::pac::Interrupt as interrupt;` in scope (the
+          macro name-checks `interrupt::USCI_B0`).
+        - Feature wiring that works: `bsp` `fr2433 += "msp430fr2433/rt"`; prod `fr24xx += "msp430-rt/device"`;
+          crate attr `#![cfg_attr(feature="fr24xx", feature(abi_msp430_interrupt))]`.
+        - **memory-fr2433.x VECTORS for rt-mode = `ORIGIN=0xFF88, LENGTH=0x78`** (NOT the lint's
+          `0xFFDA/0x26`). The PAC emits the FULL padded 59-word `__INTERRUPTS` + reset = 0x78 B; it must
+          end at 0x10000 (link.x ASSERT) with reset at 0xFFFE → 0xFF88 is forced (real vectors still land
+          correctly: PORT2→0xFFDA … reset→0xFFFE). **`scripts/lint-memory-x.sh` is buggy here** — it uses
+          the lowest *real* vector and under-counts the reserved padding → its origin overflows. Fix the
+          lint to count the full PAC array. (This file is generator-emitted; update `gen-memory-x.sh` too.)
+        - `wake_cpu`'s naked trampoline + `naked_asm!` **compile fine** on nightly-2025-06-25.
+        - **⛔ BLOCKER (upstream): `msp430-rt-macros` 0.4.1 `wake_cpu` is broken for real images.** Its
+          trampoline emits a short `jmp {inner}` (R_MSP430_10_PCREL, ±1 KB); with a ~4 KB `.text` the
+          handler lands out of range → `relocation truncated to fit`. Needs a one-line `jmp`→`br #{inner}`
+          (absolute) fix in that crate → **vendor-and-patch `msp430-rt-macros`** (+ upstream the fix). A
+          dependency-strategy decision — probe reverted to green pending it.
+        - (ii) **fr2433 isn't answering on the bench** — the 2026-10-06 probe `scan` showed only `0x21`,
+          not `0x22` — so fr2433 must be flashed + wired to the Stem bus before its LPM-wake is proven.
     - **Verify (via the stem-probe, now the proven path):** flash the silent fr247x image; `scan`/
       `vstem 0x21`/`r 0x21 …` return correct, stable data → the CPU woke from LPM on the slave ISR,
       serviced, and reslept. (Remote limit: can't meter current to *see* LPM; functional wake + code
