@@ -1,7 +1,8 @@
 #![no_main]
 #![no_std]
 #![feature(asm_experimental_arch)] // core::arch::asm! for SCG0 in clock.rs (fr247x); harmless otherwise
-#![cfg_attr(feature = "fr24xx", feature(abi_msp430_interrupt))]
+#![cfg_attr(any(feature = "fr24xx", feature = "_dual"), feature(abi_msp430_interrupt))] // eUSCI_B slave
+// wake ISRs (fr2433 UCB0 / dual UCB1) use `extern "msp430-interrupt"` — experimental ABI.
 
 //! bob-929 PRODUCT firmware (Rust) — **Stembus node**, primary dev target MSP430FR2476 (FR247x).
 //!
@@ -362,6 +363,21 @@ fn run_dual(p: &Peripherals) -> ! {
                 _ => uart::puts(p, "  (s=scan r=report d=debug m=mode l=loopback)\n"),
             }
         }
+
+        // DEEPSLEEP (silent builds): extend the Stem-slave LPM to UCB1. In Passive there is nothing to do
+        // until the SoM talks, so sleep in LPM0 on the eUSCI_B1 slave ISR — the proven fr2433 pattern, on
+        // UCB1. Sensing keeps busy-polling (the Leaf scanner needs the CPU); console/`debug` builds
+        // busy-poll (the interactive menu polls `getc` — a UART-RX wake leaf is the deferred follow-up).
+        // Ordering: GIE off BEFORE arming the slave IE, so no ISR fires between the arm and the atomic
+        // sleep (which would mask IE then sleep forever). On wake the loop-top `wdt_pet` re-arms the
+        // backstop (clears WDTHOLD) and `stem::poll` drains the transaction the ISR woke us for.
+        #[cfg(not(feature = "console"))]
+        if !mach.is_sensing() {
+            msp430::interrupt::disable();
+            bsp::stem_i2c::irq_enable(p);
+            bsp::board::wdt_hold(p);
+            enter_lpm0_gie();
+        }
     }
 }
 
@@ -473,10 +489,31 @@ static STEM_PENDER: sched::Pender = sched::Pender::new();
 /// docs/references/firmware-architecture.md §1). The eUSCI_B0 slave ISR wakes us (its `wake_cpu`
 /// trampoline clears CPUOFF in the stacked SR); a pending IFG at this point fires immediately rather than
 /// sleeping. Default (memory-clobbering) asm → a barrier, so loads/stores aren't reordered across sleep.
-#[cfg(feature = "fr24xx")]
+#[cfg(any(feature = "fr24xx", feature = "_dual"))]
 #[inline(always)]
 fn enter_lpm0_gie() {
     unsafe { core::arch::asm!("bis #0x18, r2", options(nostack)) };
+}
+
+/// Dual Stem-slave (eUSCI_B1) wake ISR — the SAME hand-rolled `br` trampoline as fr2433's `USCI_B0`,
+/// extended to UCB1 (vector `EUSCI_B1`). Clears the LPM bits in the stacked SR so the CPU wakes; the
+/// inner masks UCB1's slave IE so the latched IFG won't re-fire before the serve loop drains it. No
+/// pender here — the dual serve loop is the 1b-style hand loop (re-polls on wake), not `run_pended`.
+#[cfg(feature = "_dual")]
+#[unsafe(naked)]
+#[no_mangle]
+unsafe extern "msp430-interrupt" fn EUSCI_B1() {
+    core::arch::naked_asm!(
+        "bic.b #0xF0, 0(r1)",
+        "br #{inner}",
+        inner = sym eusci_b1_inner,
+    );
+}
+#[cfg(feature = "_dual")]
+extern "msp430-interrupt" fn eusci_b1_inner() {
+    // SAFETY: single-core; masks its own source, runs only while main is in LPM (or at the atomic sleep).
+    let p = unsafe { Peripherals::steal() };
+    bsp::stem_i2c::irq_disable(&p);
 }
 
 /// FR24xx (FR2433) single-I²C **slave-only** node. Its whole job: answer the SoM's PCA9698-emulation

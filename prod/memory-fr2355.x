@@ -6,10 +6,11 @@ MEMORY
 {
   RAM     : ORIGIN = 0x2000, LENGTH = 0x1000   /* 4 KB SRAM */
   ROM     : ORIGIN = 0x8000, LENGTH = 0x7F80   /* program FRAM (main window), END 0xFF7F */
-  /* VECTORS: msp430-rt's current (no-`rt`) default is a 16-word table ending at 0x10000. When the PAC
-     `rt` feature + real ISRs land, set ORIGIN to the chip's lowest interrupt vector (see
-     scripts/lint-memory-x.sh / the chip's PAC); msp430-rt's link.x ASSERT enforces the exact size. */
-  VECTORS : ORIGIN = 0xFFE0, LENGTH = 0x0020
+  /* VECTORS: rt-mode (PAC `rt` + the eUSCI_B1 Stem-slave wake ISR — deepsleep LPM, Phase 1b/1c). The
+     vendored PAC emits the FULL padded `__INTERRUPTS` + reset = 0x5C B, ending at 0x10000 (msp430-rt
+     link.x ASSERT) → ORIGIN = 0x10000 - 0x5C = 0xFFA4. Linker-observed section size is authoritative
+     (lint-memory-x.sh's lowest-real-vector 0xFFCE under-counts the reserved padding). Was 0xFFE0/0x0020. */
+  VECTORS : ORIGIN = 0xFFA4, LENGTH = 0x005C
 }
 
 /* Checksum region (single source of truth): prod/src/post.rs reads these as extern symbols to CRC the

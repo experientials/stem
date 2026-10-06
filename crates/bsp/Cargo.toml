@@ -26,5 +26,11 @@ embedded-hal = "1.0"
 fr2476 = ["dep:msp430fr2476", "_leaf"]
 fr2355 = ["dep:msp430fr2355", "_leaf"]
 fr2155 = ["dep:msp430fr2155", "_leaf"]
-fr2433 = ["dep:msp430fr2433", "msp430fr2433/rt"]
+fr2433 = ["dep:msp430fr2433"]
 _leaf = []
+# `rt` emits the DEVICE interrupt vector table (the PAC `__INTERRUPTS`) so a firmware can install real
+# ISRs (the eUSCI_B slave wake ISR — deepsleep LPM). It's a BINARY concern, not a chip one: **prod**
+# enables `bsp/rt`, **diag** does NOT (it defines no ISRs and keeps msp430-rt's default table). The
+# `dep?/rt` form turns on the rt feature of whichever PAC the chip feature already selected, so one
+# feature serves every chip. (Device mode also needs `msp430-rt/device` in the consuming bin.)
+rt = ["msp430fr2476?/rt", "msp430fr2355?/rt", "msp430fr2155?/rt", "msp430fr2433?/rt"]
