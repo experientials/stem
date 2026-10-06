@@ -92,12 +92,16 @@ status**. Check the box when done. Keep newest context at the top of each item.
   - Split `stem.rs`: slave **driver + ISR → `bsp/src/stem_i2c.rs`** (sibling to `i2c.rs`, event seam),
     **pins → `board`**, **dispatch → `deepsleep`** (async over `SlaveEvent`). Non-embedded-hal target;
     interrupt-driven + LPM. See the plan for the event-seam decision and the wake model.
-- [ ] **Command surface (Phase 2) — `postcard` command STREAM over I²C + UART, mixable with PCA9698** —
-  *feature; design captured, build later* · **note: [DEEPSLEEP-EXTRACTION.md §2a](DEEPSLEEP-EXTRACTION.md)**
-  - One `stembus::Command` serialized with `postcard`; I²C transaction (`START…STOP`) frames it for free,
-    UART needs COBS. **Coexists with PCA9698-emulation** via a reserved, non-incrementing CMD/RESP stream
-    port in the 0x30–0x3F window (stock `gpio-pca953x` driver keeps 0x00–0x1F untouched). Rides the proven
-    1b `next_event()` seam (accumulate `Rx` → decode on `Stop`). Caveats + port addresses in §2a.
+- [ ] **Command surface (Phase 2) — the COMMON cross-MCU control API (`postcard` over I²C + UART) + firmware
+  patches** — *feature; design captured, build later* · **note: [DEEPSLEEP-EXTRACTION.md §2a](DEEPSLEEP-EXTRACTION.md)**
+  - The SoM masters TWO buses (Henrik 2026-10-06): a **sensor bus** (sensors + MSP-passive-slave) and a
+    **control bus** for the MCUs. On the control bus, ALL MCU modules (deepsleep/lowvision/bluetooth) speak
+    ONE common `stembus::Command` API — `postcard`-serialized; I²C transaction (`START…STOP`) frames it for
+    free, UART needs COBS. **Firmware patches ride this bus** (streamed; MSP→host BSL reflash, see
+    `msp-fw-ota-host-root-of-trust`). **PCA9698-emulation is optional per-module compat, NOT the common
+    denominator** (doubtful all MCUs support it) — where a module opts in, the CMD/RESP stream port lives in
+    the 0x30–0x3F window so the stock `gpio-pca953x` driver keeps 0x00–0x1F untouched. Rides the proven 1b
+    `next_event()` seam (accumulate `Rx` → decode on `Stop`). Full design + caveats + port addresses in §2a.
 - [x] **CONV-6 · fr24xx (FR2433) I²C-SLAVE / regmap surface — the node's real role** — *DONE (boot-
   verified) 2026-09-30; physical GPIO/ADC backing + master-reads-slave proof still open*
   - Built the fr24xx node's whole job: answer the SoM's PCA9698-emulation register file on the single

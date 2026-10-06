@@ -113,6 +113,33 @@ command surface) lands — captured here so it isn't lost.*
   addition on top of the proven 1b transport. See `docs/references/firmware-architecture.md` (transport↔
   dispatch↔state layering) — the `Command` enum is the "dispatch" layer; `stembus` carries only the codec.
 
+#### System context — the SoM's TWO buses + a COMMON cross-MCU command API (CANONICAL, Henrik 2026-10-06)
+
+> We have two I2C busses for the SoM M7 to master while it runs. One has sensors and MSP deepsleep
+> modules in passive, the other is meant for controlling MCUs. The MCUs would be controlled using
+> commands with postcard data and receive firmware patches. Whether MCUs would all support PCA9698 style
+> API is doubtful, and it would make sense to have a common API to all MCUs.
+
+Implications (these ELEVATE the command API and RE-RANK PCA9698 — §2 above):
+- **The postcard `Command` API is the COMMON control protocol across ALL MCU modules** (MSP430
+  `deepsleep`, future `lowvision`, `bluetooth`, …) — not MSP-specific. It therefore belongs in the shared
+  **`stembus`** contract (the codec + command vocabulary), with each module crate implementing its own
+  `execute`. This is the stem-nervous-system vision made concrete for the control plane.
+- **PCA9698-emulation is DEMOTED to an optional per-module compatibility shim, NOT the common
+  denominator.** Not all MCUs will/can speak PCA9698, so the common API cannot assume it. The §2 / §2a
+  coexistence still holds *where a module chooses PCA9698 compat* (MSP as a Linux-gpiochip I/O-expander),
+  but the cross-MCU baseline is the postcard command API. Build the command API as primary; PCA9698 is a
+  bonus on modules that opt in.
+- **Firmware patches ride this same command bus** — this is WHY block/stream matters (a patch is a large
+  streamed payload, §2a + UM10204 "unrestricted bytes/transfer"). Per-module handling differs: MSP430 FRAM
+  can't A/B self-update, so its "firmware update" command hands the image to a host-driven BSL/STEM reflash
+  (see memory `msp-fw-ota-host-root-of-trust`); other MCUs may self-apply. The command vocabulary models
+  "deliver firmware patch (streamed)"; the module decides how to apply it.
+- **Bus mapping (my read — CONFIRM):** the **control bus** = the Stem bus (MCU uplink: commands +
+  firmware patches, every MCU a slave); the **sensor bus** = Leaf, carrying sensors **and** the MSP as a
+  passive slave (SoM masters it directly while the MSP is Passive — the "reachable on both" refinement in
+  the behaviour-model block). If this mapping is off, the behaviour-model block is the authority; fix here.
+
 ---
 
 ## 3. Execution model — interrupt-driven + LPM, NOT poll
