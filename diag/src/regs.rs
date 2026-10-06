@@ -29,41 +29,22 @@ fn reset_cause(v: u16) -> &'static str {
 // Read-only info memory at fixed addresses (FR2476 datasheet Table 9-29/9-30). A volatile read here
 // identifies the *actual silicon* and its per-unit revisions/serial, so boot reports the chip it is
 // running on rather than a compile-time assumption ("base it on hardware, don't hardcode").
-const TLV_DEVICE_ID: *const u16 = 0x1A04 as *const u16; // LE word: 0x1A04 lo, 0x1A05 hi (e.g. 832Ah)
+// (device-id read moved to the shared `bsp::model::detect()` — no diag-local TLV_DEVICE_ID.)
 const TLV_HW_REV: *const u8 = 0x1A06 as *const u8;
 const TLV_FW_REV: *const u8 = 0x1A07 as *const u8;
 const TLV_DIE_LOT: *const u32 = 0x1A0A as *const u32; // die record: lot/wafer id = per-unit serial
-
-/// Map a TLV device ID to a chip name, or `None` if unrecognized (caller prints the raw hex, still
-/// honest hardware truth). Extend this table as we validate more parts (FR2433 etc.) on silicon.
-pub fn chip_name(id: u16) -> Option<&'static str> {
-    match id {
-        0x832A => Some("MSP430FR2476"),
-        0x832B => Some("MSP430FR2475"),
-        // Confirmed empirically on the bench (2026-09-30): the board with JTAG id 0x01ff (FR2355)
-        // reports TLV device-id 0x830C. FR2155/FR2433 ids still unverified — do not add on a guess
-        // (BUG-2 in docs/BACKLOG.md).
-        0x830C => Some("MSP430FR2355"),
-        // Empirically read over SBW (`msp read 0x1A04`, 2026-09-30) on a JTAG-confirmed FR2433
-        // (id 0x01c6): TLV device-id 0x8240 (past the leading 0x55 read artifact; family-consistent
-        // with FR2476 0x832A / FR2355 0x830C). Not firmware-confirmed — diag doesn't run on fr24xx.
-        0x8240 => Some("MSP430FR2433"),
-        _ => None,
-    }
-}
 
 /// Basic board stats gathered from hardware at boot: which chip, its revisions, and a per-unit die
 /// serial. Cheap, read-only info-memory reads — no peripheral bring-up. (Measured stats — Vcc and
 /// die temperature via the ADC — are the next rung, gated on the rail-ADC work; noted in
 /// DIAGNOSTICS.md.) Reset cause + clock-lock live in `dump` (SYSRSTIV must be read exactly once).
 pub fn stats(p: &Peripherals) {
-    let id = unsafe { core::ptr::read_volatile(TLV_DEVICE_ID) };
+    // Silicon identity via the SHARED detector (`bsp::model`) + SHARED name codec (`stembus::role`),
+    // not a diag-local TLV read + name table — one source with prod and the masters.
+    let id = crate::model::detect().device_id();
     let lot = unsafe { core::ptr::read_volatile(TLV_DIE_LOT) };
-    uart::puts(p, "\n[board]\n chip: ");
-    match chip_name(id) {
-        Some(n) => uart::puts(p, n),
-        None => uart::puts(p, "MSP430 (unrecognized)"),
-    }
+    uart::puts(p, "\n[board]\n chip: MSP430");
+    uart::puts(p, stembus::role::model_name(id)); // "FR2476".."FR2433", else "UNKNOWN"
     uart::puts(p, " id=");
     uart::hex16(p, id);
     uart::puts(p, "\n hw rev=");

@@ -17,7 +17,7 @@ use crate::pac::Peripherals;
 // The chip-select PAC alias + the low-level board/hal/i2c layer live in the shared `bsp` crate now
 // (STEM-DIRECTION.md: board/hal must be shared, not inside diag). Re-export them so every diag module
 // keeps using `crate::{pac,board,hal,i2c}` unchanged. The chip feature is forwarded to bsp.
-pub use bsp::{board, hal, i2c, pac};
+pub use bsp::{board, hal, i2c, model, pac};
 
 mod adc;
 mod buttons;

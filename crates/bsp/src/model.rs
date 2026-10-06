@@ -1,12 +1,21 @@
-//! Runtime MSP430 model detection + pin mapping — the seam that lets **one image cover a whole
-//! register-/memory-map-compatible family** (see DESIGN.md "Permutation strategy"). The compiled
-//! family is chosen by the Cargo family feature (`fr247x` default = FR2476/FR2475 dual-I²C; `fr24xx`
-//! = FR2433 single-I²C); FR215x (FR2155) is a future family. `detect()` reads the Device ID at
-//! runtime and `matches_build_family()` catches a wrong-family flash.
+//! Runtime MSP430 model detection + hardware-capability map — the seam that lets **one image cover a
+//! whole product module across a register-/memory-map-compatible family** (STEM-DIRECTION.md "One
+//! image per product module"). The compiled family is chosen by the bsp chip feature
+//! (`fr2476`/`fr2355`/`fr2155`/`fr2433`, forwarded by the consumer's family feature); `detect()` reads
+//! the Device ID at runtime so the image adapts to the concrete member, and `matches_build_family()`
+//! catches a wrong-family flash.
 //!
-//! Detection is datasheet-grounded; the model table + pin maps stay thin until the BOM/bring-up fills them.
+//! **Layering:** this module is pure **silicon identity + hardware capability** and is deliberately
+//! free of any bus-protocol knowledge — it does NOT depend on `stembus`. The **wire-facing** name and
+//! role→address codecs live in `stembus::role` (`model_name`, `role_for_model().addr()`), shared with
+//! the masters; a caller that needs the Stem address does
+//! `stembus::role::role_for_model(model.device_id()).addr()`. Keeping bsp protocol-free is why the
+//! board crate stays linkable without the wire contract.
+//!
+//! Lives in `bsp` (not `prod`) so **both** harnesses share one detector: prod's boot + diag's POST /
+//! `chip` command read the SAME silicon identity instead of each re-reading the TLV.
 
-#![allow(dead_code)] // Seam consumed incrementally as bring-up lands.
+#![allow(dead_code)] // Seam consumed incrementally as bring-up lands (pin_map in particular).
 
 /// MSP430 device-descriptor (TLV) — the 16-bit **Device ID** is the little-endian word at 0x1A04.
 /// Source: MSP430FR2476 datasheet Table 9-29/9-30 (base 0x1A00; 1A04h low / 1A05h high). Same TLV
@@ -16,12 +25,16 @@ const DEVICE_ID_ADDR: u16 = 0x1A04;
 /// Known MSP430 Device IDs (datasheet TLV tables: 1A05h high / 1A04h low → LE word). Listed across
 /// families because the read itself is PAC-agnostic — this also lets boot detect a WRONG-FAMILY flash
 /// (an image built for family X running on part Y): the detected model won't match the compiled PAC.
+///
+/// **These mirror `stembus::regmap::MODEL_*`** (the master-side map needs the same ids); the two must
+/// agree, and the datasheet TLV is the single source of truth. They are kept separate so the board
+/// crate does not depend on the bus-protocol crate for five constants.
 const DEVICE_ID_FR2476: u16 = 0x832A; // FR247x (dual-I²C)
 const DEVICE_ID_FR2475: u16 = 0x832B; // FR247x (dual-I²C)
 const DEVICE_ID_FR2433: u16 = 0x8240; // FR24xx (single-I²C)
 // FR2355 CONFIRMED on hardware (2026-09-30): the JTAG-confirmed FR2355 (id 0x01ff) reports TLV 0x830C
 // (read over SBW at 0x1A04, same as diag's regs::chip_name). FR2155 is still a placeholder — there is
-// no FR2155 board (it's validated on FR2355 hardware, which reads FR2355's TLV, not FR2155's), so its
+// no FR2155 board (it's validated on FR2355 hardware, which reports FR2355's TLV, not FR2155's), so its
 // own id can't be read until a real 2155 board exists. Distinct sentinel so the match arm compiles.
 const DEVICE_ID_FR2155: u16 = 0xF215; // PLACEHOLDER — no FR2155 board to confirm
 const DEVICE_ID_FR2355: u16 = 0x830C; // confirmed FR2355 TLV device-id (bench 2026-09-30)
@@ -62,25 +75,19 @@ impl Model {
         }
     }
 
-    /// The node's Stem-bus I²C slave address, chosen by this model's **role** (see
-    /// [`../I2C-API.md`](../../I2C-API.md) "Stem address is ROLE-BASED"). The master reads *what it is
-    /// talking to* from the address alone; a dev stand-in cannot pose as the production supervisor.
-    /// Values live in the PCA9698 strap group 0x20–0x27. (0x21/0x22 are a derivation — adjust with the
-    /// I2C-API.md role table if the map changes.)
-    pub const fn stem_addr(self) -> u16 {
-        // Delegate to the SHARED role map (one source: stembus) so the address logic can't drift from
-        // the masters. model → role → address; Unknown → supervisor base (boot raises WRONG-FAMILY).
-        stembus::role::role_for_model(self.device_id()).addr() as u16
-    }
-
-    /// True if this model belongs to the family this image was compiled for (the active Cargo family
+    /// True if this model belongs to the family this image was compiled for (the active **bsp** chip
     /// feature). A mismatch = wrong-family flash → boot should refuse/flag rather than mis-drive pins.
+    ///
+    /// Note the bsp features are PAC-level (`fr2476`/`fr2355`/`fr2155`/`fr2433`) — the consumer's
+    /// family feature forwards to exactly one. FR2476/FR2475 share the `fr2476` PAC/family. (FR2155 is
+    /// validated on FR2355 silicon, which reports FR2355's TLV → a `fr2155` build on that bench reads
+    /// `Fr2355` and flags a "mismatch"; expected until a real FR2155 board exists.)
     pub fn matches_build_family(self) -> bool {
         match self {
-            Model::Fr2476 | Model::Fr2475 => cfg!(feature = "fr247x"),
-            Model::Fr2155 => cfg!(feature = "fr215x"),
-            Model::Fr2355 => cfg!(feature = "fr235x"),
-            Model::Fr2433 => cfg!(feature = "fr24xx"),
+            Model::Fr2476 | Model::Fr2475 => cfg!(feature = "fr2476"),
+            Model::Fr2155 => cfg!(feature = "fr2155"),
+            Model::Fr2355 => cfg!(feature = "fr2355"),
+            Model::Fr2433 => cfg!(feature = "fr2433"),
             Model::Unknown(_) => false,
         }
     }
@@ -108,8 +115,12 @@ pub fn detect() -> Model {
 }
 
 /// Which buses/pins each function uses on the detected model. Thin for now — concrete port/pin/ADC
-/// assignments land with the BOM + [../crates/bsp/connections.toml]. `bank_count` = PCA9698 GPIO
-/// banks physically backed; `sensor_i2c` = whether a 2nd I²C (sensor master) exists (true on FR247x).
+/// assignments land with the BOM + [../../connections.toml]. `bank_count` = PCA9698 GPIO banks
+/// physically backed; `sensor_i2c` = whether a 2nd I²C (sensor master) exists (true on FR247x).
+///
+/// **One-image-per-product-module (STEM-DIRECTION.md) raises the bar here:** because the image must
+/// drive the *correct* hardware when a chip is second-sourced, these must be filled out and tested per
+/// family member before multi-model portability is trusted in the field — today they are placeholders.
 pub struct PinMap {
     pub bank_count: u8,   // physically-backed GPIO banks (P1.. → regmap banks 0..)
     pub mcu_i2c: bool,    // MCU-bus slave surface — the reason to exist; always present

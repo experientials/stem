@@ -33,6 +33,9 @@ pub use msp430fr2433 as pac;
 compile_error!("bsp: select ONE chip feature (fr2476|fr2355|fr2155|fr2433) via the consumer (diag/prod)");
 
 pub mod board;
+// Runtime silicon identity + hardware-capability map (one image per compatible family). PAC-agnostic
+// (a volatile TLV read); shared by prod's boot and diag's POST/`chip` command so there is ONE detector.
+pub mod model;
 // The Leaf-I²C master driver + its embedded-hal seam exist only on dual-I²C families (`_leaf`);
 // FR2433 (single-I²C slave-only, PAC field `usci_b0`) has no Leaf master bus, so these are absent there.
 #[cfg(feature = "_leaf")]

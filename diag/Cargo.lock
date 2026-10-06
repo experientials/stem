@@ -36,6 +36,7 @@ dependencies = [
  "msp430-rt",
  "panic-msp430",
  "sched",
+ "stembus",
 ]
 
 [[package]]
@@ -150,6 +151,10 @@ dependencies = [
 
 [[package]]
 name = "sched"
+version = "0.1.0"
+
+[[package]]
+name = "stembus"
 version = "0.1.0"
 
 [[package]]

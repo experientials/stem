@@ -28,7 +28,7 @@ use crate::regmap::{self, ShadowState};
 use crate::status::Status;
 use crate::pac::Peripherals;
 
-// I²C-slave address is **ROLE-BASED** — chosen per detected model by `model::Model::stem_addr()` and
+// I²C-slave address is **ROLE-BASED** — chosen per detected model by `stembus::role::role_for_model(..).addr()` and
 // threaded into `init`/`loopback_selftest` as `addr` (PCA9698 group 0x20–0x27). See I2C-API.md "Stem
 // address is ROLE-BASED": FR2355/FR2155=0x20 (production supervisor), FR2476/FR2475=0x21 (dev
 // stand-in), FR2433=0x22 (I/O-expander placeholder). No fixed const here.
@@ -148,7 +148,7 @@ mod hw {
 }
 
 /// Configure the node's eUSCI_B as an I²C slave at the **role-based** `addr`
-/// (`model::Model::stem_addr()`; see I2C-API.md) and route its pins (see [`hw`]).
+/// (`stembus::role::role_for_model(..).addr()`; see I2C-API.md) and route its pins (see [`hw`]).
 pub fn init(p: &Peripherals, addr: u16) {
     hw::init(p, addr);
 }

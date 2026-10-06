@@ -18,6 +18,10 @@ sched = { path = "../crates/sched" }
 # code (APDS-9960 migrated off diag/src/apds.rs onto devices::apds9960). An unused device is
 # LTO-stripped, so this costs ROM only for what diag actually calls.
 devices = { path = "../crates/devices" }
+# The Stem-bus wire contract — shared with prod + the masters. diag uses its model→name/role codec
+# (`stembus::role`) so chip labelling isn't a third copy of prod's/diag's old tables; also the on-ramp
+# for diag to host the Stem slave (same-boot direction, STEM-DIRECTION.md).
+stembus = { path = "../crates/stembus" }
 
 [features]
 # Chip select — pick exactly one (mutually exclusive; main.rs compile_error!s otherwise).

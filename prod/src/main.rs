@@ -52,7 +52,8 @@ use core::cell::Cell; // async Leaf-scanner mailbox (arm/cancel/result) — see 
 #[cfg(feature = "_dual")]
 use core::future::Future; // for `.poll()` on the pinned scanner future in the serve loop
 
-mod model; // Runtime MSP430 model detection + pin mapping (one image per compatible family).
+pub use bsp::model; // Runtime MSP430 model detection + pin mapping — now shared in bsp (STEM-DIRECTION.md
+                    // "model-detect + pinmap → bsp"); both prod boot and diag POST read one detector.
 mod regmap; // I²C-slave register-map contract (PCA9698 emulation + Thepia extensions). See regmap.rs.
 
 // DUAL-I²C bring-up modules — shared across all dual families (fr247x/fr215x/fr235x, the `_dual`
@@ -150,7 +151,9 @@ fn run_dual(p: &Peripherals) -> ! {
     bsp::board::route_console_uart_pins(p);
 
     let model = model::detect();
-    let stem_addr = model.stem_addr(); // role-based Stem I²C address (I2C-API.md): FR2355=0x20, FR2476=0x21
+    // Role-based Stem I²C address (I2C-API.md): FR2355=0x20, FR2476=0x21. The model→role→addr codec is
+    // the shared wire contract in `stembus::role` (bsp::model stays protocol-free), so compute it here.
+    let stem_addr = stembus::role::role_for_model(model.device_id()).addr() as u16;
 
     // Bring up the Stem-bus I²C SLAVE (eUSCI_B1) FIRST — it is the SoM's always-on control channel and
     // must be reachable the instant we boot, regardless of sensor-bus state. (Previously it came up
@@ -446,7 +449,8 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     let crc = post::fram_crcs();
     rf.set_crc(crc);
     let mut slave = stem::Slave::new();
-    let stem_addr = model.stem_addr(); // role-based (I2C-API.md): FR2433 = 0x22 (I/O-expander placeholder)
+    // role-based (I2C-API.md): FR2433 = 0x22 (I/O-expander placeholder). Shared codec in stembus::role.
+    let stem_addr = stembus::role::role_for_model(model.device_id()).addr() as u16;
     stem::init(p, stem_addr); // eUSCI_B0 as I²C slave @ stem_addr on P1.2/P1.3
 
     // Dev console (`console` feature): a locked 1 MHz clock (clean UART baud) + the eUSCI_A0 backchannel
