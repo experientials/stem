@@ -1,6 +1,6 @@
 # ADR-0013 · Async runtime per core tier — embassy on Cortex-M/host, a `core`-only async `sched` on MSP430
 
-Status: Accepted (tier split) · Proposed (async-`sched` evolution — spikes DONE: RAM/stack favorable, code ~+0.5 KB/subsystem; decide per-subsystem)
+Status: Accepted (tier split) · **In progress** (async-`sched` evolution — spikes DONE; FIRST subsystem migrated + hardware-verified: prod Leaf enumerate, 2026-10-06)
 Date: 2026-10-05   Source: Henrik 2026-10-05 ("can we use embassy on MSP prod?" → "can we write async/await and execute with our own sched, resolving it all at compile time to the same size?")
 
 ## Context
@@ -149,7 +149,12 @@ at `scratchpad/async-spike/`.
   to embassy's MSRV.
 - **Costs**: we author the async substrate (executor, eUSCI/timer leaves, the LPM waker) and must
   size-measure on FR2433. Until the spike proves parity, `sched` stays run-to-completion as-is.
-- **Follow-up (open)**: (1) prototype the `core`-only async `sched` + size spike on FR2433; (2) arm the
-  prod WDT backstop and de-duplicate its serve loops regardless of the async decision (those are
-  independent robustness fixes); (3) if the spike passes, migrate diag + prod task bodies to `async fn`.
+- **Follow-up**: (1) ✅ spike + size-measure done; (2) ✅ prod WDT backstop armed + serve loops
+  de-duplicated; (3) **✅ first subsystem migrated — prod Leaf enumerate** (`enumerate::scan_async` +
+  `leaf_scanner`, driven by `sched::{yield_now, noop_waker}`; hardware-verified on `@fr2355`:
+  Sensing-switch arms the async scan, it completes with the Stem slave responsive throughout, +330 B
+  silent / within budget). This also made prod's previously-dead `sched` dependency live. (4) OPEN:
+  migrate further subsystems case-by-case (each ~+0.5 KB); build the interrupt-driven async eUSCI/timer
+  leaves when a subsystem needs true `.await`-on-IFG (enumerate used blocking-probe-then-yield); the LPM
+  pender for real sleep-between-events.
 </content>
