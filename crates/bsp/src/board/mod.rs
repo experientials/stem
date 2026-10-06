@@ -100,3 +100,32 @@ mod wdt {
     }
 }
 pub use wdt::*;
+
+// ── Millisecond time base (role): TB0 free-running from ACLK (REFO, 32768 Hz) — the tick the
+// cooperative scheduler reads. The TB0 instance is hidden HERE so callers (the diag `Clock`) are
+// role-based, not model-hardcoded (they used to poke `p.tb0` directly). This role is just start +
+// raw read — like `usec_*`; the ms-folding math stays in the caller. Chip-common across the dual
+// families (all have TB0, identical programming); gated `_leaf` because the slave-only fr2433 has no
+// scheduler and its PAC omits TB0. (`usec_*` is per-module because its instance DIFFERS — TA0 vs TB1;
+// the ms base is TB0 on every dual family, so it lives here, once.)
+#[cfg(feature = "_leaf")]
+mod ms {
+    use crate::pac::Peripherals;
+
+    const TBSSEL_ACLK: u16 = 0x0100; // TBSSEL_1: clock TB0 from ACLK
+    const MC_CONTINUOUS: u16 = 0x0020; // MC_2: count to 0xFFFF and wrap
+    const TBCLR: u16 = 0x0004; // clear counter + divider on start
+
+    /// Start TB0 free-running from ACLK (REFO must already be live — `clock_init_1mhz` routes it).
+    pub fn ms_timer_start(p: &Peripherals) {
+        p.tb0
+            .tb0ctl()
+            .write(|w| unsafe { w.bits(TBSSEL_ACLK | MC_CONTINUOUS | TBCLR) });
+    }
+    /// Raw 16-bit TB0 counter (32768 Hz ticks). The caller folds wrap-safe deltas into monotonic ms.
+    pub fn ms_timer_ticks(p: &Peripherals) -> u16 {
+        p.tb0.tb0r().read().bits()
+    }
+}
+#[cfg(feature = "_leaf")]
+pub use ms::*;
