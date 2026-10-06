@@ -49,6 +49,15 @@ pub fn route_console_uart_pins(p: &Peripherals) {
     p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | P1_UART_PINS) }); // SEL0=1
 }
 
+// Stem-I²C (slave uplink) pins: the ONE eUSCI_B0 on P1.2(SDA)/P1.3(SCL), SEL1:SEL0 = 01 — CONFIRMED
+// against the FR2433 datasheet (SLASE59F Table 6-17): P1.2 SELx=01 → UCB0SDA, P1.3 SELx=01 → UCB0SCL.
+// This IS the node's whole bus (no Leaf master on fr2433). Called from `bsp::stem_i2c::init`.
+const P1_STEM_I2C_PINS: u8 = 0x0C; // BIT2 (P1.2=UCB0SDA) | BIT3 (P1.3=UCB0SCL)
+pub fn route_stem_i2c_pins(p: &Peripherals) {
+    p.p1.p1sel1().modify(|r, w| unsafe { w.bits(r.bits() & !P1_STEM_I2C_PINS) }); // SEL1=0
+    p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | P1_STEM_I2C_PINS) }); // SEL0=1
+}
+
 // Console UART = eUSCI_A0, 9600 8N1 @ 1 MHz SMCLK. FR2433 PAC is mode-split → `usci_a0_uart_mode`.
 const UCSWRST: u16 = 0x0001;
 const UCSSEL_SMCLK: u16 = 0x0080;

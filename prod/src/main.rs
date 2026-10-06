@@ -46,7 +46,8 @@ compile_error!("prod: `mode-sensing` requires a dual-I²C family — FR2433 (fr2
 pub(crate) use bsp::pac;
 use crate::pac::Peripherals;
 #[cfg(feature = "_dual")]
-pub(crate) use bsp::{hal, i2c};
+pub(crate) use bsp::hal; // oled_splash's EusciI2c; the Leaf driver `bsp::i2c` is now used directly by
+                         // `deepsleep` (enumerate/stem), not re-exported through prod.
 #[cfg(feature = "_dual")]
 use core::cell::Cell; // async Leaf-scanner mailbox (arm/cancel/result) — see run_dual's serve loop
 #[cfg(feature = "_dual")]
@@ -75,7 +76,9 @@ pub use deepsleep::status; // identity/status model (regmap 0x30–0x3F) — now
 #[cfg(feature = "_dual")]
 pub use deepsleep::mode; // operating-mode machine (Passive↔Sensing) — now in deepsleep (Phase 0c)
 #[cfg(any(feature = "_dual", feature = "fr24xx"))]
-mod stem;
+pub use deepsleep::stem; // I²C-slave dispatch (RegFile/Slave/poll) — now in `deepsleep` (Phase 1a);
+                         // its transport (eUSCI programming + pins) is `bsp::stem_i2c`. Re-export keeps
+                         // `crate::stem::*` resolving for main.rs unchanged.
 // UART logging is the `console` feature (dev only). Off = silent production image; state then lives
 // only in the debug registers (served by the I2C-slave surface). See status.rs / the console question.
 // Console/UART is available to ANY family with `console` on (dual + fr24xx). `uart.rs` unifies the

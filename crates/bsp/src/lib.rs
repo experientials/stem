@@ -45,3 +45,7 @@ pub mod model;
 pub mod hal;
 #[cfg(feature = "_leaf")]
 pub mod i2c;
+// The Stem-bus I²C **slave** transport — sibling to the Leaf-master `i2c` above. Present on EVERY node
+// (the slave control surface is every chip's job): dual families run it on eUSCI_B1, FR2433 on its one
+// eUSCI_B0. The protocol/register-file dispatch lives above this, in `deepsleep` (DEEPSLEEP-EXTRACTION.md §A).
+pub mod stem_i2c;

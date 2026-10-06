@@ -27,6 +27,13 @@ pub mod mode;
 pub mod post;
 pub mod status;
 
+/// Stem-bus I²C-**slave** dispatch — the register-file/command-pointer layer that maps a master's reads
+/// and writes onto [`regmap`], consuming the `bsp::stem_i2c` [`SlaveEvent`](bsp::stem_i2c::SlaveEvent)
+/// transport seam. Present on EVERY node (the slave control surface is every chip's whole/partial job):
+/// dual families serve it on eUSCI_B1, fr2433 on its one eUSCI_B0. Phase 1 (DEEPSLEEP-EXTRACTION.md §A).
+#[cfg(any(feature = "_dual", feature = "fr2433"))]
+pub mod stem;
+
 // ── Build identity (DEEPSLEEP-EXTRACTION.md §B) ──────────────────────────────────────────────────
 // The **capability** semver is THIS crate's `CARGO_PKG_VERSION` — reported over the Stem regmap
 // (DBG_FW_VER_*) + the boot log. The per-image **build stamp** is NOT here: it's crate-scoped
