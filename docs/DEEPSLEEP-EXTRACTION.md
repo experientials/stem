@@ -77,6 +77,42 @@ in `deepsleep` turns out reusable, move it DOWN — don't copy up.*
   - Build the semantic interface first; the PCA9698 GPIO adapter is a **drop-in later** (Phase 4), never
     foreclosed.
 
+### 2a. Design note — postcard command STREAM over I²C/UART, and mixing it with PCA9698 (capture 2026-10-06)
+*Henrik's question: can a block/stream command API (e.g. `postcard`-serialized) run over I²C, and can it
+be MIXED with PCA9698-emulation compatibility? Short answer: yes to both. Work this when Phase 2 (the
+command surface) lands — captured here so it isn't lost.*
+
+- **I²C carries arbitrary-length byte streams.** NXP UM10204 §3.1.4 (verbatim): *"The number of bytes
+  that can be transmitted per transfer is unrestricted."* The "one byte to a register" pattern is a
+  **software convention** (SMBus/register model), not an I²C rule — so a whole serialized `Command` can
+  ride the data phase of one transaction. Clock stretching (§3.1.9) lets our MCU slave pace it.
+- **One `Command` (in `stembus`), two faces, differing only in FRAMING.** UART is an unframed byte
+  stream → needs COBS or a length prefix (`postcard` provides COBS: `to_slice_cobs`/`CobsAccumulator`).
+  **I²C gets framing for free** — `START…STOP` delimits exactly one message, so the slave buffers the
+  `Rx` bytes until `Stop` and deserializes; no COBS needed. Request/response = write the command, then a
+  read (or combined repeated-START, §3.1.10) with the reply **pre-staged** (or clock-stretched); postcard
+  deserializes a *known type*, so the master needs the reply length (leading length byte or fixed size).
+- **Mixing with PCA9698-emulation — COEXIST via a reserved STREAM PORT (no collision):**
+  - Keep the PCA9698 command-pointer + auto-increment envelope AS-IS for the GPIO banks (0x00–0x1F) so
+    the stock Linux `gpio-pca953x` driver + `gpiod` keep working untouched (the whole point of PCA9698
+    compat — §2).
+  - Add a reserved **command-port** register in the semantic window PCA9698 leaves free (0x30–0x3F; pick
+    a slot not already used — 0x30 iface, 0x3B–0x3D ver, 0x3E MODE_CTRL, 0x3F CRC are taken, so e.g.
+    **0x37 CMD / 0x38 RESP**). Give it **non-incrementing, accumulate** semantics: successive writes in a
+    transaction APPEND to the postcard command buffer (AI off), and `Stop` triggers decode+dispatch; the
+    RESP port streams the postcard reply on successive reads.
+  - Result: the stock GPIO driver only ever touches 0x00–0x1F; the M7's custom client uses the
+    CMD/RESP ports; **zero overlap**. It's the existing "semantic regs live where PCA9698 leaves free"
+    rule, extended from single-value debug regs to a stream port. If PCA9698 is ultimately dropped (M7
+    does all consumption), the command API simply owns the space.
+  - **Caveats to pin down in Phase 2:** define CMD-port = AI-off accumulate (vs PCA9698 overwrite/
+    increment); one command per transaction; bound the buffer to slave RAM (FR2433 4 KB); never point the
+    stock driver at the stream port; SMBus masters (not raw I²C) cap blocks at 32 B.
+- **Seam fit:** `bsp::stem_i2c::next_event()` already yields `Rx(u8)…` then `Stop` — the dispatch
+  accumulates `Rx`-after-CMD-port into a buffer and `postcard`-deserializes on `Stop`. A natural Phase-2
+  addition on top of the proven 1b transport. See `docs/references/firmware-architecture.md` (transport↔
+  dispatch↔state layering) — the `Command` enum is the "dispatch" layer; `stembus` carries only the codec.
+
 ---
 
 ## 3. Execution model — interrupt-driven + LPM, NOT poll
