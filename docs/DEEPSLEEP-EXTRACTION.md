@@ -34,6 +34,20 @@ InputPort/IntMask banks, §2) and may notify the SoM (`STEM_INT`). So LPM + inte
 > (two eUSCI_B slaves in Passive + the UCB0 `EUSCI_B0` ISR as a 2nd wake source); **fr2433 is unaffected**
 > (one bus, already its slave bus, Passive-only) → build/prove 1b on fr2433 first, then reshape dual.
 
+### Priority — Leaf is NICE-TO-HAVE (Henrik 2026-10-06)
+> The second bus is Leaf, and not super important. Just nice to have, so we can implement it.
+
+So the **critical path is the shared Stem command-slave in the Passive deepsleep posture — identical
+across FR2433/FR2476/FR2355** (same `stembus` regmap + `deepsleep::stem` dispatch; proven on `0x21`
+FR2476 + `0x22` FR2433 via the probe). Everything **Leaf** — Active/Sensing, UCB0-as-master, the
+enumerate/sensor scan, the mode machine, AND the "reachable on both" UCB0-as-slave-in-Passive — is a
+**nice-to-have**, implement when convenient. Re-scoping the remaining dual work accordingly:
+- **Important (dual):** extend the proven 1b/1c Stem-slave LPM sleep from fr2433's UCB0 to the dual's
+  **UCB1** (same hand-rolled `br` trampoline + `sched` pender + `serve`/`handle`; different instance =
+  `e_usci_b1`, vector = `EUSCI_B1`). That makes FR2476/FR2355 deepsleep-sleepers on the common command
+  interface — the product-relevant behaviour. (Console/debug builds stay no-sleep per §1b design pt 2.)
+- **Nice-to-have (dual):** the Leaf second bus + Sensing + UCB0-as-slave-in-Passive + the 2nd ISR.
+
 ---
 
 ## 1. Crate shape — one crate PER PRODUCT MODULE, shared layers beneath
