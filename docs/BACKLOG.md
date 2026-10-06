@@ -72,20 +72,16 @@ status**. Check the box when done. Keep newest context at the top of each item.
 
 ## Convergence / tech-debt — from the diag/prod → bsp work (STEM-DIRECTION.md)
 
-- [ ] **CONV-1 · prod `clock.rs`/`uart.rs` → `bsp::board`** — *GATE RESOLVED 2026-10-06 ([ADR-0014](adr/0014-board-layer-structure.md)); now mechanical* · [GitHub #5](https://github.com/experientials/stem/issues/5)
-  - The design question ("runtime model-detect vs compile-time `<chip>_<module>`"; "product PCB vs
-    LaunchPad modules") is **decided** by ADR-0014: the two are complementary axes (`bsp::board` =
-    compile-time family, `bsp::model` = runtime member), and **LaunchPad modules serve as the
-    product-board modules** until a product PCB exists. So folding no longer embeds an undecided choice.
-  - Remaining work (mechanical):
-    - [ ] **clock:** prod/`clock.rs::init_1mhz` is a verbatim copy of `bsp::board::clock_init_1mhz`
-      (already does per-module trim) → prod calls board's, delete the copy. Compile-time-per-family, so
-      the runtime-model axis never applied here.
-    - [ ] **uart:** text formatters (`puts`/`hex`/`dec`/`fixed2`) are byte-identical in prod+diag → one
-      shared `fmt`; the fr2433 console (inline in prod only) → a `bsp::board` fr2433 console module;
-      prod/`uart.rs` collapses to formatters + delegation.
-  - Unblocks the **`prod-core` bucket** (Stem slave CONV-3, `mode`/`status`/`post` lift, Leaf-scan
-    convergence) — see ADR-0014's crate-boundary table.
+- [x] **CONV-1 · prod `clock.rs`/`uart.rs` → `bsp::board`** — *DONE 2026-10-06 ([ADR-0014](adr/0014-board-layer-structure.md))* · [GitHub #5](https://github.com/experientials/stem/issues/5)
+  - Gate resolved by ADR-0014 (complementary axes: `bsp::board` = compile-time family, `bsp::model` =
+    runtime member; LaunchPad modules serve as product-board modules until a product PCB exists), then:
+    - [x] **clock:** prod/`clock.rs` deleted; run_dual + run_fr24xx call `bsp::board::clock_init_1mhz`
+      (b9ef0e2). New fr2433 board module carries the factory-trim init.
+    - [x] **uart:** formatters moved to `bsp::fmt` (shared, one copy — 5a246b6); the fr2433 console
+      folded into `bsp::board::fr2433_launchpad` (b9ef0e2); both `uart.rs` collapse to
+      `pub use bsp::fmt::*` + init/rx/getc board delegates. HW-verified @fr2433.
+  - **Unblocked by this:** the **`prod-core` bucket** (Stem slave CONV-3, `mode`/`status`/`post` lift,
+    Leaf-scan convergence) — see ADR-0014's crate-boundary table.
 - [ ] **CONV-2 · `bootrec.rs` de-hardcode** — *low (dormant); PAC import DONE, full agnosticism open*
   - DONE 2026-09-30: `diag/src/bootrec.rs` now uses `crate::pac::Peripherals` (via diag's bsp re-export),
     not the hardcoded `msp430fr2355`. Not build-exercised (still `mod`-undeclared/dormant).
