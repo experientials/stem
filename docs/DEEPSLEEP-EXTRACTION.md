@@ -96,13 +96,25 @@ clock-stretch handling) and the **protocol dispatch** (RegFile: pointer + read/w
 - This is the real work: a byte-stream slave trait that isn't `embedded-hal` (that's master-only). Design
   it so diag can bring the slave up identically.
 
-### B. Build identity (small, but blocks status/post)
-`status.rs` and `post.rs` read `crate::{FW_BUILD, FW_VER_MAJOR/MINOR/PATCH, FW_VERSION}` and
-`crate::model_name` — all defined in prod/main.rs (env!-stamped at the **bin** level). `deepsleep` can't
-read the bin's consts.
-- **Decision needed:** inject a `BuildInfo { ver: (u8,u8,u8), stamp: &'static str }` from each bin into
-  the `deepsleep` calls that need it (`Status::booted(model, build)`, `post::boot_log(.., build)`), rather
-  than the crate owning the stamp. `model_name` already delegates to `stembus::role` → trivial.
+### B. Build identity — inject the STAMP; the version rides in the crate
+`status.rs`/`post.rs` read `crate::{FW_BUILD, FW_VER_*, FW_VERSION}` + `crate::model_name`. These are
+**two different identity values with different compile-time scoping** — only one needs injecting:
+- **Build stamp** (`FW_BUILD = env!("PROD_BUILD")`): `PROD_BUILD` is emitted by the **bin's** `build.rs`
+  via `cargo:rustc-env`, which is **crate-scoped** — a dependency crate (`deepsleep`) cannot `env!` it
+  (won't compile). → **inject it.** The bin keeps `const FW_BUILD = env!("PROD_BUILD")` (diag:
+  `DIAG_BUILD`) and passes the `&'static str` into the `deepsleep` calls that emit identity
+  (`Status::booted(model, build)`, `post::boot_log(.., build)`); `deepsleep` stores the pointer and
+  emits it over UART + the regmap build-id bytes (`DBG_FW_*`, 0x33–0x36).
+- **Semver** (`FW_VER_* = env!("CARGO_PKG_VERSION_*")`): cargo sets this **per crate** from each crate's
+  own `Cargo.toml`, so inside `deepsleep` it resolves to **deepsleep's** version — **no injection**; the
+  capability versions itself.
+- `model_name` already delegates to `stembus::role` → no injection.
+
+**Why not let `deepsleep` stamp itself:** it would report the *library's* build, not the *flashed
+image's* — losing "which image, built when" and making prod and diag look identical. The stamp is a
+per-binary fact, so the bin owns it. **Net:** identity = the actual flashed image (feature); clean split
+**version = capability (deepsleep) / stamp = provenance (bin)**; no hidden build-time inputs in the lib;
+cost is one `&'static str` through ~2 call sites (bytes already in rodata).
 
 ---
 
