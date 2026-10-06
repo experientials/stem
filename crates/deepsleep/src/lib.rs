@@ -19,3 +19,27 @@ pub mod regmap;
 /// is slave-only (no sensor bus), so this is gated `_dual`. Phase 0a (DEEPSLEEP-EXTRACTION.md).
 #[cfg(feature = "_dual")]
 pub mod enumerate;
+
+pub mod post;
+pub mod status;
+
+// ── Build identity (DEEPSLEEP-EXTRACTION.md §B) ──────────────────────────────────────────────────
+// The **capability** semver is THIS crate's `CARGO_PKG_VERSION` — reported over the Stem regmap
+// (DBG_FW_VER_*) + the boot log. The per-image **build stamp** is NOT here: it's crate-scoped
+// `cargo:rustc-env` in each bin's build.rs, so the lib can't `env!` it — the bin injects it as a
+// `&'static str` (e.g. `Status::booted(model, build)` / `post::boot_log(.., build)`).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VER_MAJOR: u8 = parse_u8(env!("CARGO_PKG_VERSION_MAJOR"));
+pub const VER_MINOR: u8 = parse_u8(env!("CARGO_PKG_VERSION_MINOR"));
+pub const VER_PATCH: u8 = parse_u8(env!("CARGO_PKG_VERSION_PATCH"));
+
+const fn parse_u8(s: &str) -> u8 {
+    let b = s.as_bytes();
+    let mut v = 0u8;
+    let mut i = 0;
+    while i < b.len() {
+        v = v.wrapping_mul(10).wrapping_add(b[i] - b'0');
+        i += 1;
+    }
+    v
+}

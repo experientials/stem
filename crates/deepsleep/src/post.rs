@@ -9,7 +9,9 @@
 //! [`boot_log`] (console) and [`debug_leaf`] (--debug) are the dev UART echo only.
 
 #[cfg(feature = "console")] // only the UART echo fns take Peripherals; fram_crcs needs nothing
-use crate::pac::Peripherals;
+use bsp::pac::Peripherals;
+#[cfg(feature = "console")]
+use bsp::fmt as uart; // shared console formatters over the board UART
 
 // Program-FRAM window, sourced from the active family's `memory-*.x` via linker symbols (NOT hardcoded —
 // so it can't drift from the memory map). `&__fram_start` = ORIGIN(ROM); `&__fram_size` = LENGTH(ROM)
@@ -46,35 +48,36 @@ pub fn fram_crcs() -> [u8; stembus::crc::SECTORS * 2] {
 #[cfg(feature = "console")]
 pub fn boot_log(
     p: &Peripherals,
-    model: crate::model::Model,
+    model: bsp::model::Model,
     mode_name: &str,
     crc: &[u8; stembus::crc::SECTORS * 2],
+    build: &str, // per-image build stamp, injected by the bin (§B) — the lib can't env! it
 ) {
-    crate::uart::puts(p, "\n== prod v");
-    crate::uart::puts(p, crate::FW_VERSION);
-    crate::uart::putc(p, b' ');
-    crate::uart::puts(p, crate::FW_BUILD);
-    crate::uart::puts(p, " (");
-    crate::uart::puts(p, crate::model_name(model));
-    crate::uart::puts(p, ") mode=");
-    crate::uart::puts(p, mode_name);
-    crate::uart::puts(p, " ==\n");
+    uart::puts(p, "\n== v");
+    uart::puts(p, crate::VERSION); // deepsleep capability version (CARGO_PKG_VERSION)
+    uart::putc(p, b' ');
+    uart::puts(p, build);
+    uart::puts(p, " (");
+    uart::puts(p, stembus::role::model_name(model.device_id()));
+    uart::puts(p, ") mode=");
+    uart::puts(p, mode_name);
+    uart::puts(p, " ==\n");
     if !model.matches_build_family() {
-        crate::uart::puts(p, "!! WRONG-FAMILY FLASH: detected part is not in this image's family\n");
+        uart::puts(p, "!! WRONG-FAMILY FLASH: detected part is not in this image's family\n");
     }
     let o = fram_start();
-    crate::uart::puts(p, "fram crc16 x8 @0x");
-    crate::uart::hex8(p, (o >> 8) as u8);
-    crate::uart::hex8(p, o as u8);
-    crate::uart::puts(p, " (read over I2C @0x3F):");
+    uart::puts(p, "fram crc16 x8 @0x");
+    uart::hex8(p, (o >> 8) as u8);
+    uart::hex8(p, o as u8);
+    uart::puts(p, " (read over I2C @0x3F):");
     let mut s = 0;
     while s < stembus::crc::SECTORS {
-        crate::uart::putc(p, b' ');
-        crate::uart::hex8(p, crc[2 * s]);
-        crate::uart::hex8(p, crc[2 * s + 1]);
+        uart::putc(p, b' ');
+        uart::hex8(p, crc[2 * s]);
+        uart::hex8(p, crc[2 * s + 1]);
         s += 1;
     }
-    crate::uart::putc(p, b'\n');
+    uart::putc(p, b'\n');
 }
 
 /// `--debug` Leaf/eUSCI-B0 diagnostic — the "more info" for a scan that found nothing (e.g. the FR2355
@@ -82,24 +85,24 @@ pub fn boot_log(
 /// the master then). Dual-only. Not a full diag — DESIGN.md.
 #[cfg(all(feature = "debug", feature = "_dual"))]
 pub fn debug_leaf(p: &Peripherals) {
-    let (sda, scl) = crate::i2c::bus_levels(p);
+    let (sda, scl) = bsp::i2c::bus_levels(p);
     let ctlw0 = p.e_usci_b0.ucb0ctlw0().read().bits();
     let ifg = p.e_usci_b0.ucb0ifg().read().bits();
-    crate::uart::puts(p, "leaf-dbg: SDA=");
-    crate::uart::putc(p, if sda { b'H' } else { b'L' });
-    crate::uart::puts(p, " SCL=");
-    crate::uart::putc(p, if scl { b'H' } else { b'L' });
-    crate::uart::puts(p, "  UCB0CTLW0=0x");
-    crate::uart::hex8(p, (ctlw0 >> 8) as u8);
-    crate::uart::hex8(p, ctlw0 as u8);
-    crate::uart::puts(p, " (MST="); // UCMST (master) bit 0x0800
-    crate::uart::putc(p, if ctlw0 & 0x0800 != 0 { b'1' } else { b'0' });
-    crate::uart::puts(p, " SWRST="); // UCSWRST bit 0x0001 (held in reset = off the bus)
-    crate::uart::putc(p, if ctlw0 & 0x0001 != 0 { b'1' } else { b'0' });
-    crate::uart::puts(p, ")  UCB0IFG=0x"); // bit5 UCNACKIFG = last addr NACKed (no device)
-    crate::uart::hex8(p, (ifg >> 8) as u8);
-    crate::uart::hex8(p, ifg as u8);
-    crate::uart::puts(p, " (NACK=");
-    crate::uart::putc(p, if ifg & 0x0020 != 0 { b'1' } else { b'0' });
-    crate::uart::puts(p, ")\n");
+    uart::puts(p, "leaf-dbg: SDA=");
+    uart::putc(p, if sda { b'H' } else { b'L' });
+    uart::puts(p, " SCL=");
+    uart::putc(p, if scl { b'H' } else { b'L' });
+    uart::puts(p, "  UCB0CTLW0=0x");
+    uart::hex8(p, (ctlw0 >> 8) as u8);
+    uart::hex8(p, ctlw0 as u8);
+    uart::puts(p, " (MST="); // UCMST (master) bit 0x0800
+    uart::putc(p, if ctlw0 & 0x0800 != 0 { b'1' } else { b'0' });
+    uart::puts(p, " SWRST="); // UCSWRST bit 0x0001 (held in reset = off the bus)
+    uart::putc(p, if ctlw0 & 0x0001 != 0 { b'1' } else { b'0' });
+    uart::puts(p, ")  UCB0IFG=0x"); // bit5 UCNACKIFG = last addr NACKed (no device)
+    uart::hex8(p, (ifg >> 8) as u8);
+    uart::hex8(p, ifg as u8);
+    uart::puts(p, " (NACK=");
+    uart::putc(p, if ifg & 0x0020 != 0 { b'1' } else { b'0' });
+    uart::puts(p, ")\n");
 }

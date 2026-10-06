@@ -71,7 +71,7 @@ pub use deepsleep::enumerate; // Leaf sensor-bus enumeration — now in `deepsle
 // the fr24xx Passive node (its single eUSCI_B0) — it's the fr24xx node's whole job. `enumerate`/`mode`
 // stay dual-only (no sensor bus / mode machine on the single-I²C part).
 #[cfg(any(feature = "_dual", feature = "fr24xx"))]
-mod status;
+pub use deepsleep::status; // identity/status model (regmap 0x30–0x3F) — now in deepsleep (Phase 0b)
 #[cfg(feature = "_dual")]
 mod mode;
 #[cfg(any(feature = "_dual", feature = "fr24xx"))]
@@ -85,7 +85,7 @@ mod uart;
 // Boot POST: `post::fram_crcs` (per-sector FRAM CRC16) runs on EVERY build incl. silent (ADR-0010 —
 // the M7 reads the raw CRCs over I²C and judges). The UART echo (`boot_log`/`debug_leaf`) inside is
 // `console`/`debug`-gated. So the module is ALWAYS compiled.
-mod post;
+pub use deepsleep::post; // boot POST integrity (FRAM CRC) + console boot log — now in deepsleep (Phase 0b)
 
 /// Compiled-in identity stamp (see build.rs). Printed at boot once the UART stub lands.
 const FW_BUILD: &str = env!("PROD_BUILD");
@@ -188,9 +188,9 @@ fn run_dual(p: &Peripherals) -> ! {
     // Assemble the RegFile the Stem slave serves: live status snapshot (+ PCA9698 shadow). `slave` is
     // the per-transaction state. Polled in the loop below.
     let mut st = if mach.is_sensing() {
-        status::Status::from_scan(model, &last)
+        status::Status::from_scan(model, &last, FW_BUILD)
     } else {
-        status::Status::booted(model) // Passive: not enumerated (didn't master the bus)
+        status::Status::booted(model, FW_BUILD) // Passive: not enumerated (didn't master the bus)
     };
     st.set_mode(mach.current().code()); // publish the boot mode at MODE_CTRL (0x3E)
     let mut rf = stem::RegFile::new(st);
@@ -205,7 +205,7 @@ fn run_dual(p: &Peripherals) -> ! {
     {
         uart::init(p);
         // LEAN default (DESIGN.md console log, Henrik 2026-10-04): version + per-sector FRAM checksums.
-        post::boot_log(p, model, mach.current().name(), &crc);
+        post::boot_log(p, model, mach.current().name(), &crc, FW_BUILD);
 
         // --debug: the post-POST "what was found" (enumerate report + debug regs + Leaf/eUSCI diagnostic)
         // + the interactive s/r/d/m/l commands. "Not a full diag, but some basic info."
@@ -266,7 +266,7 @@ fn run_dual(p: &Peripherals) -> ! {
         if let Some(scan) = out.take() {
             if mach.is_sensing() {
                 last = scan;
-                rf.status = status::Status::from_scan(model, &last);
+                rf.status = status::Status::from_scan(model, &last, FW_BUILD);
                 rf.status.set_mode(mach.current().code());
                 // --debug: auto-print what the completed Sensing scan found (no keystroke needed).
                 #[cfg(feature = "debug")]
@@ -313,7 +313,7 @@ fn run_dual(p: &Peripherals) -> ! {
                         let _ = out.take();
                         last = enumerate::scan(p);
                         enumerate::report(p, &last);
-                        rf.status = status::Status::from_scan(model, &last);
+                        rf.status = status::Status::from_scan(model, &last, FW_BUILD);
                         rf.status.set_mode(mach.current().code());
                     } else {
                         uart::puts(p, "  (passive: not mastering the sensor bus)\n");
@@ -381,7 +381,7 @@ fn begin_mode(
         *last = enumerate::Scan::absent(); // leaving Sensing: we hold no sensor data
     }
     // dev_count stays at the booted default until the async scan lands (Sensing) / stays absent (Passive).
-    rf.status = status::Status::booted(model);
+    rf.status = status::Status::booted(model, FW_BUILD);
     rf.status.set_mode(mach.current().code());
 }
 
@@ -428,12 +428,6 @@ fn oled_splash(p: &Peripherals, scan: &enumerate::Scan) {
     let _ = oled.off(&mut bus);
 }
 
-/// Model name for the banner (no core::fmt on this budget). Used by both node paths under `console`.
-#[cfg(feature = "console")]
-fn model_name(m: model::Model) -> &'static str {
-    stembus::role::model_name(m.device_id()) // shared codec (one source; same labels as the masters)
-}
-
 /// FR24xx (FR2433) single-I²C **slave-only** node. Its whole job: answer the SoM's PCA9698-emulation
 /// register file on the one eUSCI_B0 (UCB0, P1.2/P1.3) — identity/status/version (real) + the GPIO
 /// bank shadow (regmap.rs / stem.rs, the SAME contract the dual node serves on eUSCI_B1). FR2433 is
@@ -444,7 +438,7 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     let model = model::detect();
 
     // Publish identity + booted/Passive status behind the slave surface (no sensor scan on this part).
-    let mut st = status::Status::booted(model);
+    let mut st = status::Status::booted(model, FW_BUILD);
     st.set_mode(regmap::MODE_CODE_PASSIVE);
     let mut rf = stem::RegFile::new(st);
     // POST integrity (ADR-0010): per-sector FRAM CRCs, always — the M7 reads them over I²C at 0x3F.
@@ -466,7 +460,7 @@ fn run_fr24xx(p: &Peripherals) -> ! {
         uart::init(p);
         // Lean boot log: version + per-sector FRAM checksums (same as the dual node). fr24xx is
         // Passive-only (no mode machine), so the mode name is the constant "passive".
-        post::boot_log(p, model, "passive", &crc);
+        post::boot_log(p, model, "passive", &crc, FW_BUILD);
         uart::puts(p, "fr24xx I2C-slave @0x");
         uart::hex8(p, stem_addr as u8);
         uart::putc(p, b'\n');

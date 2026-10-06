@@ -10,12 +10,13 @@
 
 #[cfg(feature = "_dual")]
 use crate::enumerate::Scan;
-use crate::model::Model;
-use crate::{regmap, FW_BUILD, FW_VER_MAJOR, FW_VER_MINOR, FW_VER_PATCH};
+use crate::regmap;
+use crate::{VER_MAJOR, VER_MINOR, VER_PATCH}; // deepsleep's capability version (§B)
+use bsp::model::Model;
 #[cfg(feature = "console")]
-use crate::uart;
+use bsp::fmt as uart; // shared console formatters over the board UART
 #[cfg(feature = "console")]
-use crate::pac::Peripherals;
+use bsp::pac::Peripherals;
 
 // `DBG_STATUS` (0x37) / `DBG_FAULT` (0x3A) flag bits — the shared definitions (one source: the
 // `stembus::flags` codec, so a master decodes exactly what this server sets). Re-exported under the
@@ -33,11 +34,12 @@ pub struct Status {
     mode: u8, // current operating-mode ABI code (regmap::MODE_CODE_*), reported at MODE_CTRL (0x3E)
 }
 
-/// FNV-1a 32-bit hash of the build stamp → a stable, machine-readable build id the SoM/hwd can match
-/// against what it flashed (verify-by-stamp without parsing the string).
-fn build_id() -> u32 {
+/// FNV-1a 32-bit hash of the **injected** build stamp → a stable, machine-readable build id the SoM/hwd
+/// can match against what it flashed (verify-by-stamp without parsing the string). The stamp is a
+/// per-image fact owned by the bin (§B): passed in, not read from a crate const here.
+fn build_id(build: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
-    for &b in FW_BUILD.as_bytes() {
+    for &b in build.as_bytes() {
         h ^= b as u32;
         h = h.wrapping_mul(0x0100_0193);
     }
@@ -50,7 +52,7 @@ impl Status {
     /// rather than 112 phantom devices. DUAL-only: the single-I²C fr24xx (Passive) node never masters
     /// a sensor bus, so it publishes `booted()` instead.
     #[cfg(feature = "_dual")]
-    pub fn from_scan(model: Model, scan: &Scan) -> Self {
+    pub fn from_scan(model: Model, scan: &Scan, build: &str) -> Self {
         let mut status = flags::BOOTED | flags::ENUMERATED;
         let mut fault = 0u8;
         if !model.matches_build_family() {
@@ -60,7 +62,7 @@ impl Status {
             fault |= fault::BUS_WEDGED;
             return Self {
                 model_id: model.device_id(),
-                build_id: build_id(),
+                build_id: build_id(build),
                 status,
                 dev_count: 0,
                 known_present: 0,
@@ -78,7 +80,7 @@ impl Status {
         }
         Self {
             model_id: model.device_id(),
-            build_id: build_id(),
+            build_id: build_id(build),
             status,
             dev_count: scan.present.count() as u8,
             known_present: known,
@@ -90,14 +92,14 @@ impl Status {
     /// Booted, but the sensor bus was NOT scanned — used in **Passive** mode, where the MSP never
     /// masters the sensor bus. BOOTED only (no ENUMERATED / BUS_OK), so the SoM doesn't read a false
     /// enumeration. Identity/build still populated.
-    pub fn booted(model: Model) -> Self {
+    pub fn booted(model: Model, build: &str) -> Self {
         let mut status = flags::BOOTED;
         if !model.matches_build_family() {
             status |= flags::WRONG_FAMILY;
         }
         Self {
             model_id: model.device_id(),
-            build_id: build_id(),
+            build_id: build_id(build),
             status,
             dev_count: 0,
             known_present: 0,
@@ -127,9 +129,9 @@ impl Status {
             regmap::DBG_DEV_COUNT => self.dev_count,
             regmap::DBG_KNOWN_PRESENT => self.known_present,
             regmap::DBG_FAULT => self.fault,
-            regmap::DBG_FW_VER_MAJOR => FW_VER_MAJOR,
-            regmap::DBG_FW_VER_MINOR => FW_VER_MINOR,
-            regmap::DBG_FW_VER_PATCH => FW_VER_PATCH,
+            regmap::DBG_FW_VER_MAJOR => VER_MAJOR,
+            regmap::DBG_FW_VER_MINOR => VER_MINOR,
+            regmap::DBG_FW_VER_PATCH => VER_PATCH,
             regmap::MODE_CTRL => self.mode,
             _ => 0,
         }
@@ -163,11 +165,11 @@ impl Status {
         uart::puts(p, " fault=0x");
         uart::hex8(p, self.fault);
         uart::puts(p, " ver=");
-        uart::dec(p, FW_VER_MAJOR as u16);
+        uart::dec(p, VER_MAJOR as u16);
         uart::putc(p, b'.');
-        uart::dec(p, FW_VER_MINOR as u16);
+        uart::dec(p, VER_MINOR as u16);
         uart::putc(p, b'.');
-        uart::dec(p, FW_VER_PATCH as u16);
+        uart::dec(p, VER_PATCH as u16);
         uart::puts(p, " mode=0x");
         uart::hex8(p, self.mode);
         uart::putc(p, b'\n');
