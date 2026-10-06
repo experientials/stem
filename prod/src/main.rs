@@ -460,7 +460,13 @@ extern "msp430-interrupt" fn usci_b0_inner() {
     // atomic sleep instruction), so there is no concurrent RMW of UCB0IE with the main context.
     let p = unsafe { Peripherals::steal() };
     bsp::stem_i2c::irq_disable(&p);
+    STEM_PENDER.wake(); // tell the sched executor a wake arrived (closes the wake-during-poll race, 1c)
 }
+
+/// The LPM pender for the fr2433 Stem-slave dispatch task (ADR-0013 §5). The ISR `wake()`s it; the
+/// `run_pended` executor idles (LPM) only when a poll round made no progress and this flag is clear.
+#[cfg(feature = "fr24xx")]
+static STEM_PENDER: sched::Pender = sched::Pender::new();
 
 /// Enter LPM0 with interrupts enabled, atomically (SR = r2; CPUOFF|GIE = 0x18). One instruction, so there
 /// is no window between "decide to sleep" and "an interrupt can wake me" (Samek's chicken-and-egg;
@@ -518,26 +524,28 @@ fn run_fr24xx(p: &Peripherals) -> ! {
         uart::puts(p, if gp { "PASS\n" } else { "FAIL\n" });
     }
 
-    // INTERRUPT-DRIVEN + LPM serve loop (Phase 1b). FR2433 is Passive-only: its whole job is to answer
-    // the Stem master on eUSCI_B0, so it SLEEPS in LPM between transactions and wakes on the slave ISR
-    // (slau445i §24.3.10: the eUSCI_B slave RX/TX interrupt wakes the CPU from LPM). This is the
-    // deepsleep posture — no busy-poll. See DEEPSLEEP-EXTRACTION.md §3 + docs/references/firmware-architecture.md.
+    // INTERRUPT-DRIVEN + LPM dispatch as an ASYNC `sched` task (Phase 1c, ADR-0013 §5 LPM pender).
+    // FR2433 is Passive-only: its whole job is to answer the Stem master on eUSCI_B0, so it SLEEPS in LPM
+    // between transactions and wakes on the slave ISR (slau445i §24.3.10). `stem::serve` is a
+    // never-completing future that `.await`s one SlaveEvent at a time; `sched::run_pended` polls it and
+    // runs the `idle` closure below whenever a poll round finds the bus idle (no progress + no pending
+    // wake) — functionally identical to 1b's hand loop, now expressed in the one async model the dual
+    // multi-task reshape will reuse. See DEEPSLEEP-EXTRACTION.md §3 + docs/references/msp430-lpm-wake-pattern.md.
     //
     // WATCHDOG vs LPM (slau445i §12): a sleeping CPU can't pet, and the reset-mode WDT has a clock
-    // fail-safe (ACLK loss → VLOCLK) so LPM does NOT stop it — it would reset the sleeper. So we arm the
-    // backstop only while AWAKE (where a hang can occur) and `WDTHOLD` across the sleep. A genuine hang in
-    // `poll` leaves the backstop armed from this pass → reset; a legitimately idle sleeper is not a hang.
-    loop {
-        // AWAKE: the backstop guards this active service window; drain whatever the master did.
-        bsp::board::wdt_arm_backstop(p);
-        stem::poll(p, &mut slave, &mut rf); // reads IFG/RXBUF/TXBUF directly — works with the IE masked
-        let _ = rf.take_mode_request(); // Passive-only part: nowhere to go, drain so a write can't wedge
-
-        // IDLE → SLEEP. Close the GIE window FIRST, then arm the slave wake and hold the WDT, so no ISR
-        // fires between arming IE and the atomic sleep (which would otherwise mask IE and sleep forever).
+    // fail-safe (ACLK loss → VLOCLK) so LPM does NOT stop it. So the `idle` closure HOLDs the backstop
+    // across the sleep and re-arms it on wake; the backstop guards only the awake servicing (where a hang
+    // can occur). Ordering: disable GIE BEFORE arming the slave IE, so no ISR fires between the arm and
+    // the atomic `bis #0x18,r2` (which would otherwise mask IE and then sleep forever).
+    bsp::board::wdt_arm_backstop(p); // guard the first poll round before the executor can idle
+    let mut task = core::pin::pin!(stem::serve(p, &mut slave, &mut rf));
+    sched::run_pended(task.as_mut(), &STEM_PENDER, || {
         msp430::interrupt::disable();
-        bsp::stem_i2c::irq_enable(p); // re-arm the slave IE the ISR masked (GIE off → no premature fire)
-        bsp::board::wdt_hold(p); // a sleeping CPU can't hang; don't let the fail-safe WDT reset it
-        enter_lpm0_gie(); // GIE on + CPUOFF, atomic — wakes on the eUSCI_B0 slave ISR, then loops to top
-    }
+        bsp::stem_i2c::irq_enable(p);
+        bsp::board::wdt_hold(p);
+        enter_lpm0_gie(); // wakes on the eUSCI_B0 slave ISR (masks IE + STEM_PENDER.wake())
+        bsp::board::wdt_arm_backstop(p); // awake again — re-guard the next poll round
+    });
+    // `serve` never completes, so `run_pended` never returns; satisfy the `-> !` signature.
+    loop {}
 }

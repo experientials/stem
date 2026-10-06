@@ -340,8 +340,17 @@ Cargo's crate-scoping dictates one answer:
       `vstem 0x21`/`r 0x21 …` return correct, stable data → the CPU woke from LPM on the slave ISR,
       serviced, and reslept. (Remote limit: can't meter current to *see* LPM; functional wake + code
       path is the evidence — stated plainly.)
-  - **1c — adopt the async dispatch task.** Move the drain into a `sched` async task `.await`ing the
-    seam; the ISR-set flag drives the waker; executor drops to LPM when all tasks Pending (ADR-0013).
+  - **1c (fr2433) — ✅ DONE + HW-proven 2026-10-06.** The fr2433 dispatch is now the async `stem::serve`
+    task (loops `next_event().await` → `Slave::handle`, shared with the sync `poll` so they can't drift),
+    driven by the NEW **`sched::{Pender, run_pended}`** — ADR-0013's "real waker / LPM pender": the future
+    returns `Pending` when the bus is idle, `run_pended` runs the caller's `idle` closure (disable GIE →
+    `irq_enable` → `WDTHOLD` → `bis #0x18,r2`), and the eUSCI_B0 ISR wakes the CPU **and** `Pender::wake()`s
+    (closing the wake-during-poll race). Pender wake flag is a single-core `volatile` byte (MSP430 has no
+    `core::sync::atomic`; keeps `sched` zero-dep). Cost **+94 B** over 1b (4426/15360; the spike's ~0.5 KB
+    is for a 3-machine model). fr2476/fr2355/diag green (sched change is additive). HW on `@fr2433`+probe:
+    boots → LPM (no reset-loop) → the master wakes the async sleeper, `scan`→`0x21 0x22`, 2× `r 0x22`
+    bit-stable (model `0x8240`, build `0x51EC29D9` == boot stamp). Functionally identical to 1b, now in the
+    one async model the dual reshape reuses. This satisfies **ADR-0013 follow-up #5** for `deepsleep`.
 - **Phase 2 — command surface.** One `Command` enum + `execute`; Stem-regmap face + UART face. Keep the
   PCA9698 region layout reserved (§2).
 - **Phase 3 — diag consumes `deepsleep` + same-boot.** diag brings up the slave identically; ~1 s grace

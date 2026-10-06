@@ -164,4 +164,12 @@ at `scratchpad/async-spike/`.
   sleep-between-events. **The subsystem that commits to #5 is the `deepsleep` module** — the
 interrupt-driven eUSCI-slave leaf + LPM waker are its execution model, built per the phased plan
 [../DEEPSLEEP-EXTRACTION.md](../DEEPSLEEP-EXTRACTION.md) (§3 Execution model, §A Phase 1).
+  - **✅ The LPM pender is now BUILT + HW-proven (2026-10-06, fr2433 deepsleep Phase 1c).** `sched` gained
+    `Pender` (a single-core `volatile`-byte wake flag behind a real `Waker` — MSP430 has no
+    `core::sync::atomic`, so not `AtomicBool`; keeps `sched` zero-dep) + `run_pended(fut, pender, idle)`
+    which idles via a caller closure only when a poll round makes no progress and no wake arrived. The
+    async eUSCI-slave leaf = `stem::serve`'s `next_event().await` (`poll_fn`), woken by the eUSCI_B0 ISR
+    (`wake_cpu` trampoline + `Pender::wake()`). Cost +94 B on fr2433. Proven on `@fr2433` + the RP2040
+    stem-probe: LPM sleep, master wakes the async sleeper, bit-stable identity reads. Still OPEN: the
+    async **timer** leaf (for active sensor-monitoring cadence) and the dual multi-task reshape.
 </content>

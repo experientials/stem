@@ -235,6 +235,37 @@ impl Slave {
             first_byte: true,
         }
     }
+
+    /// Apply one decoded [`SlaveEvent`] to the register file (PCA9698 command-pointer protocol,
+    /// I2C-API.md §7.3). The single source of the dispatch logic — shared by the sync [`poll`] drain
+    /// (dual) and the async [`serve`] task (fr2433), so the two can't drift.
+    fn handle(&mut self, p: &Peripherals, rf: &mut RegFile, ev: SlaveEvent) {
+        match ev {
+            // START matching our address: the next RX byte is the command; a read keeps the pointer.
+            SlaveEvent::Start => self.first_byte = true,
+            SlaveEvent::Nack => {}
+            SlaveEvent::Rx(b) => {
+                if self.first_byte {
+                    self.reg_ptr = b & regmap::CMD_REG_MASK;
+                    self.ai = b & regmap::CMD_AI != 0;
+                    self.first_byte = false;
+                } else {
+                    rf.write(p, self.reg_ptr, b);
+                    if self.ai {
+                        self.reg_ptr = regmap::next_ai(self.reg_ptr);
+                    }
+                }
+            }
+            SlaveEvent::TxReq => {
+                let v = rf.read(p, self.reg_ptr);
+                stem_i2c::provide_tx(p, v);
+                if self.ai {
+                    self.reg_ptr = regmap::next_ai(self.reg_ptr);
+                }
+            }
+            SlaveEvent::Stop => self.first_byte = true,
+        }
+    }
 }
 
 /// Service any pending slave events (non-blocking). Call frequently from the main loop (Phase 1a); from
@@ -246,31 +277,25 @@ impl Slave {
 /// register (also stepping under AI).
 pub fn poll(p: &Peripherals, s: &mut Slave, rf: &mut RegFile) {
     while let Some(ev) = stem_i2c::next_event(p) {
-        match ev {
-            // START matching our address: the next RX byte is the command; a read keeps the pointer.
-            SlaveEvent::Start => s.first_byte = true,
-            SlaveEvent::Nack => {}
-            SlaveEvent::Rx(b) => {
-                if s.first_byte {
-                    s.reg_ptr = b & regmap::CMD_REG_MASK;
-                    s.ai = b & regmap::CMD_AI != 0;
-                    s.first_byte = false;
-                } else {
-                    rf.write(p, s.reg_ptr, b);
-                    if s.ai {
-                        s.reg_ptr = regmap::next_ai(s.reg_ptr);
-                    }
-                }
-            }
-            SlaveEvent::TxReq => {
-                let v = rf.read(p, s.reg_ptr);
-                stem_i2c::provide_tx(p, v);
-                if s.ai {
-                    s.reg_ptr = regmap::next_ai(s.reg_ptr);
-                }
-            }
-            SlaveEvent::Stop => s.first_byte = true,
-        }
+        s.handle(p, rf, ev);
+    }
+}
+
+/// **Async** dispatch (Phase 1c, ADR-0013 §5 LPM pender) — the same register surface as [`poll`], driven
+/// as a never-completing `sched` task. `.await`s one [`SlaveEvent`] at a time: when the bus is idle the
+/// leaf returns `Pending`, so `sched::run_pended` runs the caller's LPM `idle` closure (sleep); the
+/// eUSCI slave ISR wakes the CPU + `Pender::wake()`s, and the next poll drains the event. Functionally
+/// identical to the `poll` drain — it only changes *when* the CPU runs (interrupt-driven sleep, not a
+/// busy loop). Used by the fr2433 Passive node; dual still uses [`poll`] until its async reshape.
+pub async fn serve(p: &Peripherals, s: &mut Slave, rf: &mut RegFile) {
+    loop {
+        // Leaf: resolve to the next slave event, or `Pending` when the bus is idle (→ executor idles).
+        let ev = core::future::poll_fn(|_cx| match stem_i2c::next_event(p) {
+            Some(ev) => core::task::Poll::Ready(ev),
+            None => core::task::Poll::Pending,
+        })
+        .await;
+        s.handle(p, rf, ev);
     }
 }
 

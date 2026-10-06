@@ -112,6 +112,17 @@ the hand-rolled trampoline and use the macro.
 
 ---
 
+## Async executor layer (Phase 1c — ADR-0013 LPM pender)
+The 1b serve loop above is the hand-written form. 1c expresses the SAME behaviour in the one async model
+(so the dual multi-task reshape reuses it), with **no change to the trampoline/ISR/WDT/LPM mechanics**:
+- `sched::Pender` — a real `Waker` over a single-core `volatile`-byte flag (MSP430 has no
+  `core::sync::atomic`; keeps `sched` zero-dep). `sched::run_pended(fut, &PENDER, idle)` polls `fut`;
+  when a round makes no progress and the flag is clear, it calls `idle` (the §3 sleep sequence).
+- The dispatch is an `async fn serve` that loops `next_event().await` (a `poll_fn` leaf: `Ready(ev)` /
+  `Pending` when the bus is idle) → `Slave::handle` (shared with the sync `poll`).
+- The ISR inner adds **`PENDER.wake()`** next to the IE mask — so a wake racing the poll isn't lost.
+- Cost on fr2433: +94 B vs the hand loop. Functionally identical; proven on `@fr2433` + the stem-probe.
+
 ## Reuse for the dual parts (DEEPSLEEP-EXTRACTION.md §Behaviour model)
 In Passive the dual nodes are slaves on **both** buses → two slave ISRs: `EUSCI_B1` (Stem) and
 `EUSCI_B0` (Leaf). Each gets the same hand-rolled `br` trampoline + `bsp::stem_i2c::irq_{enable,disable}`
