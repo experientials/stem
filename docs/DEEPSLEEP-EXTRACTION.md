@@ -143,11 +143,14 @@ Cargo's crate-scoping dictates one answer:
 
 ## 7. Phased execution (each phase builds + is independently landable)
 
-- **Phase 0 — create `deepsleep`; move the no-new-abstraction pieces.** *(low risk, like the model move)*
-  Move `regmap`/`post`/`status`/`mode`/`enumerate`; inject build-identity (§B); feature-gate
-  `mode`/`enumerate` off fr2433; route `mode`'s sensor-bus acquire/release via a `bsp::board` role.
-  `stem.rs` stays in prod-bin (still fused). **Verify:** prod fr2476/fr2355/fr2433 + diag build in budget;
-  HW smoke on one dual + fr2433.
+- **Phase 0 — ✅ DONE 2026-10-06** (`bb3ac85`/`5109ab5`/`b1fc603`/`2c0a584`). Created `crates/deepsleep`;
+  moved `regmap`/`enumerate`/`status`/`post`/`mode` (via `git mv`, imports remapped to
+  `bsp::{model,fmt,pac,i2c,hal}`+`stembus`); build-identity injected (§B — stamp as `&str`, version =
+  `deepsleep`'s `CARGO_PKG_VERSION`; banner `== prod v`→`== v`); `mode`/`enumerate` `_dual`-gated; `mode`
+  uses the new **`bsp::board::leaf_i2c_{acquire,release}`** role (+`bsp::i2c::release`), no raw `p.p1`.
+  `stem.rs` still fused in prod. Verified: prod fr2476/fr2355/fr2433 + `--debug` + diag build in budget;
+  HW on `@fr2476` — boot/status/enumerate + build-identity correct; mode role proven by Passive
+  (`MST=0 SWRST=1`) → Sensing (`MST=1 SWRST=0`, OLED `0x3C` found).
 - **Phase 1 — split the Stem slave (§A) + go interrupt-driven.** *(the hard one)* Driver+ISR+waker →
   `bsp/src/stem_i2c.rs`; dispatch → `deepsleep` async task over `SlaveEvent`; adopt the `sched` async
   executor + LPM waker (ADR-0013). **Verify:** master read/write over Stem; CPU sleeps between
@@ -167,6 +170,7 @@ revisiting the no-ISR single-threaded assumption — shared state touched by ISR
 FR2433 15 KB image pulls only what it ships.
 
 ## Status
-Prereqs **done**: `bsp::model`, CONV-1 (clock/uart/fmt → bsp), `stembus`, ADR-0014. **Next actionable:**
-Phase 0 (un-gated). **Phase 1** needs the `sched` async executor + LPM waker (ADR-0013 follow-up) — now
-clearly the `deepsleep` foundation, not an optional nicety.
+Prereqs **done**: `bsp::model`, CONV-1 (clock/uart/fmt → bsp), `stembus`, ADR-0014. **Phase 0 DONE**
+(2026-10-06) — `deepsleep` holds regmap/enumerate/status/post/mode. **Next actionable: Phase 1** (the
+Stem-slave `stem.rs` split, §A), which needs the `sched` async executor + LPM waker (ADR-0013 follow-up)
+— now clearly the `deepsleep` foundation, not an optional nicety. (`stem.rs` remains fused in prod until then.)
