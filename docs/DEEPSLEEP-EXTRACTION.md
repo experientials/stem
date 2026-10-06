@@ -84,7 +84,7 @@ wire contract → `stembus` (done, ADR-0012).
 
 ---
 
-## Two hard design points (resolve these, the rest is mechanical)
+## One real design point (§A) — §B is a forced mechanic, not a decision
 
 ### A. Stem-slave hardware abstraction (CONV-3 — the gating one)
 `stem.rs` today fuses two things: the **eUSCI slave transport** (register-level ucb1/ucb0 init/poll/rx/tx,
@@ -96,7 +96,8 @@ clock-stretch handling) and the **protocol dispatch** (RegFile: pointer + read/w
 - This is the real work: a byte-stream slave trait that isn't `embedded-hal` (that's master-only). Design
   it so diag can bring the slave up identically.
 
-### B. Build identity — inject the STAMP; the version rides in the crate
+### B. Build identity — FORCED (there is one correct solution, not a decision)
+Cargo's crate-scoping dictates the answer; listed here only so the extraction gets the plumbing right.
 `status.rs`/`post.rs` read `crate::{FW_BUILD, FW_VER_*, FW_VERSION}` + `crate::model_name`. These are
 **two different identity values with different compile-time scoping** — only one needs injecting:
 - **Build stamp** (`FW_BUILD = env!("PROD_BUILD")`): `PROD_BUILD` is emitted by the **bin's** `build.rs`
