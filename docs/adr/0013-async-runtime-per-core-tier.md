@@ -153,8 +153,13 @@ at `scratchpad/async-spike/`.
   de-duplicated; (3) **✅ first subsystem migrated — prod Leaf enumerate** (`enumerate::scan_async` +
   `leaf_scanner`, driven by `sched::{yield_now, noop_waker}`; hardware-verified on `@fr2355`:
   Sensing-switch arms the async scan, it completes with the Stem slave responsive throughout, +330 B
-  silent / within budget). This also made prod's previously-dead `sched` dependency live. (4) OPEN:
-  migrate further subsystems case-by-case (each ~+0.5 KB); build the interrupt-driven async eUSCI/timer
-  leaves when a subsystem needs true `.await`-on-IFG (enumerate used blocking-probe-then-yield); the LPM
-  pender for real sleep-between-events.
+  silent / within budget). This also made prod's previously-dead `sched` dependency live. (4) ✅ second subsystem: the
+  **VL53L0X wake-on-approach ranging demo** (--debug) async-ified — was a 5 s blocking nop-delay inside
+  the synchronous `report()` (an ADR-0006 stall); now `vl53l0x_range_demo` paces via nop-chunks +
+  `yield_now().await` so the slave is serviced ~10×/sample (debug image +1.7 KB — a deeper/statier
+  future than enumerate; debug-only). (5) OPEN: migrate further subsystems case-by-case; build the
+  interrupt-driven async eUSCI/**timer** leaves when a subsystem needs true `.await`-on-IFG or real
+  timed pacing (enumerate used probe-then-yield; the VL53 demo uses nop-chunk pacing — both avoid
+  needing a timer leaf, but active sensor monitoring will want one); the LPM pender for real
+  sleep-between-events.
 </content>
