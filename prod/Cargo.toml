@@ -18,7 +18,7 @@ fr247x = ["bsp/fr2476", "deepsleep/fr2476", "_dual"] # FR2476/FR2475 — primary
 fr215x = ["bsp/fr2155", "deepsleep/fr2155", "_dual"] # FR2155 — production dual-I²C baseline
 fr235x = ["bsp/fr2355", "deepsleep/fr2355", "_dual"] # FR2355 — dev LaunchPad, superset of FR2155
 # FR24xx (FR2433) — SINGLE-I²C slave-only expander. The cheap, small, well-stocked production node.
-fr24xx = ["bsp/fr2433", "deepsleep/fr2433"]
+fr24xx = ["bsp/fr2433", "deepsleep/fr2433", "msp430-rt/device"]
 # Internal marker: "this is a dual-I²C family" — gates the shared dual-I²C code; forwards to deepsleep's
 # `_dual` so its `enumerate` module compiles. Not selected directly.
 _dual = ["deepsleep/_dual"]

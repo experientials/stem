@@ -26,5 +26,5 @@ embedded-hal = "1.0"
 fr2476 = ["dep:msp430fr2476", "_leaf"]
 fr2355 = ["dep:msp430fr2355", "_leaf"]
 fr2155 = ["dep:msp430fr2155", "_leaf"]
-fr2433 = ["dep:msp430fr2433"]
+fr2433 = ["dep:msp430fr2433", "msp430fr2433/rt"]
 _leaf = []

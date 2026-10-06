@@ -1,6 +1,7 @@
 #![no_main]
 #![no_std]
 #![feature(asm_experimental_arch)] // core::arch::asm! for SCG0 in clock.rs (fr247x); harmless otherwise
+#![cfg_attr(feature = "fr24xx", feature(abi_msp430_interrupt))]
 
 //! bob-929 PRODUCT firmware (Rust) — **Stembus node**, primary dev target MSP430FR2476 (FR247x).
 //!
@@ -431,6 +432,47 @@ fn oled_splash(p: &Peripherals, scan: &enumerate::Scan) {
     let _ = oled.off(&mut bus);
 }
 
+/// PROBE (Phase 1b): eUSCI_B0 slave ISR on fr2433 — HAND-ROLLED wake trampoline (alternative to the
+/// msp430-rt `wake_cpu` macro, whose `jmp {inner}` truncates under LTO: R_MSP430_10_PCREL, ±1 KB).
+/// `br #{inner}` is an ABSOLUTE branch (R_MSP430_16, full range) → placement-independent, LTO-safe, and
+/// self-contained (no dependency patch). The naked outer clears SCG1|SCG0|OSCOFF|CPUOFF (0xF0) in the
+/// stacked SR (0(r1), r1=SP) so the CPU returns to active mode after the inner handler's `reti`.
+#[cfg(feature = "fr24xx")]
+#[unsafe(naked)]
+#[no_mangle]
+unsafe extern "msp430-interrupt" fn USCI_B0() {
+    core::arch::naked_asm!(
+        "bic.b #0xF0, 0(r1)", // wake: clear the LPM bits in the pushed SR
+        "br #{inner}",        // absolute branch to the real handler (full range)
+        inner = sym usci_b0_inner,
+    );
+}
+/// Real eUSCI_B0 slave handler body. `extern "msp430-interrupt"` → the compiler emits `reti` at the end,
+/// which pops the (wake-modified) SR. Reached via `br` from the trampoline above.
+///
+/// Does **no byte work** (§3 / docs/references/firmware-architecture.md): it only MASKS the slave IE so
+/// the still-latched IFG won't immediately re-fire while the CPU is awake, then returns — the trampoline
+/// already cleared `CPUOFF`, so the main loop resumes and drains `next_event()` + re-enables the IE. The
+/// register file is never touched here, so it needs no critical section (it stays in the main context).
+#[cfg(feature = "fr24xx")]
+extern "msp430-interrupt" fn usci_b0_inner() {
+    // SAFETY: single-core; this ISR masks its own source and runs only while main is in LPM (or at the
+    // atomic sleep instruction), so there is no concurrent RMW of UCB0IE with the main context.
+    let p = unsafe { Peripherals::steal() };
+    bsp::stem_i2c::irq_disable(&p);
+}
+
+/// Enter LPM0 with interrupts enabled, atomically (SR = r2; CPUOFF|GIE = 0x18). One instruction, so there
+/// is no window between "decide to sleep" and "an interrupt can wake me" (Samek's chicken-and-egg;
+/// docs/references/firmware-architecture.md §1). The eUSCI_B0 slave ISR wakes us (its `wake_cpu`
+/// trampoline clears CPUOFF in the stacked SR); a pending IFG at this point fires immediately rather than
+/// sleeping. Default (memory-clobbering) asm → a barrier, so loads/stores aren't reordered across sleep.
+#[cfg(feature = "fr24xx")]
+#[inline(always)]
+fn enter_lpm0_gie() {
+    unsafe { core::arch::asm!("bis #0x18, r2", options(nostack)) };
+}
+
 /// FR24xx (FR2433) single-I²C **slave-only** node. Its whole job: answer the SoM's PCA9698-emulation
 /// register file on the one eUSCI_B0 (UCB0, P1.2/P1.3) — identity/status/version (real) + the GPIO
 /// bank shadow (regmap.rs / stem.rs, the SAME contract the dual node serves on eUSCI_B1). FR2433 is
@@ -476,13 +518,26 @@ fn run_fr24xx(p: &Peripherals) -> ! {
         uart::puts(p, if gp { "PASS\n" } else { "FAIL\n" });
     }
 
-    // Arm the hang backstop (deterministic bring-up done). Serve the slave surface forever. A SoM write
-    // to MODE_CTRL (0x3E) has nowhere to go on a Passive-only part — drain and ignore it so the request
-    // can't wedge; reads still return PASSIVE.
-    bsp::board::wdt_arm_backstop(p);
+    // INTERRUPT-DRIVEN + LPM serve loop (Phase 1b). FR2433 is Passive-only: its whole job is to answer
+    // the Stem master on eUSCI_B0, so it SLEEPS in LPM between transactions and wakes on the slave ISR
+    // (slau445i §24.3.10: the eUSCI_B slave RX/TX interrupt wakes the CPU from LPM). This is the
+    // deepsleep posture — no busy-poll. See DEEPSLEEP-EXTRACTION.md §3 + docs/references/firmware-architecture.md.
+    //
+    // WATCHDOG vs LPM (slau445i §12): a sleeping CPU can't pet, and the reset-mode WDT has a clock
+    // fail-safe (ACLK loss → VLOCLK) so LPM does NOT stop it — it would reset the sleeper. So we arm the
+    // backstop only while AWAKE (where a hang can occur) and `WDTHOLD` across the sleep. A genuine hang in
+    // `poll` leaves the backstop armed from this pass → reset; a legitimately idle sleeper is not a hang.
     loop {
-        bsp::board::wdt_pet(p); // reload the backstop; a hang in the serve loop resets the node
-        stem::poll(p, &mut slave, &mut rf);
-        let _ = rf.take_mode_request();
+        // AWAKE: the backstop guards this active service window; drain whatever the master did.
+        bsp::board::wdt_arm_backstop(p);
+        stem::poll(p, &mut slave, &mut rf); // reads IFG/RXBUF/TXBUF directly — works with the IE masked
+        let _ = rf.take_mode_request(); // Passive-only part: nowhere to go, drain so a write can't wedge
+
+        // IDLE → SLEEP. Close the GIE window FIRST, then arm the slave wake and hold the WDT, so no ISR
+        // fires between arming IE and the atomic sleep (which would otherwise mask IE and sleep forever).
+        msp430::interrupt::disable();
+        bsp::stem_i2c::irq_enable(p); // re-arm the slave IE the ISR masked (GIE off → no premature fire)
+        bsp::board::wdt_hold(p); // a sleeping CPU can't hang; don't let the fail-safe WDT reset it
+        enter_lpm0_gie(); // GIE on + CPUOFF, atomic — wakes on the eUSCI_B0 slave ISR, then loops to top
     }
 }

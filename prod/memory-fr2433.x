@@ -9,7 +9,7 @@ MEMORY
   /* VECTORS: msp430-rt's current (no-`rt`) default is a 16-word table ending at 0x10000. When the PAC
      `rt` feature + real ISRs land, set ORIGIN to the chip's lowest interrupt vector (see
      scripts/lint-memory-x.sh / the chip's PAC); msp430-rt's link.x ASSERT enforces the exact size. */
-  VECTORS : ORIGIN = 0xFFE0, LENGTH = 0x0020
+  VECTORS : ORIGIN = 0xFF88, LENGTH = 0x0078
 }
 
 /* Checksum region (single source of truth): prod/src/post.rs reads these as extern symbols to CRC the

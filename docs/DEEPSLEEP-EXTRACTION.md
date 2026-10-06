@@ -255,13 +255,22 @@ Cargo's crate-scoping dictates one answer:
           the lowest *real* vector and under-counts the reserved padding → its origin overflows. Fix the
           lint to count the full PAC array. (This file is generator-emitted; update `gen-memory-x.sh` too.)
         - `wake_cpu`'s naked trampoline + `naked_asm!` **compile fine** on nightly-2025-06-25.
-        - **⛔ BLOCKER (upstream): `msp430-rt-macros` 0.4.1 `wake_cpu` is broken for real images.** Its
-          trampoline emits a short `jmp {inner}` (R_MSP430_10_PCREL, ±1 KB); with a ~4 KB `.text` the
-          handler lands out of range → `relocation truncated to fit`. Needs a one-line `jmp`→`br #{inner}`
-          (absolute) fix in that crate → **vendor-and-patch `msp430-rt-macros`** (+ upstream the fix). A
-          dependency-strategy decision — probe reverted to green pending it.
-        - (ii) **fr2433 isn't answering on the bench** — the 2026-10-06 probe `scan` showed only `0x21`,
-          not `0x22` — so fr2433 must be flashed + wired to the Stem bus before its LPM-wake is proven.
+        - **`wake_cpu` macro blocker → RESOLVED with a hand-rolled `br` trampoline.** The msp430-rt 0.4.1
+          `wake_cpu` emits a short `jmp {inner}` (±1 KB) that truncates under our fat LTO; it's unfixed
+          upstream/in every fork (checked). Instead of patching the dependency we write our OWN naked
+          trampoline using `br` (absolute, full-range) in `prod` — self-contained, old-Rust-safe. Full
+          pattern + investigation: **`docs/references/msp430-lpm-wake-pattern.md`**. (Optional follow-up:
+          upstream a `jmp`→`br` PR to `rust-embedded/msp430-rt`.)
+
+  - **1b (fr2433) — ✅ mechanism DONE + boot-verified 2026-10-06; wake-proof pending bus.** Implemented the
+    interrupt-driven LPM path on fr2433: `bsp::stem_i2c::irq_{enable,disable}` (slave IE), the hand-rolled
+    `br` wake trampoline + `usci_b0_inner` (masks IE, no byte work), and the `run_fr24xx` serve loop
+    (service → disable GIE → irq_enable → `WDTHOLD` → atomic `bis #0x18,r2` LPM0+GIE). rt/device wiring +
+    `memory-fr2433.x` VECTORS `0xFF88/0x78`. Builds in budget (4332/15360); fr2476/fr2355/diag green (no
+    regression). HW on `@fr2433`: boots, full init (banner/status/gpio PASS), enters LPM, and does **not**
+    reset-loop → `WDTHOLD`-across-LPM proven. **NOT yet proven:** wake on a real master — needs fr2433 on
+    the Stem bus (probe `scan` showed only `0x21`). Full detail in the pattern doc.
+        - (ii) **fr2433 isn't answering on the bench** — flash + wire it to the Stem bus to probe-prove wake.
     - **Verify (via the stem-probe, now the proven path):** flash the silent fr247x image; `scan`/
       `vstem 0x21`/`r 0x21 …` return correct, stable data → the CPU woke from LPM on the slave ISR,
       serviced, and reslept. (Remote limit: can't meter current to *see* LPM; functional wake + code

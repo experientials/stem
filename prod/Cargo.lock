@@ -94,6 +94,7 @@ dependencies = [
 name = "msp430fr2433"
 version = "0.1.0"
 dependencies = [
+ "msp430-rt",
  "vcell",
 ]
 

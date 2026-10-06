@@ -36,6 +36,11 @@ const UCSTTIFG: u16 = 0x0004; // START matching our own address
 const UCSTPIFG: u16 = 0x0008;
 const UCNACKIFG: u16 = 0x0020;
 
+// Interrupt-ENABLE bits mirror the IFG bit positions in the eUSCI_B IE register (slau445i §24). Enable
+// RX/TX/START/STOP so any slave-bus event wakes the CPU from LPM (Phase 1b). The ISR MASKS these (so the
+// latched IFG doesn't re-fire before the main loop services it); the loop re-enables after draining.
+const IE_SLAVE: u16 = UCRXIFG0 | UCTXIFG0 | UCSTTIFG | UCSTPIFG;
+
 /// Chip-specific seam: the eUSCI_B **instance** + mode-field name. The two implementations are register-
 /// for-register identical apart from the peripheral accessor (ucb1 vs ucb0) + the mode-split IFG field
 /// name, so the shared protocol above never mentions a concrete peripheral. Pin routing is NOT here — it
@@ -71,6 +76,14 @@ mod hw {
     pub fn tx(p: &Peripherals, v: u8) {
         p.e_usci_b1.ucb1txbuf().write(|w| unsafe { w.bits(v as u16) }); // write clears UCTXIFG
     }
+    #[inline]
+    pub fn irq_enable(p: &Peripherals) {
+        p.e_usci_b1.ucb1ie().modify(|r, w| unsafe { w.bits(r.bits() | super::IE_SLAVE) });
+    }
+    #[inline]
+    pub fn irq_disable(p: &Peripherals) {
+        p.e_usci_b1.ucb1ie().modify(|r, w| unsafe { w.bits(r.bits() & !super::IE_SLAVE) });
+    }
 }
 
 #[cfg(feature = "fr2433")]
@@ -105,6 +118,14 @@ mod hw {
     #[inline]
     pub fn tx(p: &Peripherals, v: u8) {
         p.usci_b0_i2c_mode.ucb0txbuf().write(|w| unsafe { w.bits(v as u16) }); // write clears UCTXIFG
+    }
+    #[inline]
+    pub fn irq_enable(p: &Peripherals) {
+        p.usci_b0_i2c_mode.ucb0ie_i2c().modify(|r, w| unsafe { w.bits(r.bits() | super::IE_SLAVE) });
+    }
+    #[inline]
+    pub fn irq_disable(p: &Peripherals) {
+        p.usci_b0_i2c_mode.ucb0ie_i2c().modify(|r, w| unsafe { w.bits(r.bits() & !super::IE_SLAVE) });
     }
 }
 
@@ -168,4 +189,20 @@ pub fn next_event(p: &Peripherals) -> Option<SlaveEvent> {
 #[inline]
 pub fn provide_tx(p: &Peripherals, v: u8) {
     hw::tx(p, v);
+}
+
+/// Enable the slave interrupts (RX/TX/START/STOP) so a bus event wakes the CPU from LPM. The caller pairs
+/// this with GIE + LPM entry (Phase 1b); the woken ISR must [`irq_disable`] its own source so the latched
+/// IFG doesn't re-fire before the main loop drains [`next_event`], then the loop re-enables before sleeping.
+#[inline]
+pub fn irq_enable(p: &Peripherals) {
+    hw::irq_enable(p);
+}
+
+/// Mask the slave interrupts — called by the ISR (so the held IFG won't re-trigger while the CPU is awake
+/// servicing), re-enabled by the main loop via [`irq_enable`]. This is the "ISR masks its own source"
+/// idiom (docs/references/firmware-architecture.md §4).
+#[inline]
+pub fn irq_disable(p: &Peripherals) {
+    hw::irq_disable(p);
 }
