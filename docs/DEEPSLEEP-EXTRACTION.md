@@ -227,6 +227,25 @@ Cargo's crate-scoping dictates one answer:
       engages in the silent production image (you don't deep-sleep a board you're interactively poking).
       This is fine for verification — the stem-probe reads over I²C, not the console, so LPM-wake is
       proven on the silent build via the probe.
+    - **Implementation readiness (de-risked 2026-10-06), fr2433-first:**
+      - **LPM-wake-from-ISR mechanism CONFIRMED in-toolchain:** `#[interrupt(wake_cpu)]` (msp430-rt
+        0.4.1) clears SCG1/SCG0/OSC_OFF/CPU_OFF in the **stacked** SR via a naked trampoline
+        (`bic.b #mask, 0(r1)`) — the correct way (writing the live SR doesn't survive RETI). No fragile
+        hand asm. LPM *entry* is inline asm on SR/r2 (as `clock.rs` already does): LPM0 = `bis #0x18, r2`
+        (CPUOFF|GIE) — start at LPM0 (safe; keeps clocks), tune to LPM3/4 (slau445i §24.3.10: slave wakes
+        from LPM4) once proven.
+      - **IE register = same bit layout as IFG** (RX b0, TX b1, STT b2, STP b3, NACK b5) — verified in
+        `pac/msp430fr2433` (`ucb0ie_i2c`) → reuse the existing `UC*IFG` masks for IE. `init` sets the
+        slave IE; the ISR MASKS it (so the latched IFG doesn't re-fire pre-service) + sets a wake flag;
+        main re-enables after `poll()` drains.
+      - **WDT:** arm backstop only while awake; `WDTHOLD` in the idle→LPM step; re-arm on wake (Design
+        point 1).
+      - **OPEN integration questions to settle when coding (not yet resolved):** (i) an ISR defined in a
+        **lib crate (`bsp`)** must land in the vector table and survive dead-code elimination — confirm
+        the vendored PAC re-exports `#[interrupt]` + whether an `rt`/force-keep is needed, else the ISR
+        may need to live in the bin. (ii) **fr2433 is not currently answering on the bench** — the
+        2026-10-06 probe `scan` showed only `0x21` (FR2476), not `0x22` — so fr2433 must be flashed +
+        confirmed wired to the Stem bus before its LPM-wake can be probe-proven.
     - **Verify (via the stem-probe, now the proven path):** flash the silent fr247x image; `scan`/
       `vstem 0x21`/`r 0x21 …` return correct, stable data → the CPU woke from LPM on the slave ISR,
       serviced, and reslept. (Remote limit: can't meter current to *see* LPM; functional wake + code
