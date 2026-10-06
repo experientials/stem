@@ -1,0 +1,12 @@
+[package]
+name = "deepsleep"
+version = "0.1.0"
+edition = "2021"
+description = "bob-929 MSP430 deepsleep-supervisor module — the capability crate both prod (API/event-loop harness) and diag (test harness) build on. Extracted from the prod binary per docs/DEEPSLEEP-EXTRACTION.md."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The Stem-bus wire vocabulary (regmap addresses/codes, role/crc). The register-map decode here
+# re-exports + extends it. More deps (bsp, devices, sched) + the chip-feature forwarding land as the
+# bsp-touching modules (enumerate, status, mode) move in — kept minimal until then.
+stembus = { path = "../stembus" }

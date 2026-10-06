@@ -54,7 +54,9 @@ use core::future::Future; // for `.poll()` on the pinned scanner future in the s
 
 pub use bsp::model; // Runtime MSP430 model detection + pin mapping — now shared in bsp (STEM-DIRECTION.md
                     // "model-detect + pinmap → bsp"); both prod boot and diag POST read one detector.
-mod regmap; // I²C-slave register-map contract (PCA9698 emulation + Thepia extensions). See regmap.rs.
+pub use deepsleep::regmap; // I²C-slave register-map contract (PCA9698 emulation + Thepia extensions) —
+                           // now in the `deepsleep` crate (DEEPSLEEP-EXTRACTION.md Phase 0a). Re-export
+                           // keeps `crate::regmap::*` resolving for prod's modules unchanged.
 
 // DUAL-I²C bring-up modules — shared across all dual families (fr247x/fr215x/fr235x, the `_dual`
 // marker). They talk to the chip through the `pac` alias, so the SAME code serves every dual PAC; only

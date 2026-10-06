@@ -58,6 +58,10 @@ stembus = { path = "../crates/stembus" }
 # Shared per-device drivers (one module per sensor, standard Device convention) — used by both diag
 # and prod via the embedded-hal I2c seam (bsp::hal).
 devices = { path = "../crates/devices" }
+# The MSP430 deepsleep-supervisor module capability crate (DEEPSLEEP-EXTRACTION.md). prod drives it as
+# the API/event loop; diag will drive it as a test harness. Extracted from prod incrementally — Phase 0a
+# is the register-map decode (`deepsleep::regmap`), which prod re-exports as `crate::regmap`.
+deepsleep = { path = "../crates/deepsleep" }
 
 # opt-level "s" + LTO: size wins over speed (the FRAM budget is the point). The gate
 # (`just prod build`) fails the build if the footprint exceeds the active family's budget.
