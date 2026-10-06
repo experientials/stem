@@ -10,6 +10,20 @@ crate that **both** prod (API/event-loop harness) and diag (test harness) build 
 exercise the real capability, and the same-boot/master-commanded behaviour falls out. Emptying prod is
 **not** the goal; prod-bin stays a thin harness.
 
+## Behaviour model — CANONICAL (verbatim, Henrik 2026-10-06)
+
+> The deepsleep module will be active or passive. When active it masters the Leaf bus, when passive it is
+> passive on both I2C busses, and mainly just reacts to interrupts from I2C contacting it and
+> analog/trigger sensors asking it to reflect a change
+
+Derivation (drives §3): **Active** = masters the Leaf (sensor) I²C bus (today's Sensing — enumerate /
+monitor). **Passive** = passive on BOTH I²C buses (Stem = slave, Leaf = released/tri-stated); it SLEEPS
+and is **reactive** — wake sources are (a) the **Stem I²C slave** interrupt (a master contacting it) and
+(b) **analog/trigger sensor** interrupts (eCOMP threshold / GPIO edge) "asking it to reflect a change"
+→ it updates the reflected state (the PCA9698-style InputPort/IntMask banks, §2) and may notify the SoM
+(`STEM_INT`). So LPM + interrupt-wake is the **Passive** posture; Active is the busy Leaf-master loop.
+This is the authority if the phased text below drifts from it.
+
 ---
 
 ## 1. Crate shape — one crate PER PRODUCT MODULE, shared layers beneath
@@ -182,14 +196,22 @@ Cargo's crate-scoping dictates one answer:
     **masks its own IE + sets a wake flag + exits LPM, doing no byte work** (§3 + the 1a refinement);
     the serve loop enables GIE and drops to LPM when idle; the woken `poll()`/dispatch services via
     `next_event()` and re-enables IE.
-    - **Design point 1 — WDT backstop vs LPM (safety-relevant, surfaced in 1a verify).** A CPU asleep in
-      LPM does NOT run the serve loop, so it can't `wdt_pet()` — the ~16 s reset-mode backstop
-      (`bsp::board::wdt_arm_backstop`) would RESET an idle-but-healthy sleeping node. The backstop can't
-      just be dropped (it's the hang-recovery safety). **Recommended:** a periodic **timer wake** —
-      enable a TB0 interrupt (TB0 is already the free-running ms base, ACLK/REFO, alive in LPM0–3) at a
-      few-second cadence whose ISR wakes the CPU; the serve-loop top pets the WDT then resleeps. A true
-      hang still stops the pet → reset. (Alternatives: WDT **interval** mode as the heartbeat — but §3
-      notes it's mutually exclusive with the reset backstop, trading away hang-recovery; rejected.)
+    - **Design point 1 — WDT backstop vs LPM (safety-relevant; GROUNDED in slau445i §12, 2026-10-06).**
+      A CPU asleep in LPM doesn't run the serve loop, so it can't `wdt_pet()`. **Checked assumption that
+      was WRONG:** "deep LPM stops the WDT clock so it won't false-reset." slau445i §12 refutes it — in
+      **reset (watchdog) mode the WDT_A has a fail-safe**: *"If SMCLK or ACLK fails as the WDT_A clock
+      source, VLOCLK is automatically selected"* (p≈362) — so a clock-sourced reset-mode WDT keeps
+      counting in LPM and **will reset the sleeper**; and §1 (p≈40): in watchdog mode *"the device does
+      not enter LPMx.5."* TI's prescribed low-power path is `WDTHOLD`: *"When the watchdog timer is not
+      required, the WDTHOLD bit can be used to hold the WDTCNT, reducing power consumption."* **Decided
+      (also the lower-power choice):** keep the reset backstop **armed only while awake/processing** (that
+      is where a hang can occur — the CPU is running code); **`WDTHOLD` it in the idle→LPM transition**
+      and re-arm+pet first thing on wake. A sleeping CPU is not a hung CPU (it executes nothing), so it
+      needs no backstop; a genuine hang happens during awake processing, which stays guarded. This both
+      satisfies Koopman ("tie the kick to real work, never a dumb timer ISR" — `docs/references/firmware-architecture.md`
+      §2/§4) and is what TI recommends for LPM. (Rejected: the earlier "periodic TB0 wake pets the WDT"
+      — the firmware-architecture research flags unconditional-pet-from-a-timer-ISR as the anti-pattern;
+      and WDT **interval** mode as heartbeat trades away the reset backstop per §3.)
     - **Design point 2 — console vs sleep.** The console/`debug` build polls the UART menu, so it can't
       deep-sleep identically. **Recommended:** console builds stay in the degenerate no-sleep loop; LPM
       engages in the silent production image (you don't deep-sleep a board you're interactively poking).
