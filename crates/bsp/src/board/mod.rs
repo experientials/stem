@@ -29,6 +29,13 @@ mod fr2355_launchpad;
 #[cfg(any(feature = "fr2355", feature = "fr2155"))]
 pub use fr2355_launchpad::*;
 
+// FR2433 (single-I²C, slave-only). Carries clock + console only — no Leaf master, no usec/ms base
+// (no scheduler on this part). Folded here from prod's inline fr24xx paths (ADR-0014 / CONV-1).
+#[cfg(feature = "fr2433")]
+mod fr2433_launchpad;
+#[cfg(feature = "fr2433")]
+pub use fr2433_launchpad::*;
+
 // ── Leaf I²C (semantic role: sensors / LCD / non-MCU nodes; the MCU is master) ─────────────────
 // Bus-type + role in the call (`leaf_i2c`), per the agreed board seam. On BOTH current LaunchPad
 // modules Leaf = UCB0 on P1.2/P1.3, so the binding + pin route are chip-common and live here rather

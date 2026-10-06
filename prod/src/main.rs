@@ -60,9 +60,8 @@ mod regmap; // I²C-slave register-map contract (PCA9698 emulation + Thepia exte
 // marker). They talk to the chip through the `pac` alias, so the SAME code serves every dual PAC; only
 // the alias differs. The FR24xx (single-I²C) path is a separate idle scaffold. Portable device drivers
 // live in `crates/devices`; only this glue is chip-specific.
-// clock init serves the dual path AND the fr24xx console path (a locked 1 MHz SMCLK for a clean UART).
-#[cfg(any(feature = "_dual", feature = "console"))]
-mod clock;
+// Clock init (locked 1 MHz SMCLK for a clean UART) now lives in `bsp::board::clock_init_1mhz`, per
+// family — including an fr2433 module (ADR-0014 / CONV-1). prod no longer carries its own copy.
 #[cfg(feature = "_dual")]
 mod enumerate;
 // The I²C-slave surface (status + stem transport + regmap) serves BOTH the dual node (eUSCI_B1) and
@@ -147,7 +146,7 @@ fn run_dual(p: &Peripherals) -> ! {
     // Console UART pins via the board — board-aware (UCA0/P1.4-5 on FR2476, UCA1/P4.2-3 on FR2355);
     // needed for `console`, harmless otherwise. The SENSOR I²C pins (P1.2/P1.3 → UCB0) are owned by the
     // MODE machine: acquired in Sensing, released in Passive, so a Passive node stays off the bus.
-    clock::init_1mhz(p);
+    bsp::board::clock_init_1mhz(p);
     bsp::board::route_console_uart_pins(p);
 
     let model = model::detect();
@@ -459,10 +458,8 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     // SCL), so a production (console-off) build serves it on the default DCO with no clock init.
     #[cfg(feature = "console")]
     {
-        const P1_UART_PINS: u8 = 0x30; // BIT4|BIT5 -> UCA0 TXD/RXD on P1.4/P1.5 (FR2433 backchannel)
-        clock::init_1mhz(p);
-        p.p1.p1sel1().modify(|r, w| unsafe { w.bits(r.bits() & !P1_UART_PINS) });
-        p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | P1_UART_PINS) });
+        bsp::board::clock_init_1mhz(p);
+        bsp::board::route_console_uart_pins(p); // P1.4/P1.5 -> UCA0 (FR2433 backchannel)
         uart::init(p);
         // Lean boot log: version + per-sector FRAM checksums (same as the dual node). fr24xx is
         // Passive-only (no mode machine), so the mode name is the constant "passive".
