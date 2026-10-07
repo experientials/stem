@@ -47,6 +47,51 @@ Sources: [AP↔EC comm protocol](https://chromium.googlesource.com/chromiumos/pl
 [Chromium EC README](https://chromium.googlesource.com/chromiumos/platform/ec/+/HEAD/README.md) ·
 [(Ab)using Google's Chromium EC (FOSDEM'17)](https://mfischer.github.io/fosdem17-slides/).
 
+### Cross-platform support → ONE vocabulary, per-link ENCODING (Henrik 2026-10-07)
+> It likely pushes out postcard, but it can still be relevant for sending commands between two Rust
+> firmwares, unless the protocols are supported on macOS, iOS, MSP430, Windows, etc
+
+Checked (sources below): cros_ec is **native on Linux only**; Windows/macOS are niche community tools
+(CrosEC / coolstar `croseci2c`), iOS has nothing, the Rust host crate (`crosec-rs`) is WIP/unpublished,
+and on the MCU (MSP430/RP2040) we **implement** the EC side ourselves regardless. `postcard` is the
+inverse: native Rust↔Rust, a lib-port everywhere else. So neither is universal → **don't force one wire
+format everywhere, and don't lock the choice now.**
+
+> **Decision DEFERRED (Henrik 2026-10-07):** *"keep options open and see where implementation ends [up]."*
+> cros_ec / postcard / PCA9698 are candidate wire faces, not a settled pick — implementation reveals which
+> pays off per link. What keeps this cheap is the decoupling below: design the **command semantics** (the
+> `stembus` vocabulary + each module's `execute`) INDEPENDENT of the wire encoding, so a face can be
+> added/swapped late without touching the command set (the transport↔dispatch↔state layering,
+> `references/firmware-architecture.md` §9 — the anti-lock-in move).
+
+Working guidance (NOT locked):
+- **ONE command vocabulary** (the semantic `Command` set in `stembus`) with **per-link encodings**:
+  - **cros_ec host-command framing** on the **Linux control bus** — leverage the kernel stack + `ectool`
+    + firmware update (only pays off if the master is Linux — the open question in §0);
+  - **`postcard`** for **Rust↔Rust** MCU links (both ends ours → no ecosystem needed; cros_ec would be
+    dead weight there).
+- The **phone/app side (iOS/macOS/Windows)** is almost certainly a **separate channel — BLE via the
+  bluetooth module** with its own (GATT) protocol — so NEITHER cros_ec nor postcard is turn-key there and
+  it does **not** drive this choice. (Confirm the app channel.)
+
+Extra sources: [crosec-rs (Rust)](https://github.com/FyraLabs/crosec-rs) · [framework-ec / ectool ports](https://github.com/DHowett/framework-ec).
+
+### Constraint: the Linux side MUST be Yocto-buildable (Henrik 2026-10-07)
+The i.MX8 SoM image is a **Yocto/OpenEmbedded** build, so whatever Linux-side command stack we pick must
+express as **kernel config + device-tree + a userland recipe** — no out-of-tree hacks. How the candidates
+map (another reason to keep the choice open until we try it):
+- **cros_ec — Yocto-friendly, likely the lightest integration:** the drivers are **mainline Linux**
+  (`CONFIG_MFD_CROS_EC_DEV`, `CONFIG_CROS_EC_I2C`, the IIO/GPIO sub-drivers) → a **kernel-config fragment**
+  in the `linux-*` recipe + a **DT node** on the SoM I²C bus (`compatible = "google,cros-ec-i2c"`), **no
+  custom driver to maintain**. Userland (`ectool` / `crosec-rs`) is a `.bb` recipe (ectool = C/make;
+  crosec-rs = `cargo.bbclass`/Rust). Verify the needed configs are in our kernel version.
+- **postcard / bespoke on Linux — needs a userland recipe + the Yocto Rust toolchain** (`cargo.bbclass`,
+  `meta-rust`-style), and a raw-I²C userland path (`i2c-dev`), with NO kernel sub-driver leverage (we'd
+  write the host client). Heavier to own, lighter on kernel.
+- **Either way:** confirm the SoM I²C controller + the MCU slave address are in the DT, and that the build
+  layer has Rust support if a Rust userland tool is chosen. Prove a minimal recipe early (hello-EC over
+  `/dev/cros_ec`, or a raw-`i2c-dev` postcard ping) so the packaging path is de-risked before committing.
+
 **Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
 firmware-patch streaming, per-module execute), but the *wire protocol* is now cros_ec-leaning, not
 PCA9698 and likely not bespoke-postcard. Revise once the open decisions land.
