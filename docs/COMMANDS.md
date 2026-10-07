@@ -93,10 +93,16 @@ map (another reason to keep the choice open until we try it):
   - **Userland:** the community **`meta-chromebook`** layer ships an **`ectool-chromium`** recipe (ectool +
     EC modules) — a ready path; or build `crosec-rs` via `cargo.bbclass`. (fwupd also has ChromeOS-EC
     support if we want managed firmware update.)
+  - **Age/version:** cros_ec has been **mainline since Linux 3.10** (2013; in `drivers/mfd/`), **moved to
+    `drivers/platform/chrome/` in 4.19** (2018). **Yocto Dunfell 3.1 = kernel 5.4** (Apr 2020), so a
+    **~5-year-old Yocto already has the driver** — no Yocto migration needed *just* for cros_ec; it's a
+    kconfig fragment + DT node on that kernel.
   - **⚠️ Verify on OUR kernel:** the i.MX8 build usually rides NXP's **`linux-imx`** (meta-imx), which can
-    trail mainline — confirm that version actually carries `drivers/platform/chrome` + `CONFIG_CROS_EC_I2C`
-    and the DT binding before relying on it; back-port or bump if not. `meta-chromebook` is community —
-    vet/vendor its recipe rather than depend on it blindly.
+    trail mainline — confirm that version carries `drivers/platform/chrome` + `CONFIG_CROS_EC_I2C` + the DT
+    binding (present-but-disabled is the likely state → enable via fragment). The **userland recipe**
+    (`meta-chromebook`/`ectool-chromium`) may need porting to an old release — vet/vendor it. Note a
+    5-yr-old Yocto (Dunfell) is **community-EOL** (~2024) — migrating may be worth it for security/support
+    *regardless* of cros_ec, but that's a separate decision, not forced by this.
 - **postcard / bespoke on Linux — needs a userland recipe + the Yocto Rust toolchain** (`cargo.bbclass`,
   `meta-rust`-style), and a raw-I²C userland path (`i2c-dev`), with NO kernel sub-driver leverage (we'd
   write the host client). Heavier to own, lighter on kernel.
