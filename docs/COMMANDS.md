@@ -150,12 +150,19 @@ PCA9698 and likely not bespoke-postcard. Revise once the open decisions land.
   bus is nice-to-have for the MSP's own Sensing role; the command system rides the **control** bus.
   *(Bus mapping is my read — confirm against the behaviour-model block, which is the authority.)*
 
-## 3. Firmware patches ride the control bus
-A firmware patch is a large **streamed** payload (§1 I²C framing; I²C allows an unrestricted byte count
-per transfer — `references/firmware-architecture.md` / NXP UM10204 §3.1.4). The command vocabulary models
-"deliver firmware patch (streamed)"; **each module decides how to apply it**: MSP430 FRAM can't A/B
-self-update, so its update command hands the image to a host-driven BSL/STEM reflash (memory
-`msp-fw-ota-host-root-of-trust`); other MCUs may self-apply.
+## 3. Firmware update — IN-FIELD, SoM-driven, ROW-BASED (CANONICAL, Henrik 2026-10-07)
+> The SoM will field update MCU firmware. It has UART and Stem I2C available. I expect we will follow the
+> row based firmware update available for the PD Controller.
+
+So **flashing IS a bus-command category** (not dev-only): the SoM delivers firmware to each MCU in the
+field, over **UART or Stem I²C**, following the **row-based** scheme the **PD controller** uses (Cypress/
+Infineon EZ-PD PMG1 bootloader — flash written a **row/page at a time** with verify; confirm the exact
+protocol when that firmware is developed). The common update flow ≈ **enter-update → write-row(index,
+bytes) → verify (CRC/row-check) → activate** — a *sequence of bounded rows*, not one opaque blob (fits
+the §1 streamed framing; each row is one transaction). **Per-MCU apply differs** behind the same command
+shape: MSP430 FRAM can't A/B self-update → host-driven BSL/STEM reflash (memory
+`msp-fw-ota-host-root-of-trust`); RP2040/RP2350 (deepsleep? lowvision) via its own flash; the PD
+controller's own row bootloader is the template.
 
 ## 4. Coexistence with PCA9698-emulation (SUPERSEDED — see §0)
 > **Superseded 2026-10-07:** PCA9698 is no longer the Linux-leverage path — `cros_ec` (§0) covers GPIO
@@ -225,7 +232,7 @@ dressed up as an API." DEFER everything until truly needed.**
 | MSP430 **FR2355/FR2155** | deepsleep supervisor (production) | `0x20` | BSL (host-reflash) | I2C-API.md |
 | MSP430 **FR2476/FR2475** | supervisor — DEV stand-in (same fw) | `0x21` | BSL / SBW | I2C-API.md |
 | MSP430 **FR2433** | I/O-expander / passive (slave-only) | `0x22` | BSL / SBW | I2C-API.md |
-| **CYPM1111** (EZ-PD PMG1-S1) | PD / power controller; Stem node; SoM-off master | `0x23` | ? | I2C-API.md |
+| **CYPM1111** (EZ-PD PMG1-S1) | PD / power controller; Stem node; SoM-off master | `0x23` | row-based (PMG1 bootloader) | **future — fw not started, not on any bench** (Henrik 2026-10-07); its row-update is the §3 reference |
 | **RP2040** | dev-bench stem-probe (SoM stand-in) | master | UF2 / picotool | MCU-BENCH.md |
 | **RP2350** | product node (future) | ? | UF2 / picotool | ADR-0013 |
 | **nRF52** (nRF52840 / Raytac MDBT50Q) | BLE / bluetooth networking module | ? | DFU / SWD | datasheets; "bluetooth" module |
@@ -265,8 +272,13 @@ Derived vocabulary (note: these are **cross-MCU COMMON** commands — validates 
 
 **lowvision = a Pico** (RP2040/RP2350) running vision/sensing + its own history — update §5.3.
 
-Still DEFERRED (no named caller yet): per-pin GPIO, voltage *read* beyond thresholds, sensor proxying,
-bus firmware-patch (pending the in-field-vs-dev decision).
+**Firmware update is IN scope** (row-based, §3) — a real category, SoM-driven.
+
+**PD controller commands DEFERRED (Henrik 2026-10-07):** "the PD Controller isn't yet part of any bench,
+so I have not started developing the firmware." So `PowerStateReport`, its shutdown-master role, and its
+row-update protocol are a **future target** — but its **row-based update is the design reference** for §3.
+
+Still DEFERRED (no named caller yet): per-pin GPIO, voltage *read* beyond thresholds, sensor proxying.
 
 ## References
 - [`I2C-API.md`](../I2C-API.md) — PCA9698 register map, extended/debug window, **role addressing** (transport contract).
