@@ -36,6 +36,14 @@ pub const EC_CMD_GET_PROTOCOL_INFO: u16 = 0x000B;
 /// `EC_CMD_HELLO` echoes `in_data + 0x01020304` (cros_ec_commands.h).
 pub const HELLO_MAGIC: u32 = 0x0102_0304;
 
+/// Protocol-version bitmask advertised in `GET_PROTOCOL_INFO` — `1 << n` = version n supported
+/// (cros_ec_commands.h:1140). We speak v3 only → `1 << 3`.
+pub const EC_PROTOCOL_VERSIONS: u32 = 1 << 3;
+/// Max request/response **packet** sizes for `GET_PROTOCOL_INFO`. These INCLUDE the v3 header: the Linux
+/// driver computes max payload = packet_size − sizeof(header) (cros_ec_proto.c:391). = header + payload.
+pub const MAX_REQUEST_PACKET_SIZE: u16 = (REQ_HDR + EC_PAYLOAD_MAX) as u16;
+pub const MAX_RESPONSE_PACKET_SIZE: u16 = (RESP_HDR + EC_PAYLOAD_MAX) as u16;
+
 // Result codes (enum ec_status) — the subset the v0 slice uses.
 pub const EC_RES_SUCCESS: u16 = 0;
 pub const EC_RES_INVALID_COMMAND: u16 = 1;
@@ -342,9 +350,10 @@ impl Payload {
     }
 }
 
-/// The v0 **standard-command** dispatch (COMMANDS.md §0): `HELLO` echoes `in_data + 0x01020304`. Unknown
-/// commands → `INVALID_COMMAND`; a short `HELLO` payload → `INVALID_PARAM`. `GET_VERSION`/`GET_BUILD_INFO`
-/// and the vendor+postcard commands are added here as later slices land.
+/// The v0 **standard-command** dispatch (COMMANDS.md §0): `HELLO` echoes `in_data + 0x01020304`;
+/// `GET_PROTOCOL_INFO` reports v3 + our packet sizes (what a real Linux `cros_ec` driver probes first to
+/// bind). Unknown commands → `INVALID_COMMAND`; a short `HELLO` payload → `INVALID_PARAM`.
+/// `GET_VERSION`/`GET_BUILD_INFO` and the vendor+postcard commands are added here as later slices land.
 fn dispatch_command(r: &Request) -> (u16, Payload) {
     match r.command {
         EC_CMD_HELLO => {
@@ -353,6 +362,15 @@ fn dispatch_command(r: &Request) -> (u16, Payload) {
             }
             let in_data = u32::from_le_bytes([r.data[0], r.data[1], r.data[2], r.data[3]]);
             (EC_RES_SUCCESS, Payload::from_bytes(&hello_reply(in_data).to_le_bytes()))
+        }
+        EC_CMD_GET_PROTOCOL_INFO => {
+            // struct ec_response_get_protocol_info (12 bytes, LE): versions | max_req | max_resp | flags.
+            let mut info = [0u8; 12];
+            info[0..4].copy_from_slice(&EC_PROTOCOL_VERSIONS.to_le_bytes());
+            info[4..6].copy_from_slice(&MAX_REQUEST_PACKET_SIZE.to_le_bytes());
+            info[6..8].copy_from_slice(&MAX_RESPONSE_PACKET_SIZE.to_le_bytes());
+            // info[8..12] = flags = 0 (no EC_PROTOCOL_INFO_IN_PROGRESS_SUPPORTED).
+            (EC_RES_SUCCESS, Payload::from_bytes(&info))
         }
         _ => (EC_RES_INVALID_COMMAND, Payload::empty()),
     }
@@ -462,6 +480,31 @@ mod tests {
         let out = u32::from_le_bytes([pr.data[0], pr.data[1], pr.data[2], pr.data[3]]);
         assert_eq!(out, in_data.wrapping_add(0x0102_0304));
         f.stop();
+    }
+
+    #[test]
+    fn framer_get_protocol_info() {
+        let mut f = EcSlave::new();
+        let mut req = [0u8; 16];
+        let n = encode_request(EC_CMD_GET_PROTOCOL_INFO, 0, &[], &mut req).unwrap();
+        f.start();
+        for &b in &req[..n] {
+            f.feed(b);
+        }
+        let mut resp = [0u8; 32];
+        let pr = parse_response(drain(&mut f, &mut resp)).unwrap();
+        assert_eq!(pr.result, EC_RES_SUCCESS);
+        assert_eq!(pr.data.len(), 12);
+        let versions = u32::from_le_bytes([pr.data[0], pr.data[1], pr.data[2], pr.data[3]]);
+        let max_req = u16::from_le_bytes([pr.data[4], pr.data[5]]);
+        let max_resp = u16::from_le_bytes([pr.data[6], pr.data[7]]);
+        let flags = u32::from_le_bytes([pr.data[8], pr.data[9], pr.data[10], pr.data[11]]);
+        assert_eq!(versions, 1 << 3); // v3 advertised
+        assert_eq!(max_req, (REQ_HDR + EC_PAYLOAD_MAX) as u16);
+        assert_eq!(max_resp, (RESP_HDR + EC_PAYLOAD_MAX) as u16);
+        assert_eq!(flags, 0);
+        // The kernel's derivation: max payload = packet_size - sizeof(header) (cros_ec_proto.c:391).
+        assert_eq!(max_req as usize - REQ_HDR, EC_PAYLOAD_MAX);
     }
 
     #[test]

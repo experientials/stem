@@ -512,12 +512,56 @@ async fn main(_spawner: Spawner) {
                                 }
                             }
                             let _ = write_str(&mut class, "> ").await;
+                        } else if contains_ci(line, b"proto") {
+                            // cros_ec GET_PROTOCOL_INFO (0x000B) — what a real Linux cros_ec driver probes
+                            // first to bind v3. Reports the versions bitmask + max packet sizes.
+                            let mut req = [0u8; 16];
+                            let mut resp = [0u8; 24];
+                            let _ = write_str(&mut class, "\r\ncros_ec GET_PROTOCOL_INFO @0x").await;
+                            let _ = write_hex8(&mut class, ADDR_EXPANDER).await;
+                            match cros_ec::encode_request(cros_ec::EC_CMD_GET_PROTOCOL_INFO, 0, &[], &mut req) {
+                                Ok(n) => {
+                                    // response frame = 2 + 8 + 12 = 22 bytes.
+                                    let rr = i2c.blocking_write_read(ADDR_EXPANDER, &req[..n], &mut resp[..22]);
+                                    if rr.is_ok() {
+                                        match cros_ec::parse_response(&resp[..22]) {
+                                            Ok(pr) if pr.result == cros_ec::EC_RES_SUCCESS && pr.data.len() >= 12 => {
+                                                let versions = u32::from_le_bytes([pr.data[0], pr.data[1], pr.data[2], pr.data[3]]);
+                                                let max_req = u16::from_le_bytes([pr.data[4], pr.data[5]]);
+                                                let max_resp = u16::from_le_bytes([pr.data[6], pr.data[7]]);
+                                                let _ = write_str(&mut class, " versions=0x").await;
+                                                let _ = write_hex32(&mut class, versions).await;
+                                                let _ = write_str(&mut class, " max_req=").await;
+                                                let _ = write_dec(&mut class, max_req).await;
+                                                let _ = write_str(&mut class, " max_resp=").await;
+                                                let _ = write_dec(&mut class, max_resp).await;
+                                                // v3 = bit 3 set.
+                                                let _ = write_str(&mut class, if versions & (1 << 3) != 0 { "  PASS (v3)\r\n" } else { "  FAIL (no v3)\r\n" }).await;
+                                            }
+                                            Ok(pr) => {
+                                                let _ = write_str(&mut class, "  FAIL (result=0x").await;
+                                                let _ = write_hex8(&mut class, pr.result as u8).await;
+                                                let _ = write_str(&mut class, ")\r\n").await;
+                                            }
+                                            Err(_) => {
+                                                let _ = write_str(&mut class, "  FAIL (bad response framing)\r\n").await;
+                                            }
+                                        }
+                                    } else {
+                                        let _ = write_str(&mut class, "  FAIL (I2C no-ACK/timeout)\r\n").await;
+                                    }
+                                }
+                                Err(_) => {
+                                    let _ = write_str(&mut class, "  FAIL (encode)\r\n").await;
+                                }
+                            }
+                            let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"id") {
                             let _ = write_str(&mut class, "\r\nid ").await;
                             let _ = class.write_packet(serial.as_bytes()).await;
                             let _ = write_str(&mut class, "\r\n> ").await;
                         } else {
-                            let _ = write_str(&mut class, "\r\ncmds: id | scan | hello | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
+                            let _ = write_str(&mut class, "\r\ncmds: id | scan | hello | proto | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
                         }
                     }
                     Err(_) => break, // disconnected → wait for the next connection
