@@ -34,6 +34,12 @@ pub mod status;
 #[cfg(any(feature = "_dual", feature = "fr2433"))]
 pub mod stem;
 
+/// cros_ec v3 EC-slave transport glue (COMMANDS.md §0 HELLO milestone) — binds the `bsp::stem_i2c`
+/// [`SlaveEvent`](bsp::stem_i2c::SlaveEvent) seam to the pure [`stembus::cros_ec::EcSlave`] framer. Opt-in
+/// via `cros_ec`; replaces the regmap slave on the FR2433 milestone build.
+#[cfg(feature = "cros_ec")]
+pub mod ec;
+
 // ── Build identity (DEEPSLEEP-EXTRACTION.md §B) ──────────────────────────────────────────────────
 // The **capability** semver is THIS crate's `CARGO_PKG_VERSION` — reported over the Stem regmap
 // (DBG_FW_VER_*) + the boot log. The per-image **build stamp** is NOT here: it's crate-scoped

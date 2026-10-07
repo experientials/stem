@@ -35,6 +35,10 @@ console = ["deepsleep/console"]
 # status dump + a Leaf/eUSCI diagnostic) and the interactive s/r/d/m/l commands. Built via
 # `just build <chip> --debug`. "Not a full diag, but some basic info" (DESIGN.md, Henrik 2026-10-04).
 debug = ["console", "deepsleep/debug"]
+# `cros_ec` — the cros_ec v3 EC-slave framing path (COMMANDS.md §0 HELLO milestone). On the FR2433 build
+# it runs the cros_ec framer INSTEAD of the PCA9698-regmap slave. Opt-in; pair with `fr24xx`
+# (e.g. `--features cros_ec`). Independent of the family axis (dual support added when that slice lands).
+cros_ec = ["deepsleep/cros_ec"]
 
 # OPERATING MODES (see DESIGN.md "Operating modes"). A build compiles in the modes it supports; the
 # active mode is a RUNTIME switch among them. At least ONE mode is required (compile_error guard).

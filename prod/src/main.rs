@@ -81,6 +81,9 @@ pub use deepsleep::mode; // operating-mode machine (Passive↔Sensing) — now i
 pub use deepsleep::stem; // I²C-slave dispatch (RegFile/Slave/poll) — now in `deepsleep` (Phase 1a);
                          // its transport (eUSCI programming + pins) is `bsp::stem_i2c`. Re-export keeps
                          // `crate::stem::*` resolving for main.rs unchanged.
+#[cfg(all(feature = "fr24xx", feature = "cros_ec"))]
+pub use deepsleep::ec; // cros_ec EC-slave glue (COMMANDS.md §0 HELLO milestone) — replaces the regmap
+                       // slave on the FR2433 cros_ec build; drives the same LPM pender + wake ISR.
 // UART logging is the `console` feature (dev only). Off = silent production image; state then lives
 // only in the debug registers (served by the I2C-slave surface). See status.rs / the console question.
 // Console/UART is available to ANY family with `console` on (dual + fr24xx). `uart.rs` unifies the
@@ -532,6 +535,7 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     // POST integrity (ADR-0010): per-sector FRAM CRCs, always — the M7 reads them over I²C at 0x3F.
     let crc = post::fram_crcs();
     rf.set_crc(crc);
+    #[cfg(not(feature = "cros_ec"))]
     let mut slave = stem::Slave::new();
     // role-based (I2C-API.md): FR2433 = 0x22 (I/O-expander placeholder). Shared codec in stembus::role.
     let stem_addr = stembus::role::role_for_model(model.device_id()).addr() as u16;
@@ -575,14 +579,36 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     // can occur). Ordering: disable GIE BEFORE arming the slave IE, so no ISR fires between the arm and
     // the atomic `bis #0x18,r2` (which would otherwise mask IE and then sleep forever).
     bsp::board::wdt_arm_backstop(p); // guard the first poll round before the executor can idle
-    let mut task = core::pin::pin!(stem::serve(p, &mut slave, &mut rf));
-    sched::run_pended(task.as_mut(), &STEM_PENDER, || {
-        msp430::interrupt::disable();
-        bsp::stem_i2c::irq_enable(p);
-        bsp::board::wdt_hold(p);
-        enter_lpm0_gie(); // wakes on the eUSCI_B0 slave ISR (masks IE + STEM_PENDER.wake())
-        bsp::board::wdt_arm_backstop(p); // awake again — re-guard the next poll round
-    });
-    // `serve` never completes, so `run_pended` never returns; satisfy the `-> !` signature.
+
+    // Serve the slave forever, sleeping in LPM between transactions ([`fr24xx_idle`]). The ONE difference
+    // is which framing the slave speaks: the cros_ec milestone build (COMMANDS.md §0) runs the cros_ec v3
+    // EC-slave framer; the default build runs the PCA9698-regmap slave. Both drive the identical LPM
+    // pender + eUSCI_B0 wake ISR, so the low-power path is unchanged.
+    #[cfg(not(feature = "cros_ec"))]
+    {
+        let mut task = core::pin::pin!(stem::serve(p, &mut slave, &mut rf));
+        sched::run_pended(task.as_mut(), &STEM_PENDER, || fr24xx_idle(p));
+    }
+    #[cfg(feature = "cros_ec")]
+    {
+        // HELLO needs no node state (pure echo), so `rf` (status/CRC) just isn't consulted by this path.
+        let mut ec_slave = stembus::cros_ec::EcSlave::new();
+        let mut task = core::pin::pin!(ec::serve_ec(p, &mut ec_slave));
+        sched::run_pended(task.as_mut(), &STEM_PENDER, || fr24xx_idle(p));
+    }
+    // `serve*` never completes, so `run_pended` never returns; satisfy the `-> !` signature.
     loop {}
+}
+
+/// The fr2433 serve-loop idle: disable GIE, arm the slave IE, HOLD the WDT backstop across LPM, sleep
+/// atomically ([`enter_lpm0_gie`]), then re-arm the backstop on wake. Shared verbatim by the regmap and
+/// cros_ec serve loops (slau445i §12 WDT-vs-LPM; see DEEPSLEEP-EXTRACTION.md Phase 1b).
+#[cfg(feature = "fr24xx")]
+#[inline(always)]
+fn fr24xx_idle(p: &Peripherals) {
+    msp430::interrupt::disable();
+    bsp::stem_i2c::irq_enable(p);
+    bsp::board::wdt_hold(p);
+    enter_lpm0_gie(); // wakes on the eUSCI_B0 slave ISR (masks IE + STEM_PENDER.wake())
+    bsp::board::wdt_arm_backstop(p); // awake again — re-guard the next poll round
 }
