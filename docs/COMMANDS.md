@@ -37,9 +37,14 @@ payload encoding — TBD.
 2. **FR2433 fit (15 KB):** a MINIMAL cros_ec EC (v3 packet + checksum + the 3 baseline commands + a few
    of ours) — measure; the protocol core is small, the command *set* is what grows. We implement a
    subset, not the full ChromeOS EC OS.
-3. **Is the control-bus master Linux?** The leverage assumes the i.MX8 **Linux** host (A-core) masters the
-   control bus with the cros_ec drivers. If the M7 (Zephyr/bare) masters it, the Linux drivers don't apply
-   (the protocol + ectool are still reusable). Confirm the master.
+3. **Who masters which bus?** (TENTATIVE, Henrik 2026-10-07): **Linux (A-core) masters the Stem/control
+   bus, M7 masters the Leaf/sensor bus** — *"not certain; depends on how often Linux is suspended."* If
+   that holds it's the GOOD case for cros_ec (Linux drives the command bus → leverage applies; Leaf stays
+   the M7's non-Linux domain → postcard/bespoke). The real driver is **Linux suspend frequency**: if Linux
+   is often down, the Stem bus may need a **when-suspended secondary master** (M7, or the PD controller —
+   `I2C-API.md`'s existing "SoM-off master"), making Stem **multi-master**; cros_ec then helps only the
+   Linux master, the secondary reimplements the protocol. So this is a **power-architecture decision
+   upstream of the protocol choice** — keep both open together.
 4. **`postcard`'s fate** (per the above).
 
 Sources: [AP↔EC comm protocol](https://chromium.googlesource.com/chromiumos/platform/ec/+/HEAD/docs/ap-ec-comm.md) ·
@@ -80,11 +85,18 @@ Extra sources: [crosec-rs (Rust)](https://github.com/FyraLabs/crosec-rs) · [fra
 The i.MX8 SoM image is a **Yocto/OpenEmbedded** build, so whatever Linux-side command stack we pick must
 express as **kernel config + device-tree + a userland recipe** — no out-of-tree hacks. How the candidates
 map (another reason to keep the choice open until we try it):
-- **cros_ec — Yocto-friendly, likely the lightest integration:** the drivers are **mainline Linux**
-  (`CONFIG_MFD_CROS_EC_DEV`, `CONFIG_CROS_EC_I2C`, the IIO/GPIO sub-drivers) → a **kernel-config fragment**
-  in the `linux-*` recipe + a **DT node** on the SoM I²C bus (`compatible = "google,cros-ec-i2c"`), **no
-  custom driver to maintain**. Userland (`ectool` / `crosec-rs`) is a `.bb` recipe (ectool = C/make;
-  crosec-rs = `cargo.bbclass`/Rust). Verify the needed configs are in our kernel version.
+- **cros_ec — YES, available on Yocto (verified 2026-10-07), the lightest integration:**
+  - **Kernel:** the drivers are **mainline** (`CONFIG_CHROME_PLATFORMS`, `CONFIG_MFD_CROS_EC_DEV`,
+    `CONFIG_CROS_EC_I2C`, + IIO/GPIO sub-drivers) → just a **kernel-config fragment** in the `linux-*`
+    recipe + a **DT node** on the SoM I²C bus (`compatible = "google,cros-ec-i2c"`). **No custom driver,
+    no special layer** for the kernel side.
+  - **Userland:** the community **`meta-chromebook`** layer ships an **`ectool-chromium`** recipe (ectool +
+    EC modules) — a ready path; or build `crosec-rs` via `cargo.bbclass`. (fwupd also has ChromeOS-EC
+    support if we want managed firmware update.)
+  - **⚠️ Verify on OUR kernel:** the i.MX8 build usually rides NXP's **`linux-imx`** (meta-imx), which can
+    trail mainline — confirm that version actually carries `drivers/platform/chrome` + `CONFIG_CROS_EC_I2C`
+    and the DT binding before relying on it; back-port or bump if not. `meta-chromebook` is community —
+    vet/vendor its recipe rather than depend on it blindly.
 - **postcard / bespoke on Linux — needs a userland recipe + the Yocto Rust toolchain** (`cargo.bbclass`,
   `meta-rust`-style), and a raw-I²C userland path (`i2c-dev`), with NO kernel sub-driver leverage (we'd
   write the host client). Heavier to own, lighter on kernel.
