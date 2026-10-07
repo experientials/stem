@@ -6,6 +6,51 @@ every MCU module (MSP430 `deepsleep`, future `lowvision`, `bluetooth`, …) expo
 map + role addressing live in [`I2C-API.md`](../I2C-API.md) (the transport contract); this is the command
 *model* layered on it.
 
+## 0. Direction update (2026-10-07): ChromeOS EC protocol, not PCA9698, for Linux leverage
+> (Henrik 2026-10-07) I found out that ChromeOS has already solved the Linux I2C communication protocol
+> for MCUs. This means that Supporting PCA9698 on the Stem bus is no longer the best solution for
+> leveraging existing Linux driver support.
+
+The **ChromeOS EC host-command protocol (`cros_ec`)** is the Linux-standard way a host talks to an MCU
+("EC") over I²C/SPI — a far richer leverage point than PCA9698's GPIO-only `gpio-pca953x`:
+- **Mature Linux stack:** `drivers/mfd/cros_ec` + `cros_ec_i2c` → `/dev/cros_ec` + sub-drivers (GPIO,
+  sensors via IIO, PWM, I²C-passthrough, …) + the `ectool` userland.
+- **Firmware update built in:** `ectool` reads/writes EC flash over host commands while the OS runs — our
+  "receive firmware patches" requirement WITH host tooling (PCA9698 offered nothing here).
+- **Fits our slave:** protocol v3 = a request/response packet (`ec_host_request`: struct_version=3,
+  checksum [all bytes sum to 0], command, command_version, data_len; `ec_host_response`: result, data_len,
+  checksum). On I²C the **EC clock-stretches until the response is ready** — which our MSP430 eUSCI slave
+  does natively (slau445i §24.3) — and returns filler `0xEC` on over-reads. A Linux host binds via
+  `EC_CMD_GET_PROTOCOL_INFO` / `EC_CMD_HELLO` / `EC_CMD_GET_CMD_VERSIONS`; a reserved board-specific
+  command range carries our own semantics.
+
+**Supersedes PCA9698 as the Linux-leverage path** (§4 is now legacy/narrow). It very likely **also
+supersedes the bespoke `postcard` control-bus protocol (§1)**: if every MCU is a `cros_ec` "EC", *that*
+is the common command API — standard commands bind standard Linux sub-drivers for free; vendor commands
+carry our semantics. `postcard` may survive only for MCU↔MCU / non-Linux links, or as a vendor-command
+payload encoding — TBD.
+
+**Open decisions (this is a protocol PIVOT, not a drop-in — for Henrik):**
+1. **How much cros_ec?** (a) standard commands mapped onto our GPIO/sensor/mode semantics → maximal Linux
+   sub-driver leverage; (b) cros_ec as transport + mostly vendor commands → channel + ectool + firmware,
+   less sub-driver leverage; (c) keep `postcard`, use cros_ec only where Linux leverage is wanted.
+2. **FR2433 fit (15 KB):** a MINIMAL cros_ec EC (v3 packet + checksum + the 3 baseline commands + a few
+   of ours) — measure; the protocol core is small, the command *set* is what grows. We implement a
+   subset, not the full ChromeOS EC OS.
+3. **Is the control-bus master Linux?** The leverage assumes the i.MX8 **Linux** host (A-core) masters the
+   control bus with the cros_ec drivers. If the M7 (Zephyr/bare) masters it, the Linux drivers don't apply
+   (the protocol + ectool are still reusable). Confirm the master.
+4. **`postcard`'s fate** (per the above).
+
+Sources: [AP↔EC comm protocol](https://chromium.googlesource.com/chromiumos/platform/ec/+/HEAD/docs/ap-ec-comm.md) ·
+[cros_ec_i2c driver](https://codebrowser.dev/linux/linux/drivers/platform/chrome/cros_ec_i2c.c.html) ·
+[Chromium EC README](https://chromium.googlesource.com/chromiumos/platform/ec/+/HEAD/README.md) ·
+[(Ab)using Google's Chromium EC (FOSDEM'17)](https://mfischer.github.io/fosdem17-slides/).
+
+**Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
+firmware-patch streaming, per-module execute), but the *wire protocol* is now cros_ec-leaning, not
+PCA9698 and likely not bespoke-postcard. Revise once the open decisions land.
+
 ## 1. The model — one command vocabulary, two transports, per-module `execute`
 - **One `Command` vocabulary** in the shared **`stembus`** crate (the codec + the command set the SoM and
   every MCU compile against — [ADR-0012](adr/0012-stembus-shared-contract-crate.md)). Serialized with
@@ -49,7 +94,11 @@ per transfer — `references/firmware-architecture.md` / NXP UM10204 §3.1.4). T
 self-update, so its update command hands the image to a host-driven BSL/STEM reflash (memory
 `msp-fw-ota-host-root-of-trust`); other MCUs may self-apply.
 
-## 4. Coexistence with PCA9698-emulation (optional, per-module)
+## 4. Coexistence with PCA9698-emulation (SUPERSEDED — see §0)
+> **Superseded 2026-10-07:** PCA9698 is no longer the Linux-leverage path — `cros_ec` (§0) covers GPIO
+> *and* sensors *and* firmware update *and* a generic channel with a richer Linux stack. Keep this section
+> only as a narrow legacy option (a lone PCA9698 GPIO view) if a specific consumer ever needs exactly that.
+
 PCA9698-emulation is an **optional per-module compatibility shim, NOT the common denominator** — not all
 MCUs will support it ("whether MCUs would all support PCA9698 style API is doubtful"). Where a module opts
 in (e.g. MSP430 as a Linux-gpiochip I/O-expander via the stock `gpio-pca953x` driver), the command system

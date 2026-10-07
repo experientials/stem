@@ -255,7 +255,17 @@ async fn main(_spawner: Spawner) {
                         // wordier fixed commands below still use substring match (tolerant of CR/LF).
                         let (toks, nt) = tokenize(line);
                         let cmd0: &[u8] = if nt > 0 { toks[0] } else { &[] };
-                        if eq_ci(cmd0, b"r") {
+                        if eq_ci(cmd0, b"help")
+                            || eq_ci(cmd0, b"/help")
+                            || eq_ci(cmd0, b"h")
+                            || eq_ci(cmd0, b"/h")
+                            || eq_ci(cmd0, b"?")
+                        {
+                            // Full, structured CLI reference — the discoverable contract a consumer
+                            // scrapes to author a usage skill. Exact-token match (not substring) so a
+                            // bare `h`/`?` is unambiguous and never collides with other commands.
+                            let _ = help(&mut class).await;
+                        } else if eq_ci(cmd0, b"r") {
                             // r <addr> <reg> — read one Stem register (hex, 0x optional).
                             if nt >= 3 {
                                 if let (Some(addr), Some(reg)) = (parse_hex(toks[1]), parse_hex(toks[2])) {
@@ -462,7 +472,7 @@ async fn main(_spawner: Spawner) {
                             let _ = class.write_packet(serial.as_bytes()).await;
                             let _ = write_str(&mut class, "\r\n> ").await;
                         } else {
-                            let _ = write_str(&mut class, "\r\ncmds: id | scan | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot\r\n> ").await;
+                            let _ = write_str(&mut class, "\r\ncmds: id | scan | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
                         }
                     }
                     Err(_) => break, // disconnected → wait for the next connection
@@ -493,6 +503,88 @@ async fn banner<'d, T: embassy_rp::usb::Instance + 'd>(
     write_str(class, " rp2040 uid=").await?;
     class.write_packet(serial.as_bytes()).await?;
     write_str(class, " — bench host up ==\r\n> ").await?;
+    Ok(())
+}
+
+/// Full CLI reference (`help`/`h`/`?`/`/h`). This is the DISCOVERABLE CONTRACT: a consumer scrapes
+/// this output to author a usage skill, so it must state the full semantics of every command — bus,
+/// args + number base, side effects, and output format — not just a name list. Keep it in sync with
+/// the dispatch chain in `main`. Structured as labelled sections; each command line is
+/// `  <invocation>   <semantics>`. Written in chunks (`write_str` splits to 64-byte CDC packets).
+async fn help<'d, T: embassy_rp::usb::Instance + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T>>,
+) -> Result<(), EndpointError> {
+    write_str(class, "\r\n== stem-probe v").await?;
+    write_str(class, FW_VERSION).await?;
+    write_str(class, " CLI reference ==\r\n").await?;
+    write_str(
+        class,
+        "role: RP2040 bench host = SoM/M7 stand-in. Stem-bus MASTER; Leaf bit-bang master (on demand); sideband driver.\r\n",
+    )
+    .await?;
+    write_str(
+        class,
+        "bus pins (CANONICAL, identical on every RP2040/RP2350 board):\r\n\
+         \x20 Stem I2C = I2C1 GP18(SDA)/GP19(SCL)      -> MCU node slave surface (role-addressed)\r\n\
+         \x20 Leaf I2C = bit-bang GP4(SDA)/GP5(SCL)    -> sensors; parked Hi-Z+pull-up when idle\r\n\
+         \x20 sideband = GP10 SOUND_INT(out) GP11 POR_B(out) GP12 PMIC_ON_REQ(in) GP13 STEM_INT(in)\r\n",
+    )
+    .await?;
+    write_str(
+        class,
+        "roles (Stem addr): 0x20 supervisor | 0x21 dev-standin | 0x22 I/O-expander | 0x23 power\r\n\
+         numbers: <addr>/<reg>/<val> = HEX (0x optional); <gpio>/<ms> = DECIMAL\r\n",
+    )
+    .await?;
+
+    write_str(
+        class,
+        "\r\nSTEM bus (RP2040 is master):\r\n\
+         \x20 scan                   probe 0x08..0x77, list addresses that ACK\r\n\
+         \x20 r <addr> <reg>         read 1 register (write reg ptr, repeated-start read); '0x.. = 0x..' or 'no ACK'\r\n\
+         \x20 w <addr> <reg> <val>   write 1 register; '[PASS] wrote' / '[FAIL] no ACK'\r\n\
+         \x20 vstem                  full verify: role discovery, DBG_IFACE magic, model id, fw version, status, MODE_CTRL Passive<->Sensing, sideband readout\r\n\
+         \x20 pass | sens            set node @0x20 MODE_CTRL Passive(0x00) / Sensing(0x01)\r\n",
+    )
+    .await?;
+
+    write_str(
+        class,
+        "\r\nLEAF bus (RP2040 bit-bang master; one-master, re-parks on exit):\r\n\
+         \x20 lscan                  scan 0x08..0x77 on GP4/GP5, list devices that ACK\r\n\
+         \x20 lr <addr> <reg>        read 1 register from a Leaf device\r\n\
+         \x20 vleaf                  prove the handoff: node enumerates Leaf in Sensing, Pico masters it in Passive\r\n",
+    )
+    .await?;
+
+    write_str(
+        class,
+        "\r\nPASSIVE sniff / wiring (never drives the bus):\r\n\
+         \x20 sniff <sda> <scl> [ms] decode a live I2C bus. pins: 4 5 (Leaf, default) OR any two distinct taps\r\n\
+         \x20                        0 1 2 3 6 7 8 9 14 15 16 17 20 21 22 26 27 28. ms default 3500.\r\n\
+         \x20                        frame out: 'S <aa>W+A <dd>+a ... P' (A/N=addr ACK/NAK, a/n=data ACK/NAK)\r\n\
+         \x20 taps                   pull-down probe of all free GPIOs; H = wired to an idle (pulled-up) bus + shared GND\r\n",
+    )
+    .await?;
+
+    write_str(
+        class,
+        "\r\nSIDEBAND (SoM/PMIC stand-in; raw electrical, node reaction needs node sideband fw):\r\n\
+         \x20 sound0 | sound1        drive SOUND_INT L(SoM active) / H(SoM suspended)\r\n\
+         \x20 por0 | por1            drive POR_B L(reset) / H(power good)\r\n\
+         \x20 pins                   read PMIC_ON_REQ and STEM_INT levels\r\n",
+    )
+    .await?;
+
+    write_str(
+        class,
+        "\r\nSYSTEM:\r\n\
+         \x20 id                     print board identity (QSPI flash uid = USB iSerial)\r\n\
+         \x20 selftest               run vstem+vleaf; ends with one grep-able line 'RESULT pass=N fail=M'\r\n\
+         \x20 boot                   reset to USB BOOTSEL (reflash path)\r\n\
+         \x20 help | h | ? | /h      this reference\r\n> ",
+    )
+    .await?;
     Ok(())
 }
 
