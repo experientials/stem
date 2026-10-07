@@ -48,6 +48,9 @@ use stembus::regmap::{
 // Role-based Stem addresses (I2C-API.md "Stem address is ROLE-BASED") — the node's address tells the
 // master WHAT it is. `vstem` scans this window and labels each responder by role.
 use stembus::regmap::{ADDR_DEV_STANDIN, ADDR_EXPANDER, ADDR_SUPERVISOR};
+// cros_ec v3 I²C framing (COMMANDS.md §0 milestone): the SAME codec the FR2433 EC slave runs, so the
+// master side can't drift from the slave — the point of putting it in `stembus` (used here on thumbv6m).
+use stembus::cros_ec;
 
 // ── Passive I²C sniffer (`sniff <sda> <scl> [ms]`) ────────────────────────────
 // Tap any TWO of these otherwise-free GPIOs and watch a live I²C bus WITHOUT driving it — pure inputs,
@@ -467,12 +470,54 @@ async fn main(_spawner: Spawner) {
                                 let _ = write_str(&mut class, " (none — check wiring)").await;
                             }
                             let _ = write_str(&mut class, "\r\n> ").await;
+                        } else if contains_ci(line, b"hello") {
+                            // cros_ec v3 HELLO over I²C (COMMANDS.md §0 milestone): write a request frame,
+                            // repeated-START read the response, verify out == in + 0x01020304. This is the
+                            // end-to-end proof of the FR2433 EC-slave framing against a real master.
+                            const IN_DATA: u32 = 0xA5A5_1234;
+                            let mut req = [0u8; 16];
+                            let mut resp = [0u8; 16];
+                            let _ = write_str(&mut class, "\r\ncros_ec HELLO @0x").await;
+                            let _ = write_hex8(&mut class, ADDR_EXPANDER).await;
+                            match cros_ec::encode_request(cros_ec::EC_CMD_HELLO, 0, &IN_DATA.to_le_bytes(), &mut req) {
+                                Ok(n) => {
+                                    // HELLO reply frame = 2 (result,len) + 8 (header) + 4 (payload) = 14 bytes.
+                                    let rr = i2c.blocking_write_read(ADDR_EXPANDER, &req[..n], &mut resp[..14]);
+                                    if rr.is_ok() {
+                                        match cros_ec::parse_response(&resp[..14]) {
+                                            Ok(pr) if pr.result == cros_ec::EC_RES_SUCCESS && pr.data.len() >= 4 => {
+                                                let out = u32::from_le_bytes([pr.data[0], pr.data[1], pr.data[2], pr.data[3]]);
+                                                let want = IN_DATA.wrapping_add(0x0102_0304);
+                                                let _ = write_str(&mut class, " in=").await;
+                                                let _ = write_hex32(&mut class, IN_DATA).await;
+                                                let _ = write_str(&mut class, " out=").await;
+                                                let _ = write_hex32(&mut class, out).await;
+                                                let _ = write_str(&mut class, if out == want { "  PASS\r\n" } else { "  FAIL (mismatch)\r\n" }).await;
+                                            }
+                                            Ok(pr) => {
+                                                let _ = write_str(&mut class, "  FAIL (result=0x").await;
+                                                let _ = write_hex8(&mut class, pr.result as u8).await;
+                                                let _ = write_str(&mut class, ")\r\n").await;
+                                            }
+                                            Err(_) => {
+                                                let _ = write_str(&mut class, "  FAIL (bad response framing)\r\n").await;
+                                            }
+                                        }
+                                    } else {
+                                        let _ = write_str(&mut class, "  FAIL (I2C no-ACK/timeout)\r\n").await;
+                                    }
+                                }
+                                Err(_) => {
+                                    let _ = write_str(&mut class, "  FAIL (encode)\r\n").await;
+                                }
+                            }
+                            let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"id") {
                             let _ = write_str(&mut class, "\r\nid ").await;
                             let _ = class.write_packet(serial.as_bytes()).await;
                             let _ = write_str(&mut class, "\r\n> ").await;
                         } else {
-                            let _ = write_str(&mut class, "\r\ncmds: id | scan | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
+                            let _ = write_str(&mut class, "\r\ncmds: id | scan | hello | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
                         }
                     }
                     Err(_) => break, // disconnected → wait for the next connection
@@ -608,6 +653,17 @@ async fn write_hex8<'d, T: embassy_rp::usb::Instance + 'd>(
     class
         .write_packet(&[H[(v >> 4) as usize], H[(v & 0x0f) as usize]])
         .await
+}
+
+/// Write a u32 as eight uppercase hex chars (MSB→LSB) over CDC.
+async fn write_hex32<'d, T: embassy_rp::usb::Instance + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T>>,
+    v: u32,
+) -> Result<(), EndpointError> {
+    write_hex8(class, (v >> 24) as u8).await?;
+    write_hex8(class, (v >> 16) as u8).await?;
+    write_hex8(class, (v >> 8) as u8).await?;
+    write_hex8(class, v as u8).await
 }
 
 /// Case-insensitive substring test (needle is lowercase ASCII).
