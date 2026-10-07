@@ -5,12 +5,14 @@ Saved locally per standing practice (don't re-derive protocol bytes from memory 
 the mainline Linux driver + the kernel's mirror of `ec_commands.h`. Verbatim quotes + line refs below;
 **precision markers** flag what is quoted vs described vs to-confirm.
 
-## Sources (fetched 2026-10-07)
-- `struct`/`#define` definitions: **`include/linux/platform_data/cros_ec_commands.h`** —
-  https://codebrowser.dev/linux/linux/include/linux/platform_data/cros_ec_commands.h.html
-- I²C transport framing + checksum: **`drivers/platform/chrome/cros_ec_i2c.c`** —
-  https://codebrowser.dev/linux/linux/drivers/platform/chrome/cros_ec_i2c.c.html
-- Protocol overview (no byte-level detail): https://chromium.googlesource.com/chromiumos/platform/ec/+/HEAD/docs/ap-ec-comm.md
+## Sources — FULL FILES CACHED LOCALLY (fetched 2026-10-07)
+The complete source is cached under [`cache/cros-ec/`](cache/cros-ec/) — grep those for anything not
+quoted here; this file is only an extract. Provenance + line-number caveat: `cache/cros-ec/README.md`.
+- `struct`/`#define` definitions → [`cache/cros-ec/cros_ec_commands.h`](cache/cros-ec/cros_ec_commands.h)
+- I²C transport framing + wrappers → [`cache/cros-ec/cros_ec_i2c.c`](cache/cros-ec/cros_ec_i2c.c)
+- request build + checksum → [`cache/cros-ec/cros_ec_proto.c`](cache/cros-ec/cros_ec_proto.c)
+- Protocol overview (no byte-level detail, not cached — base64 endpoint failed):
+  https://chromium.googlesource.com/chromiumos/platform/ec/+/HEAD/docs/ap-ec-comm.md
 
 ## The v3 packet headers — VERBATIM (cros_ec_commands.h)
 ```c
