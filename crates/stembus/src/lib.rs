@@ -20,6 +20,7 @@
 //! - [`flags`] — `DBG_STATUS` / `DBG_FAULT` bit definitions.
 //! - [`msg`] — STEM-MSG 1-wire notification framing (byte-frame layer).
 
+pub mod command;
 pub mod crc;
 pub mod flags;
 pub mod mode;

@@ -319,6 +319,11 @@ row-update protocol are a **future target** — but its **row-based update is th
 
 Still DEFERRED (no named caller yet): per-pin GPIO, voltage *read* beyond thresholds, sensor proxying.
 
+> **Implemented (2026-10-07):** the §5.6 data model + the §5.7 `Command` vocabulary now live in
+> **`crates/stembus/src/command.rs`** — `WakeReason`, `EventKind`, `Event`, `EventRing<16>`, `Command` —
+> pure wire-agnostic types (the §0 decoupling; no codec yet), unit-tested, compiling for msp430/cortex-m/
+> std. Next: `deepsleep`'s `execute` (Command→Response over its state), then the wire codec when §0 lands.
+
 ### 5.6 Data model — APPROVED v0 (Henrik 2026-10-07)
 - **`WakeReason` = a byte enum, hardcoded in `stembus` source** (shared SoM↔MCU). The *reason* an MCU woke
   the SoM: `None=0`, then per real trigger — e.g. `SoundTrigger`, `ThresholdCross`, `GpioEdge`, `Timer`,
