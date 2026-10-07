@@ -40,45 +40,89 @@ struct ec_host_response {
 All multi-byte fields are **little-endian** (x86/ARM EC convention). `__ec_align4` = 4-byte aligned; the
 layout above is already naturally packed to 8 bytes with no padding.
 
-## Checksum rule — response VERBATIM, request TO-CONFIRM
-**Response (quoted, cros_ec_i2c.c lines ~162–173):** sum every byte of `ec_host_response` + every payload
-byte; the total must be **0 mod 256** or the driver errors.
+## Checksum rule — BOTH directions VERBATIM (confirmed 2026-10-07)
+Same rule each way: the checksum byte is set so **(header + payload + checksum field) ≡ 0 mod 256**.
+
+**Request (`cros_ec_prepare_tx()`, cros_ec_proto.c — VERBATIM):**
+```c
+request->struct_version = EC_HOST_REQUEST_VERSION;
+request->checksum = 0;
+request->command = msg->command;
+request->command_version = msg->version;
+request->reserved = 0;
+request->data_len = msg->outsize;
+
+for (i = 0; i < sizeof(*request); i++)   /* sum the 8 header bytes (checksum field currently 0) */
+  csum += out[i];
+memcpy(out + sizeof(*request), msg->data, msg->outsize);
+for (i = 0; i < msg->outsize; i++)       /* + every payload byte */
+  csum += msg->data[i];
+request->checksum = -csum;                /* two's complement → whole packet sums to 0 mod 256 */
+```
+So: zero the checksum field, sum header+payload as u8, store `(-csum) & 0xff`.
+
+**Response (`cros_ec_pkt_xfer_i2c()`, cros_ec_i2c.c lines ~162–173 — VERBATIM):** the master re-sums and
+rejects a non-zero total:
 ```c
 sum = 0;
 for (i = 0; i < sizeof(struct ec_host_response); i++) sum += ((u8 *)ec_response)[i];
-// ... memcpy payload ...
+memcpy(msg->data, in_buf + response_header_size, ec_response->data_len);
 for (i = 0; i < ec_response->data_len; i++) sum += msg->data[i];
-if (sum) /* -> EC_RES error */
+if (sum) /* -> error (EC_RES_INVALID_CHECKSUM path) */
 ```
-**Request (DESCRIBED, not line-quoted — TO-CONFIRM at implementation):** the symmetric rule — the EC/driver
-sets `ec_host_request.checksum` so that (header + payload) sums to 0 mod 256. Confirm against the request-
-build lines in `cros_ec_pkt_xfer_i2c()` (~line 93+) before shipping the encoder.
+The EC builds its response checksum the same way (`= -csum`). **NB: the I²C wrapper's `result`/
+`packet_length` bytes are NOT part of the `ec_host_response` checksum — only the 8-byte header + payload.**
 
-## I²C transport wrapper — DESCRIBED from cros_ec_i2c.c (struct lines not quoted — TO-CONFIRM)
-`EC_COMMAND_PROTOCOL_3 = 0xda` (quoted).
+## I²C transport wrapper — struct declarations VERBATIM (cros_ec_i2c.c, confirmed 2026-10-07)
+`EC_COMMAND_PROTOCOL_3 = 0xda` (quoted). Both wrappers are `__packed` (no padding → the byte offsets below
+are exact):
+```c
+struct ec_host_request_i2c {
+  /* Always 0xda to backward compatible with v2 struct */
+  uint8_t command_protocol;
+  struct ec_host_request ec_request;
+} __packed;
+
+struct ec_host_response_i2c {
+  uint8_t result;
+  uint8_t packet_length;
+  struct ec_host_response ec_response;
+} __packed;
+```
+`request_header_size  = sizeof(struct ec_host_request_i2c)`  = 1 + 8 = **9**
+`response_header_size = sizeof(struct ec_host_response_i2c)` = 1 + 1 + 8 = **10**
 
 **Master → EC (request on the wire):**
 | offset | field |
 |---|---|
 | 0 | `command_protocol` = `0xda` |
-| 1..8 | `struct ec_host_request` (8 bytes) |
+| 1..8 | `struct ec_host_request` (8 bytes; byte 2 of it = its checksum) |
 | 9.. | command payload (`data_len` bytes) |
 
 **EC → master (response read back):**
 | offset | field |
 |---|---|
-| 0 | `result` (EC_RES_*) |
-| 1 | packet length (payload size) |
+| 0 | `result` (EC_RES_*) — the I²C-level result |
+| 1 | `packet_length` (response payload size) |
 | 2..9 | `struct ec_host_response` (8 bytes) |
 | 10.. | response payload (`data_len` bytes) |
 
-> ⚠️ The exact `struct ec_host_request_i2c` / `ec_host_response_i2c` field declarations were *described* by
-> the fetch, not line-quoted. The offsets above match the driver's buffer arithmetic (req byte0=0xda then
-> header; resp byte0=result, byte1=len, then header). **Quote the two wrapper structs verbatim before the
-> encoder/decoder is finalized** so our byte offsets are right by construction.
-
 On I²C the **EC clock-stretches** until the response is staged (our MSP430 eUSCI slave does this natively,
 slau445i §24.3) and returns filler on over-reads.
+
+## Result codes — `enum ec_status` VERBATIM (cros_ec_commands.h lines 466–488, confirmed 2026-10-07)
+```c
+enum ec_status {
+  EC_RES_SUCCESS = 0,            EC_RES_INVALID_COMMAND = 1,   EC_RES_ERROR = 2,
+  EC_RES_INVALID_PARAM = 3,      EC_RES_ACCESS_DENIED = 4,     EC_RES_INVALID_RESPONSE = 5,
+  EC_RES_INVALID_VERSION = 6,    EC_RES_INVALID_CHECKSUM = 7,  EC_RES_IN_PROGRESS = 8,
+  EC_RES_UNAVAILABLE = 9,        EC_RES_TIMEOUT = 10,          EC_RES_OVERFLOW = 11,
+  EC_RES_INVALID_HEADER = 12,    EC_RES_REQUEST_TRUNCATED = 13, EC_RES_RESPONSE_TOO_BIG = 14,
+  EC_RES_BUS_ERROR = 15,         EC_RES_BUSY = 16,             EC_RES_INVALID_HEADER_VERSION = 17,
+  EC_RES_INVALID_HEADER_CRC = 18, EC_RES_INVALID_DATA_CRC = 19, EC_RES_DUP_UNAVAILABLE = 20,
+};
+```
+v0 slice uses: `SUCCESS=0`, `INVALID_COMMAND=1`, `INVALID_PARAM=3`, `INVALID_CHECKSUM=7`.
 
 ## Commands for the milestone — VERBATIM (cros_ec_commands.h)
 ```c
