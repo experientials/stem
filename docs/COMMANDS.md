@@ -204,11 +204,20 @@ dressed up as an API." DEFER everything until truly needed.**
     full shutdown*. Both are Stem-bus masters in their regime.
   - **Introspection/inspection:** a **Developer over USB via the stem-probe** (Pico firmware role), or the
     PD controller — the "USB-connected to debug the device" context.
-  - **Host-agent commands — a SEPARATE surface:** direct to the **stem-probe / equivalent Yocto-M7
-    firmware** for servicing the **hwd agent** + a Developer working on product features. NOT MCU-node
-    commands over the Stem bus.
-- **Product tier sets the default surface:** **Bob-929** (prototype/learning) ships the **FULL Developer
-  command set by default**; **Talki** (consumer) ships **much less** (lean production surface).
+  - **Host-agent commands — a SEPARATE surface** (my label; see "clarification" below): commands whose
+    target AND executor is the **gateway/host itself** (the stem-probe firmware, or the Yocto/M7 running
+    `hwd`) — **not forwarded to an MCU node.** E.g. `hwd` operations (list/status/lease/flash-orchestration/
+    report), gateway/probe config, host-side dev-feature work. Contrast: **MCU-node commands** target a
+    specific MCU (deepsleep/PD/lowvision) and are executed BY that MCU. The host-agent surface is
+    essentially `hwd`'s own CLI/protocol + the probe console — a different layer/owner than the `stembus`
+    MCU vocabulary, so likely scoped OUT of this doc (TBD). The gateway (§5.2) exposes BOTH over the one
+    USB-C port: its own host-agent commands + forwarding of MCU-node commands.
+- **Product tier sets the default surface, via COMPILE-TIME feature gating** (Henrik 2026-10-07: "most
+  likely, unless it runs a debug build") — the **same mechanism as `console`/`debug`**: dev/debug commands
+  register only when their feature is on, so a production image literally doesn't contain them (zero cost,
+  genuinely lean). **Bob-929** defaults to the **full** set; **Talki** defaults **lean**; but a **debug
+  build of ANY product** includes the dev/debug set (Talki-debug ≠ Talki-production). Gate = build variant,
+  not hard-wired to the product.
 - **Doc roles:** DESIGN.md = high-level; **I2C-API.md = HOW to send commands** (transport/framing/
   addressing), *not* the command list; **COMMANDS.md = the actual commands**.
 
@@ -220,11 +229,38 @@ dressed up as an API." DEFER everything until truly needed.**
 | **Debugging** | logs, register dumps, self-tests, fault injection, the diag suites | dev (gate off production) |
 | **Flashing** | firmware update / patch delivery — per-MCU mechanism | dev (SBW/USB) + SoM (over the protocol) |
 
-### 5.2 Access paths
-- **Dev machine** — `thepia hwd` (console/exec/reset/lease/flash/identify) over the bench: SBW/JTAG
-  (MSP430 eZ-FET), USB (RP picotool/BOOTSEL), UART console. Full debugging + flashing.
-- **SoM / production** — the i.MX8 over the Stem **control** bus (wire face deferred, §0): operation +
-  introspection + firmware-patch. Constrained to what ships (debugging largely gated out).
+### 5.2 Access model — ONE external USB-C port + a power-state gateway that routes (CANONICAL, Henrik 2026-10-07)
+> The product ends up with a single USB-C connection that either goes to the SoM (Yocto and likely msg
+> routing to M7) or Pico/PD Controller if SoM is off. So commands will need to go through that channel
+> when sent from a person or outside agent.
+
+So external access (a **person or outside agent** — dev laptop, `hwd`, a remote/CI agent over the mesh) is
+a **single USB-C port**, and what it lands on depends on power state:
+- **SoM ON → gateway = SoM** (Yocto; also **routes/relays to the M7** and to the MCUs over the Stem bus).
+- **SoM OFF → gateway = Pico / PD controller** (which then masters the Stem bus) — i.e. the productised
+  **stem-probe** role.
+
+**Two hops, one vocabulary:** external `USB-C ↔ gateway` (USB-CDC) then `gateway ↔ target MCU`
+(Stem I²C / UART). The gateway bridges framing (per-link encoding, §0) but the command *semantics* are
+preserved end-to-end. Internal transports unchanged: Stem I²C control bus + per-MCU UART; the bench's
+SBW/USB-DFU flashing is the same USB-C port reaching whichever gateway owns it.
+
+**Consequence — commands need a TARGET/route:** since one port fans out to many MCUs (+ M7), an external
+command must say *which node* it's for so the gateway forwards it. Open fork (shapes the protocol — §5.4):
+is the gateway a **tunnel/router** (external addresses a specific MCU by role; gateway forwards the raw
+command over Stem — thin, MCU owns the API) or a **translator** (external speaks the *gateway's* API;
+gateway interprets and issues its own Stem commands — richer, gateway owns the API)? cros_ec leans
+tunnel-ish on the SoM (each MCU a `/dev/cros_ec` device the agent targets); the Pico/PD gateway is
+naturally a tunnel (forward to the addressed node). Decide when we design routing.
+
+**Bench ≠ product — the bench is OPEN (Henrik 2026-10-07):** *"benches are much more open than any
+product, so individual modules/boards can be reached over USB from the outside."* On the bench each board
+has its **own direct USB** to the dev machine (MSP430 eZ-FET SBW+console, Pico USB-CDC, …) — **no gateway,
+no routing**; `hwd` drives each board directly. So a board must be reachable+commandable **both** ways:
+**direct over its own USB (bench)** AND **routed over the Stem bus via the gateway (product)**. Same
+command vocabulary, two topologies — which maps onto §1's two faces: the **UART/console face ≈ bench-direct
+per-board**, the **I²C/Stem face ≈ product-routed**. The gateway/routing model above is the PRODUCT
+topology only; the bench bypasses it.
 
 ### 5.3 MCU/board inventory — PROVISIONAL (seeded from the repo + memory; **Henrik to confirm/correct**)
 | MCU/board | Role | Stem addr | Flashing | Source |
