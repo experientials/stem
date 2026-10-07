@@ -21,6 +21,7 @@
 //! - [`msg`] — STEM-MSG 1-wire notification framing (byte-frame layer).
 
 pub mod command;
+pub mod cros_ec;
 pub mod crc;
 pub mod flags;
 pub mod mode;
