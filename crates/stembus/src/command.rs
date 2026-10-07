@@ -216,9 +216,15 @@ pub enum Response {
     Unsupported, // command not implemented by this node / invalid param
 }
 
-/// The **per-module `execute` seam** (COMMANDS.md §1/§5): what a node must provide for [`execute`] to
-/// answer the v0 command set. Each MCU module implements this over its own state; the dispatch
-/// ([`execute`]) is shared + host-testable. Hardware-free (plain data in/out) so it unit-tests with a mock.
+/// The **universal introspection seam** (COMMANDS.md §1/§5): the who/how/what-happened/integrity
+/// surface that *every* MCU node shares — identity, status, event history, FRAM CRC. This is the one
+/// genuinely cross-module trait; [`execute_core`] dispatches it. Hardware-free (plain data in/out) so it
+/// — and dispatch — unit-test on the host with a mock, which is the whole reason it's a trait with a
+/// single impl today: it's the pure boundary over each node's hardware-touching state.
+///
+/// **Operation / debug / flash commands are NOT here** — those are per-module (sensor nodes differ from a
+/// bluetooth or vision node), expressed by a module-specific trait like [`Operate`]. Don't widen `Node`
+/// with one module's operation surface; that was the original mistake (COMMANDS.md §1).
 pub trait Node {
     fn identity(&self) -> Identity;
     fn status(&self) -> StatusData;
@@ -226,24 +232,47 @@ pub trait Node {
     fn fram_crc(&self, sector: u8) -> u8;
     /// Drain the event ring into `out`, oldest→newest; returns `(count, overflowed)` (COMMANDS.md §5.6).
     fn drain_events(&mut self, out: &mut [Event]) -> (usize, bool);
+}
+
+/// A **per-module operation surface** — the sensor-supervisor style (mode + thresholds) that `deepsleep`
+/// has. **NOT universal**: a module implements this only if it fits (a bluetooth/vision node would have a
+/// different operation trait, or none). Kept in `stembus` so the `Command → Response` *semantics* for
+/// these arms (e.g. bad `id` → `Unsupported`) are pinned once and host-tested, not re-derived per module.
+pub trait Operate {
     /// Request an operating-mode switch; return the mode code now reported.
     fn set_mode(&mut self, mode: Mode) -> u8;
     /// Set threshold `id` → `value`; `false` if `id` isn't in this node's catalog.
     fn set_threshold(&mut self, id: u8, value: u16) -> bool;
 }
 
-/// Dispatch one [`Command`] against a [`Node`] → [`Response`] (COMMANDS.md §5.7). **Wire-agnostic**: a
-/// codec (deferred, §0) decodes bytes→`Command` and encodes `Response`→bytes around this. `events_out` is
-/// the caller's scratch for `EventHistory` bulk data — size it ≥ [`EVENT_RING_LEN`].
-pub fn execute<N: Node>(node: &mut N, cmd: Command, events_out: &mut [Event]) -> Response {
+/// Dispatch the **universal introspection** arms of a [`Command`] against a [`Node`]. Returns `None` for
+/// commands outside the introspection subset (operation/debug/flash) — those are a module's own concern
+/// (compose via [`execute`], or a module's bespoke dispatch). **Wire-agnostic**: a codec (deferred, §0)
+/// decodes bytes→`Command` and encodes `Response`→bytes around this. `events_out` is the caller's scratch
+/// for `EventHistory` bulk data — size it ≥ [`EVENT_RING_LEN`].
+pub fn execute_core<N: Node>(node: &mut N, cmd: Command, events_out: &mut [Event]) -> Option<Response> {
     match cmd {
-        Command::Identify => Response::Identity(node.identity()),
-        Command::Status => Response::Status(node.status()),
-        Command::FramCrc { sector } => Response::Crc(node.fram_crc(sector)),
+        Command::Identify => Some(Response::Identity(node.identity())),
+        Command::Status => Some(Response::Status(node.status())),
+        Command::FramCrc { sector } => Some(Response::Crc(node.fram_crc(sector))),
         Command::EventHistory => {
             let (n, overflowed) = node.drain_events(events_out);
-            Response::Events { n, overflowed }
+            Some(Response::Events { n, overflowed })
         }
+        // operation/debug/flash — not the universal core's job
+        Command::SetMode { .. } | Command::SetThreshold { .. } => None,
+    }
+}
+
+/// Full dispatch for a node that is both introspectable ([`Node`]) and has the sensor-supervisor
+/// [`Operate`] surface (`deepsleep` is both). Composes [`execute_core`] with the operation arms. A module
+/// with a *different* operation surface does not use this — it calls [`execute_core`] and then dispatches
+/// its own commands. (COMMANDS.md §5.7.)
+pub fn execute<N: Node + Operate>(node: &mut N, cmd: Command, events_out: &mut [Event]) -> Response {
+    if let Some(r) = execute_core(node, cmd, events_out) {
+        return r;
+    }
+    match cmd {
         Command::SetMode { mode } => Response::ModeNow(node.set_mode(mode)),
         Command::SetThreshold { id, value } => {
             if node.set_threshold(id, value) {
@@ -252,6 +281,8 @@ pub fn execute<N: Node>(node: &mut N, cmd: Command, events_out: &mut [Event]) ->
                 Response::Unsupported
             }
         }
+        // introspection already handled by execute_core
+        _ => Response::Unsupported,
     }
 }
 
@@ -343,6 +374,8 @@ mod tests {
         fn drain_events(&mut self, out: &mut [Event]) -> (usize, bool) {
             self.ring.drain(out)
         }
+    }
+    impl Operate for MockNode {
         fn set_mode(&mut self, mode: Mode) -> u8 {
             self.mode = mode.code();
             self.mode
@@ -355,6 +388,20 @@ mod tests {
                 false
             }
         }
+    }
+
+    #[test]
+    fn execute_core_declines_operation_commands() {
+        // The universal core answers introspection and leaves operation/debug/flash to the module.
+        let mut n = MockNode::new();
+        let mut scratch = [Event::default(); EVENT_RING_LEN];
+        assert!(execute_core(&mut n, Command::Identify, &mut scratch).is_some());
+        assert!(execute_core(&mut n, Command::Status, &mut scratch).is_some());
+        assert!(execute_core(&mut n, Command::EventHistory, &mut scratch).is_some());
+        assert!(execute_core(&mut n, Command::FramCrc { sector: 0 }, &mut scratch).is_some());
+        // operation arms are NOT the core's job
+        assert!(execute_core(&mut n, Command::SetMode { mode: Mode::Sensing }, &mut scratch).is_none());
+        assert!(execute_core(&mut n, Command::SetThreshold { id: 0, value: 1 }, &mut scratch).is_none());
     }
 
     #[test]

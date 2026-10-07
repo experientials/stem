@@ -110,17 +110,120 @@ map (another reason to keep the choice open until we try it):
   layer has Rust support if a Rust userland tool is chosen. Prove a minimal recipe early (hello-EC over
   `/dev/cros_ec`, or a raw-`i2c-dev` postcard ping) so the packaging path is de-risked before committing.
 
+### Decision (Henrik 2026-10-07): follow the cros_ec standard, carry OUR commands as postcard
+> So cros_ec is not packed struct, it is whatever the command consumer specifies, and the client app
+> must comply. […] We follow the standard, but implement our commands with postcard. Wrapped in COBS
+> when we do it over UART.
+
+This **resolves open decisions #1 and #4** above. The split:
+
+- **Follow the cros_ec standard for the framing + a tiny baseline of standard commands.** The outer
+  envelope is fixed and non-negotiable — v3 `ec_host_request`/`ec_host_response` headers + the byte-sum
+  checksum, and on I²C the `cros_ec_i2c` wrapper (leading length byte, clock-stretch while the EC
+  computes). Only the **payload** (`data[]`) layout is consumer-defined. On top of that framing we
+  implement **just three standard commands** as their exact `ec_commands.h` packed structs:
+  `EC_CMD_HELLO` (0x00), `EC_CMD_GET_VERSION` (0x02), `EC_CMD_GET_BUILD_INFO` (0x04) *(optionally
+  `EC_CMD_GET_FEATURES` 0x0D later)*. These are **trivial once the framing exists**, and they buy the
+  only real stock-driver freebies: `cat /sys/class/chromeos/cros_ec/version` and `ectool hello`/`version`
+  work with **zero client code** — a standard liveness/identity probe for free. *(There is no stock sysfs
+  node for arbitrary status or a wake/reason code — those are NOT `cat`-able without a kernel sub-driver
+  patch, so they do not belong in the standard-command set; see below.)*
+
+- **Implement all OUR commands with `postcard`, carried as the cros_ec vendor-command payload.** The
+  product-specific semantics — `Identity`, `Status`, `WakeReason`, `FramCrc`, `EventHistory`, `SetMode`,
+  `SetThreshold` (the `stembus::command` vocabulary) — ride a vendor/board command whose `data[]` is a
+  **postcard-encoded** `Command`/`Response`. postcard stays the single payload codec for everything we
+  own; the cros_ec layer provides only the standard framing + kernel channel + `ectool` + firmware update.
+  This keeps `stembus::command` the single source of truth and is why `postcard` is **kept, not dropped**
+  (reversing the §0-top "likely supersedes postcard" lean): the Python/M7 clients decode the same postcard
+  payload the MSP430 emits.
+
+- **Framing per link:** **cros_ec** on the Linux control bus (I²C); the postcard payload is framed by
+  cros_ec itself there. On **UART** (SoM↔MCU, and the firmware-update path), the postcard bytes are
+  **wrapped in COBS** for byte-framing (zero-delimited packets) — postcard's companion framing, no cros_ec
+  envelope needed on a point-to-point serial link. Rust↔Rust MCU I²C links stay bare postcard.
+  - **Why UART is the non-cros_ec link:** mainline cros_ec *does* have a UART transport
+    (`drivers/platform/chrome/cros_ec_uart.c`) but it's **new (~Linux 6.5, 2023)** — Dunfell/5.4 and a
+    trailing NXP `linux-imx` almost certainly lack it, so a stock cros_ec-UART driver isn't available to
+    us; cros_ec-over-I²C is. So UART is ours end-to-end (postcard+COBS), I²C is cros_ec. *(Verify the 6.5
+    figure against the platform/chrome git log if it becomes load-bearing.)*
+  - **BUT the UART still needs a driver anyway (Henrik 2026-10-07):** the UART-to-MCU connection is
+    **gated by I²C registers** — the same mechanism used to program and debug the MCU over a **single HOST
+    UART**. So the serial link is not free-standing: something must drive the I²C gating to route/enable
+    the UART. The COBS choice therefore buys **framing independence** (no bleeding-edge kernel driver for
+    the *wire format*), **not** a zero-driver path — a host-side driver/userland to operate the I²C gate is
+    required regardless.
+
+- **Python client = a maturin/PyO3 wheel over `stembus` (codec only; transport in Python).** FFI-build the
+  crate for the host so the wheel **is** `stembus` (no hand-mirrored vocabulary → no drift). The wheel
+  exposes `Command → bytes` / `bytes → Response` (and the cros_ec framing/COBS if wanted); **Python owns
+  the OS transport** — the `/dev/cros_ec` ioctl or raw `i2c-dev` — since that's syscall territory outside
+  the crate's transport-injection seam. Cost acknowledged: a compiled native artifact (per-platform wheels
+  + maturin in CI), not a drop-in `.py`. Because the codec is the crate itself, the postcard payload needs
+  **no** Python port — it just works, which is what removed the last argument for standard structs on the
+  rich data.
+
+**Net:** standard cros_ec framing + 3 standard commands (sysfs/ectool freebie) · everything
+product-specific = vendor command with a postcard payload · COBS-framed postcard over UART · Python client
+= PyO3 wheel over `stembus`. Open decision #2 (FR2433 fit) and #3 (bus mastership) remain open.
+
+### First milestone — thinnest cros_ec slice over I²C on FR2433 + Pico (CANONICAL — verbatim, Henrik 2026-10-07)
+> One milestone I would like to reach i to have the thinnest slice of cros_ec API supported over I2C on
+> FR2433 and Pico
+>
+> I would also want stem-probe codebase to use crates whenever possible
+
+**Derivation (subordinate to the verbatim block).** First end-to-end cros_ec target, chosen to prove the
+*protocol skeleton* on real hardware at minimum cost — **before** any SoM/Yocto/Linux-driver involvement:
+
+- **Scope = the thinnest meaningful slice: a single `EC_CMD_HELLO` (0x00) round-trip** over cros_ec-I²C
+  framing. HELLO (echo `in_data + 0x01020304`) exercises the *entire* skeleton at once — v3
+  request/response framing, the byte-sum checksum, and I²C clock-stretch — with the simplest possible
+  payload. Add `EC_CMD_GET_VERSION` (0x02) / `EC_CMD_GET_BUILD_INFO` (0x04) next (the sysfs/ectool freebie),
+  then the first vendor+postcard command. Don't pull more of `ec_commands.h` than the slice needs.
+- **Ends:** **FR2433** = the EC *slave* (`prod`/`deepsleep`, UCB0 Stem-slave, the 15 KB target part);
+  **Pico** (`debug/stem-probe`, RP2040 master) = the host stand-in, driving the cros_ec-I²C *master*
+  framing in Rust. Both ends ours, both Rust, both over the real Stem bus (the proven stem-probe path — no
+  jumpers/SoM).
+- **stem-probe uses the shared crates (Henrik directive above):** the Pico master must get cros_ec framing
+  + the `Command`/`Response` vocabulary from **`stembus`** (which already compiles for `thumbv6m` and which
+  stem-probe already depends on for `regmap`/`role`), **not** a hand-rolled copy. One codec crate, two ends
+  — the same bytes the FR2433 decodes. This is the whole point of `stembus` being target-agnostic; extend
+  that usage, don't fork it.
+- **What this milestone forces to exist** (and thereby de-risks): (1) the deferred **cros_ec-I²C framing
+  codec** in `stembus` (encode/decode `ec_host_request`/`ec_host_response` + checksum) — at least the HELLO
+  path; (2) `deepsleep` implementing the `Node` adapter so a decoded command can be served; (3) a **real
+  FR2433 footprint measurement** for the EC core (open decision #2 — the 15 KB budget).
+- **Honest limit:** the Pico master proves our framing **against our own master**, not that the Linux
+  kernel `cros_ec` driver will bind. Kernel-binding (`EC_CMD_GET_PROTOCOL_INFO` succeeds → `/dev/cros_ec`
+  appears) is a **separate, later** validation on the SoM — necessary before claiming "cros_ec works on
+  Linux," and not covered by this slice. State it that way; don't overclaim the milestone.
+
 **Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
-firmware-patch streaming, per-module execute), but the *wire protocol* is now cros_ec-leaning, not
-PCA9698 and likely not bespoke-postcard. Revise once the open decisions land.
+firmware-patch streaming, per-module execute), but the *wire protocol* is now the cros_ec-framing +
+postcard-payload split decided just above (no longer PCA9698). Revise §1–§5 to match when they're next
+touched.
 
 ## 1. The model — one command vocabulary, two transports, per-module `execute`
 - **One `Command` vocabulary** in the shared **`stembus`** crate (the codec + the command set the SoM and
   every MCU compile against — [ADR-0012](adr/0012-stembus-shared-contract-crate.md)). Serialized with
   **`postcard`** (compact `serde` binary, `no_std`, no-alloc).
-- **Each MCU module implements its own `execute`** over that vocabulary — the command set is common; the
-  *handling* is per-module. The command/dispatch layer is separate from the bus transport and from the
-  device state (transport ↔ dispatch ↔ state; see `references/firmware-architecture.md` §9).
+- **The shared surface is INTROSPECTION, not the whole command set** (structure decision, Henrik
+  2026-10-07 — see `references/firmware-architecture.md` §10). What is *universal* across MCU modules is the
+  who/how/what-happened/integrity surface — identity, status, event history, FRAM CRC. That is the one
+  genuinely cross-module trait (`stembus::command::Node`), dispatched by a shared, host-tested
+  `execute_core`. **Operation / debug / flash commands are per-module** — a sensor-supervisor like
+  `deepsleep` has mode + thresholds (`Operate`), a future bluetooth/vision node has an entirely different
+  operation surface. Do **not** widen the universal trait with one module's operation commands (that was the
+  original `Node` mistake: `set_mode`/`set_threshold` are not universal).
+- **Why a trait at all, with one node today:** the `Node` trait is the **hardware-free boundary** — its
+  methods are pure data in/out, so dispatch (`execute_core`) lives in `stembus` and unit-tests on the host
+  with a mock, independent of any MCU peripheral. An inherent per-module `execute` would entangle dispatch
+  with PAC/peripheral types and lose host-testability — or force you to recreate the same pure seam unnamed.
+  So the trait earns its place as a *purity seam*, not via multiple implementors.
+- **Each MCU module composes** `execute_core` (universal) with its own operation dispatch. The
+  command/dispatch layer is separate from the bus transport and from the device state (transport ↔ dispatch
+  ↔ state; see `references/firmware-architecture.md` §9).
 - **Two transports, differing only in FRAMING:**
 
 | | I²C (control bus) | UART |
@@ -321,11 +424,14 @@ Still DEFERRED (no named caller yet): per-pin GPIO, voltage *read* beyond thresh
 
 > **Implemented (2026-10-07) in `crates/stembus/src/command.rs`** (pure, wire-agnostic — the §0
 > decoupling, no codec): the §5.6 data model (`WakeReason`, `EventKind`, `Event`, `EventRing<16>`), the
-> §5.7 `Command` vocabulary, the `Response`/`Identity`/`StatusData` types, and the **per-module seam** — a
-> `Node` trait (what a module provides: identity/status/crc/drain_events/set_mode/set_threshold) + a shared
-> `execute(node, cmd, scratch) -> Response` dispatch. 9/9 host unit tests (ring, overflow, wake round-trip,
-> and `execute` dispatch via a mock `Node`); compiles in budget for msp430/cortex-m. **Next:** `deepsleep`
-> implements `Node` over its RegFile/Status/mode/EventRing (thin adapter), then the wire codec when §0 lands.
+> §5.7 `Command` vocabulary, the `Response`/`Identity`/`StatusData` types, and the **two-trait seam**
+> (narrowed 2026-10-07, see §1 + firmware-architecture.md §11): a **universal `Node`** introspection trait
+> (identity/status/fram_crc/drain_events) dispatched by a shared, host-tested `execute_core`, plus a
+> **per-module `Operate`** trait (deepsleep's mode/threshold operation surface) composed in by `execute`
+> for nodes that are both. 10/10 host unit tests (ring, overflow, wake round-trip, `execute` dispatch via a
+> mock, and `execute_core` declining operation arms); compiles in budget for msp430/cortex-m. **Next:**
+> `deepsleep` implements `Node` + `Operate` over its RegFile/Status/mode/EventRing (thin adapter), then the
+> wire codec when §0 lands.
 
 ### 5.6 Data model — APPROVED v0 (Henrik 2026-10-07)
 - **`WakeReason` = a byte enum, hardcoded in `stembus` source** (shared SoM↔MCU). The *reason* an MCU woke

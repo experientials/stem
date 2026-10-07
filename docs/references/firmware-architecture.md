@@ -146,6 +146,29 @@ is forbidden:
   executor polls; **does** preserve locals across `.await`. This is our `sched` crate (ADR-0013): the
   compiler generates the state machine protothreads make you hand-write.
 
+## 11. A pure trait seam makes dispatch host-testable — justifies a trait with ONE implementor (our decision, 2026-10-07)
+This is an **applied structural decision**, not external guidance — it follows from §5 (keep application
+state out of the hardware path) + §9 (transport ↔ dispatch ↔ state) and a testability goal. Captured
+because it reverses an intuitive but wrong call ("one implementor → drop the trait").
+
+- **The insight:** a trait earns its place not only via *multiple implementors* but as a **purity seam** —
+  a hardware-free boundary (pure data in/out, no PAC/peripheral types) that lets the layer *above* it live
+  in a pure, host-compilable crate and unit-test on the host, independent of any MCU.
+- **Applied to the command system:** `stembus::command::Node` (identity/status/fram_crc/drain_events) is
+  that seam. Because its methods are pure data, the dispatch (`execute_core`) sits in `stembus` and tests on
+  the host with a mock — even though `deepsleep` is the only real implementor today. An **inherent**
+  per-module `execute` would entangle dispatch with peripheral reads (`status()` reads GPIO/eCOMP,
+  `fram_crc()` reads FRAM) and **lose host-testability** — or force you to recreate the same pure seam
+  unnamed, which is strictly worse (same shape, no shared home, no name).
+- **The scope discipline that goes with it:** keep the universal seam *narrow* — only what every node truly
+  shares (introspection). Do **not** widen it with one module's operation surface (the original `Node`
+  carried `set_mode`/`set_threshold`, which are sensor-supervisor-specific). Operation/debug/flash are a
+  **per-module** trait (`Operate`) composed in by a module-specific `execute`. A fat "universal" trait full
+  of `Unsupported` stubs is an interface-segregation violation and a drift hazard.
+- **Rule of thumb:** *extract the abstraction from ≥2 real cases* still holds for **capturing commonality**;
+  but a **single-implementor trait is justified when it is a purity/testability seam**. Distinguish the two
+  motivations before adding or removing a trait.
+
 ---
 
 ### Net architecture this points to (see `DEEPSLEEP-EXTRACTION.md` for the applied plan)
