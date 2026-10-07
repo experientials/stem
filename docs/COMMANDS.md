@@ -175,12 +175,44 @@ coexists with no collision:
   command per transaction; buffer bounded to the MCU's RAM; never point the stock driver at the stream
   port; SMBus masters (not raw I²C) cap blocks at 32 B.
 
-## 5. Per-module command sets
-The vocabulary is common; each module registers the subset it implements. To be defined in Phase 2:
-- **`deepsleep` (MSP430):** mode (Passive/Sensing), status/identity, sleep/presence, firmware-patch; rides
-  the proven `bsp::stem_i2c::next_event()` seam (accumulate `Rx` → `postcard`-decode on `Stop`) +
-  `deepsleep`'s `execute`. See DEEPSLEEP-EXTRACTION.md §2/§A.
-- **`lowvision`, `bluetooth` (future):** their own `execute` over the same vocabulary.
+## 5. Phase 2 discovery — MCU inventory × command taxonomy
+**The Phase 2 kickoff: enumerate the product's MCUs/boards, what each does, and the commands each should
+support — across four categories, over two access paths** (Henrik 2026-10-07). The vocabulary is common
+(`stembus`); each module registers the subset it implements.
+
+### 5.1 Command categories
+| Category | What | Primary consumer |
+|---|---|---|
+| **Operation** | runtime product behaviour: mode (Passive/Sensing/…), power states, sensor/GPIO I/O, presence/wake, actuation | SoM (dev for test) |
+| **Introspection** | identity (model/role/build-id/version), capabilities, status/health, FRAM CRC, enumeration ("what's present") — read-mostly, always available | SoM **and** dev |
+| **Debugging** | logs, register dumps, self-tests, fault injection, the diag suites | dev (gate off production) |
+| **Flashing** | firmware update / patch delivery — per-MCU mechanism | dev (SBW/USB) + SoM (over the protocol) |
+
+### 5.2 Access paths
+- **Dev machine** — `thepia hwd` (console/exec/reset/lease/flash/identify) over the bench: SBW/JTAG
+  (MSP430 eZ-FET), USB (RP picotool/BOOTSEL), UART console. Full debugging + flashing.
+- **SoM / production** — the i.MX8 over the Stem **control** bus (wire face deferred, §0): operation +
+  introspection + firmware-patch. Constrained to what ships (debugging largely gated out).
+
+### 5.3 MCU/board inventory — PROVISIONAL (seeded from the repo + memory; **Henrik to confirm/correct**)
+| MCU/board | Role | Stem addr | Flashing | Source |
+|---|---|---|---|---|
+| MSP430 **FR2355/FR2155** | deepsleep supervisor (production) | `0x20` | BSL (host-reflash) | I2C-API.md |
+| MSP430 **FR2476/FR2475** | supervisor — DEV stand-in (same fw) | `0x21` | BSL / SBW | I2C-API.md |
+| MSP430 **FR2433** | I/O-expander / passive (slave-only) | `0x22` | BSL / SBW | I2C-API.md |
+| **CYPM1111** (EZ-PD PMG1-S1) | PD / power controller; Stem node; SoM-off master | `0x23` | ? | I2C-API.md |
+| **RP2040** | dev-bench stem-probe (SoM stand-in) | master | UF2 / picotool | MCU-BENCH.md |
+| **RP2350** | product node (future) | ? | UF2 / picotool | ADR-0013 |
+| **nRF52** (nRF52840 / Raytac MDBT50Q) | BLE / bluetooth networking module | ? | DFU / SWD | datasheets; "bluetooth" module |
+| **i.MX8 SoM** | host: Linux A-core (Stem master) + M7 (Leaf master, tentative) | master | — | this session |
+| **"lowvision"** | future product module (own MCU) | ? | ? | DEEPSLEEP-EXTRACTION.md §1 |
+
+### 5.4 Next (drive from the confirmed inventory, not this draft)
+1. **Confirm/correct §5.3** — the authoritative MCU list + roles is Henrik's; this is a repo-seeded draft.
+2. **Pick the first MCU × category** to define concretely — likely **MSP430 `deepsleep` × introspection +
+   operation** (the proven node; introspection is the always-available baseline every MCU needs).
+3. Enumerate that MCU's exact `Command` set (name, params, response, access-path gating), then generalise
+   the shared vocabulary from the real cases — not top-down.
 
 ## References
 - [`I2C-API.md`](../I2C-API.md) — PCA9698 register map, extended/debug window, **role addressing** (transport contract).
