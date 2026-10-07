@@ -122,7 +122,7 @@ This **resolves open decisions #1 and #4** above. The split:
   checksum, and on I²C the `cros_ec_i2c` wrapper (leading length byte, clock-stretch while the EC
   computes). Only the **payload** (`data[]`) layout is consumer-defined. On top of that framing we
   implement **just three standard commands** as their exact `ec_commands.h` packed structs:
-  `EC_CMD_HELLO` (0x00), `EC_CMD_GET_VERSION` (0x02), `EC_CMD_GET_BUILD_INFO` (0x04) *(optionally
+  `EC_CMD_HELLO` (0x0001), `EC_CMD_GET_VERSION` (0x0002), `EC_CMD_GET_BUILD_INFO` (0x0004) *(optionally
   `EC_CMD_GET_FEATURES` 0x0D later)*. These are **trivial once the framing exists**, and they buy the
   only real stock-driver freebies: `cat /sys/class/chromeos/cros_ec/version` and `ectool hello`/`version`
   work with **zero client code** — a standard liveness/identity probe for free. *(There is no stock sysfs
@@ -176,11 +176,13 @@ product-specific = vendor command with a postcard payload · COBS-framed postcar
 **Derivation (subordinate to the verbatim block).** First end-to-end cros_ec target, chosen to prove the
 *protocol skeleton* on real hardware at minimum cost — **before** any SoM/Yocto/Linux-driver involvement:
 
-- **Scope = the thinnest meaningful slice: a single `EC_CMD_HELLO` (0x00) round-trip** over cros_ec-I²C
+- **Scope = the thinnest meaningful slice: a single `EC_CMD_HELLO` (0x0001) round-trip** over cros_ec-I²C
   framing. HELLO (echo `in_data + 0x01020304`) exercises the *entire* skeleton at once — v3
   request/response framing, the byte-sum checksum, and I²C clock-stretch — with the simplest possible
-  payload. Add `EC_CMD_GET_VERSION` (0x02) / `EC_CMD_GET_BUILD_INFO` (0x04) next (the sysfs/ectool freebie),
-  then the first vendor+postcard command. Don't pull more of `ec_commands.h` than the slice needs.
+  payload. Add `EC_CMD_GET_VERSION` (0x0002) / `EC_CMD_GET_BUILD_INFO` (0x0004) next (the sysfs/ectool
+  freebie), then the first vendor+postcard command. Don't pull more of `ec_commands.h` than the slice needs.
+  **Exact wire framing + command numbers: `references/cros-ec-wire-framing.md`** (local verbatim capture —
+  do not re-derive from memory; that's how `HELLO`'s number was first miswritten as 0x00).
 - **Ends:** **FR2433** = the EC *slave* (`prod`/`deepsleep`, UCB0 Stem-slave, the 15 KB target part);
   **Pico** (`debug/stem-probe`, RP2040 master) = the host stand-in, driving the cros_ec-I²C *master*
   framing in Rust. Both ends ours, both Rust, both over the real Stem bus (the proven stem-probe path — no
