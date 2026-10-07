@@ -180,6 +180,31 @@ coexists with no collision:
 support — across four categories, over two access paths** (Henrik 2026-10-07). The vocabulary is common
 (`stembus`); each module registers the subset it implements.
 
+### 5.0 Source of commands — provenance (CANONICAL, verbatim, Henrik 2026-10-07)
+> Production-functionality commands would come from the SoM or the PD Controller that both may be masters
+> of the Stem Bus. PD controller would only be during near full shutdown of the device.
+> Introspection/Inspection commands can come from Developer over USB via stem-probe(Pico firmware role) or
+> PD controller. Both would be where you connect USB to debug the device.
+> Additional commands would be directly to stem-probe or equivalent Yocto/M7 firmware for servicing hwd
+> agent and Developer working on product features.
+> Bob-929 is a prototyping/learning product, so it will have full support for Developer commands by
+> default. Talki is a consumer product, so it will have much less.
+
+Derivation — **a command exists ONLY with a named caller + purpose; else it is "capability-gold-plating
+dressed up as an API." DEFER everything until truly needed.**
+- **Callers by category:**
+  - **Operation (production):** the **SoM** (normal), or the **PD controller** (CYPM1111) *only during near
+    full shutdown*. Both are Stem-bus masters in their regime.
+  - **Introspection/inspection:** a **Developer over USB via the stem-probe** (Pico firmware role), or the
+    PD controller — the "USB-connected to debug the device" context.
+  - **Host-agent commands — a SEPARATE surface:** direct to the **stem-probe / equivalent Yocto-M7
+    firmware** for servicing the **hwd agent** + a Developer working on product features. NOT MCU-node
+    commands over the Stem bus.
+- **Product tier sets the default surface:** **Bob-929** (prototype/learning) ships the **FULL Developer
+  command set by default**; **Talki** (consumer) ships **much less** (lean production surface).
+- **Doc roles:** DESIGN.md = high-level; **I2C-API.md = HOW to send commands** (transport/framing/
+  addressing), *not* the command list; **COMMANDS.md = the actual commands**.
+
 ### 5.1 Command categories
 | Category | What | Primary consumer |
 |---|---|---|
