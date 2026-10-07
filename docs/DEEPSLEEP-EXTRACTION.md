@@ -98,75 +98,16 @@ in `deepsleep` turns out reusable, move it DOWN — don't copy up.*
   - Build the semantic interface first; the PCA9698 GPIO adapter is a **drop-in later** (Phase 4), never
     foreclosed.
 
-### 2a. Design note — postcard command STREAM over I²C/UART, and mixing it with PCA9698 (capture 2026-10-06)
-*Henrik's question: can a block/stream command API (e.g. `postcard`-serialized) run over I²C, and can it
-be MIXED with PCA9698-emulation compatibility? Short answer: yes to both. Work this when Phase 2 (the
-command surface) lands — captured here so it isn't lost.*
+### 2a. Command system → see docs/COMMANDS.md
+The cross-MCU command design — one `postcard` `Command` vocabulary over **I²C-first-then-UART**, the
+common API across all MCU modules, firmware patches, PCA9698 coexistence (the reserved `0x37`/`0x38`
+stream port), the SoM two-bus model, and Henrik's verbatim statements — **moved to
+[COMMANDS.md](COMMANDS.md)** (it's cross-MCU, not deepsleep-specific). Transport/regmap + role addressing
+stay in [I2C-API.md](../I2C-API.md).
 
-- **I²C carries arbitrary-length byte streams.** NXP UM10204 §3.1.4 (verbatim): *"The number of bytes
-  that can be transmitted per transfer is unrestricted."* The "one byte to a register" pattern is a
-  **software convention** (SMBus/register model), not an I²C rule — so a whole serialized `Command` can
-  ride the data phase of one transaction. Clock stretching (§3.1.9) lets our MCU slave pace it.
-- **One `Command` (in `stembus`), two faces, differing only in FRAMING.** UART is an unframed byte
-  stream → needs COBS or a length prefix (`postcard` provides COBS: `to_slice_cobs`/`CobsAccumulator`).
-  **I²C gets framing for free** — `START…STOP` delimits exactly one message, so the slave buffers the
-  `Rx` bytes until `Stop` and deserializes; no COBS needed. Request/response = write the command, then a
-  read (or combined repeated-START, §3.1.10) with the reply **pre-staged** (or clock-stretched); postcard
-  deserializes a *known type*, so the master needs the reply length (leading length byte or fixed size).
-- **Mixing with PCA9698-emulation — COEXIST via a reserved STREAM PORT (no collision):**
-  - Keep the PCA9698 command-pointer + auto-increment envelope AS-IS for the GPIO banks (0x00–0x1F) so
-    the stock Linux `gpio-pca953x` driver + `gpiod` keep working untouched (the whole point of PCA9698
-    compat — §2).
-  - Add a reserved **command-port** register in the semantic window PCA9698 leaves free (0x30–0x3F; pick
-    a slot not already used — 0x30 iface, 0x3B–0x3D ver, 0x3E MODE_CTRL, 0x3F CRC are taken, so e.g.
-    **0x37 CMD / 0x38 RESP**). Give it **non-incrementing, accumulate** semantics: successive writes in a
-    transaction APPEND to the postcard command buffer (AI off), and `Stop` triggers decode+dispatch; the
-    RESP port streams the postcard reply on successive reads.
-  - Result: the stock GPIO driver only ever touches 0x00–0x1F; the M7's custom client uses the
-    CMD/RESP ports; **zero overlap**. It's the existing "semantic regs live where PCA9698 leaves free"
-    rule, extended from single-value debug regs to a stream port. If PCA9698 is ultimately dropped (M7
-    does all consumption), the command API simply owns the space.
-  - **Caveats to pin down in Phase 2:** define CMD-port = AI-off accumulate (vs PCA9698 overwrite/
-    increment); one command per transaction; bound the buffer to slave RAM (FR2433 4 KB); never point the
-    stock driver at the stream port; SMBus masters (not raw I²C) cap blocks at 32 B.
-- **Seam fit:** `bsp::stem_i2c::next_event()` already yields `Rx(u8)…` then `Stop` — the dispatch
-  accumulates `Rx`-after-CMD-port into a buffer and `postcard`-deserializes on `Stop`. A natural Phase-2
-  addition on top of the proven 1b transport. See `docs/references/firmware-architecture.md` (transport↔
-  dispatch↔state layering) — the `Command` enum is the "dispatch" layer; `stembus` carries only the codec.
-
-#### System context — the SoM's TWO buses + a COMMON cross-MCU command API (CANONICAL, Henrik 2026-10-06)
-
-> We have two I2C busses for the SoM M7 to master while it runs. One has sensors and MSP deepsleep
-> modules in passive, the other is meant for controlling MCUs. The MCUs would be controlled using
-> commands with postcard data and receive firmware patches. Whether MCUs would all support PCA9698 style
-> API is doubtful, and it would make sense to have a common API to all MCUs.
-
-Implications (these ELEVATE the command API and RE-RANK PCA9698 — §2 above):
-- **The postcard `Command` API is the COMMON control protocol across ALL MCU modules** (MSP430
-  `deepsleep`, future `lowvision`, `bluetooth`, …) — not MSP-specific. It therefore belongs in the shared
-  **`stembus`** contract (the codec + command vocabulary), with each module crate implementing its own
-  `execute`. This is the stem-nervous-system vision made concrete for the control plane.
-- **PCA9698-emulation is DEMOTED to an optional per-module compatibility shim, NOT the common
-  denominator.** Not all MCUs will/can speak PCA9698, so the common API cannot assume it. The §2 / §2a
-  coexistence still holds *where a module chooses PCA9698 compat* (MSP as a Linux-gpiochip I/O-expander),
-  but the cross-MCU baseline is the postcard command API. Build the command API as primary; PCA9698 is a
-  bonus on modules that opt in.
-- **Firmware patches ride this same command bus** — this is WHY block/stream matters (a patch is a large
-  streamed payload, §2a + UM10204 "unrestricted bytes/transfer"). Per-module handling differs: MSP430 FRAM
-  can't A/B self-update, so its "firmware update" command hands the image to a host-driven BSL/STEM reflash
-  (see memory `msp-fw-ota-host-root-of-trust`); other MCUs may self-apply. The command vocabulary models
-  "deliver firmware patch (streamed)"; the module decides how to apply it.
-- **Bus mapping (my read — CONFIRM):** the **control bus** = the Stem bus (MCU uplink: commands +
-  firmware patches, every MCU a slave); the **sensor bus** = Leaf, carrying sensors **and** the MSP as a
-  passive slave (SoM masters it directly while the MSP is Passive — the "reachable on both" refinement in
-  the behaviour-model block). If this mapping is off, the behaviour-model block is the authority; fix here.
-
-- **Build order (Henrik 2026-10-06):** *"We will redesign the command system anyway starting with
-  commands over I2C and then commands over UART."* So Phase 2 sequences **I²C-commands first, UART
-  second** — and the whole command system is a deliberate redesign (don't retrofit the current regmap).
-  Corollary: the existing **polled console menu is throwaway** — the UART command path gets redesigned,
-  so the "UART-RX wake leaf so console builds can sleep" item is MOOT (don't invest in the current
-  `getc`/`rx_ready` menu; it's replaced, not extended).
+**deepsleep's part (Phase 2 below):** implement that common command API on the proven
+`bsp::stem_i2c::next_event()` seam — accumulate `Rx` bytes after the reserved CMD port, `postcard`-decode
+on `Stop`, dispatch via `deepsleep`'s `execute`.
 
 ---
 

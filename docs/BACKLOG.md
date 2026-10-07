@@ -93,7 +93,8 @@ status**. Check the box when done. Keep newest context at the top of each item.
     **pins → `board`**, **dispatch → `deepsleep`** (async over `SlaveEvent`). Non-embedded-hal target;
     interrupt-driven + LPM. See the plan for the event-seam decision and the wake model.
 - [ ] **Command surface (Phase 2) — the COMMON cross-MCU control API (`postcard` over I²C + UART) + firmware
-  patches** — *feature; design captured, build later* · **note: [DEEPSLEEP-EXTRACTION.md §2a](DEEPSLEEP-EXTRACTION.md)**
+  patches** — *feature; design captured, build later* · **overview: [COMMANDS.md](COMMANDS.md)** (regmap +
+  role addressing: [I2C-API.md](../I2C-API.md); MSP430 impl: [DEEPSLEEP-EXTRACTION.md](DEEPSLEEP-EXTRACTION.md) §2/§A)
   - The SoM masters TWO buses (Henrik 2026-10-06): a **sensor bus** (sensors + MSP-passive-slave) and a
     **control bus** for the MCUs. On the control bus, ALL MCU modules (deepsleep/lowvision/bluetooth) speak
     ONE common `stembus::Command` API — `postcard`-serialized; I²C transaction (`START…STOP`) frames it for

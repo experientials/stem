@@ -1,5 +1,9 @@
 ## I2C Expander API
 
+> This is the **transport/register-map contract** (PCA9698 emulation, extended/debug window, and the
+> role-addressing table). The **cross-MCU command model** layered on it — the `postcard` `Command`
+> vocabulary over I²C/UART, common to all MCU modules — is in **[docs/COMMANDS.md](docs/COMMANDS.md)**.
+
 The firmware supports the emulation of a PCA9698 expanded to support 8 pin ports.
 In principle this supports 64 GPIO pins, but due to some being assigned to other functions
 the maximum with be ~52 pins.
