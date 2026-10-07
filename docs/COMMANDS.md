@@ -204,14 +204,14 @@ dressed up as an API." DEFER everything until truly needed.**
     full shutdown*. Both are Stem-bus masters in their regime.
   - **Introspection/inspection:** a **Developer over USB via the stem-probe** (Pico firmware role), or the
     PD controller — the "USB-connected to debug the device" context.
-  - **Host-agent commands — a SEPARATE surface** (my label; see "clarification" below): commands whose
-    target AND executor is the **gateway/host itself** (the stem-probe firmware, or the Yocto/M7 running
-    `hwd`) — **not forwarded to an MCU node.** E.g. `hwd` operations (list/status/lease/flash-orchestration/
-    report), gateway/probe config, host-side dev-feature work. Contrast: **MCU-node commands** target a
-    specific MCU (deepsleep/PD/lowvision) and are executed BY that MCU. The host-agent surface is
-    essentially `hwd`'s own CLI/protocol + the probe console — a different layer/owner than the `stembus`
-    MCU vocabulary, so likely scoped OUT of this doc (TBD). The gateway (§5.2) exposes BOTH over the one
-    USB-C port: its own host-agent commands + forwarding of MCU-node commands.
+  - **`hwd` is an external CALLER, not a separate command layer** (Henrik 2026-10-07): "hwd agent" =
+    **`thepia hwd` driven by an AI agent** assisting firmware/hardware work, connecting to bench or product
+    over the **single USB-C cable** (through a router, or handled by a single on-device controller board).
+    So it isn't its own vocabulary — it's a caller that reaches any node over USB-C.
+  - **The gateway/host nodes are themselves command TARGETS** (SoM, M7/CPU-core, the on-device controller):
+    the gateway is **both a router** (forwards MCU-node commands onward) **and directly commandable**. So
+    "commands to the SoM/M7/controller" are just another part of the ONE vocabulary (a section), NOT a
+    scoped-out surface. (Supersedes my earlier "scope it out" — Henrik: unify, with sections.)
 - **Product tier sets the default surface, via COMPILE-TIME feature gating** (Henrik 2026-10-07: "most
   likely, unless it runs a debug build") — the **same mechanism as `console`/`debug`**: dev/debug commands
   register only when their feature is on, so a production image literally doesn't contain them (zero cost,
@@ -219,7 +219,10 @@ dressed up as an API." DEFER everything until truly needed.**
   build of ANY product** includes the dev/debug set (Talki-debug ≠ Talki-production). Gate = build variant,
   not hard-wired to the product.
 - **Doc roles:** DESIGN.md = high-level; **I2C-API.md = HOW to send commands** (transport/framing/
-  addressing), *not* the command list; **COMMANDS.md = the actual commands**.
+  addressing), *not* the command list; **COMMANDS.md = the actual commands — ONE UNIFIED vocabulary**
+  (with sections), covering **what is sent internally between MCU / SoM / CPU-core (M7), or from outside
+  to one of them** (Henrik 2026-10-07). Nodes (MCUs, SoM, M7, on-device controller) are all targets;
+  callers are the SoM, PD controller, M7, and external agents (AI-driven `thepia hwd`, developer).
 
 ### 5.1 Command categories
 | Category | What | Primary consumer |
