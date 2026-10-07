@@ -319,10 +319,13 @@ row-update protocol are a **future target** — but its **row-based update is th
 
 Still DEFERRED (no named caller yet): per-pin GPIO, voltage *read* beyond thresholds, sensor proxying.
 
-> **Implemented (2026-10-07):** the §5.6 data model + the §5.7 `Command` vocabulary now live in
-> **`crates/stembus/src/command.rs`** — `WakeReason`, `EventKind`, `Event`, `EventRing<16>`, `Command` —
-> pure wire-agnostic types (the §0 decoupling; no codec yet), unit-tested, compiling for msp430/cortex-m/
-> std. Next: `deepsleep`'s `execute` (Command→Response over its state), then the wire codec when §0 lands.
+> **Implemented (2026-10-07) in `crates/stembus/src/command.rs`** (pure, wire-agnostic — the §0
+> decoupling, no codec): the §5.6 data model (`WakeReason`, `EventKind`, `Event`, `EventRing<16>`), the
+> §5.7 `Command` vocabulary, the `Response`/`Identity`/`StatusData` types, and the **per-module seam** — a
+> `Node` trait (what a module provides: identity/status/crc/drain_events/set_mode/set_threshold) + a shared
+> `execute(node, cmd, scratch) -> Response` dispatch. 9/9 host unit tests (ring, overflow, wake round-trip,
+> and `execute` dispatch via a mock `Node`); compiles in budget for msp430/cortex-m. **Next:** `deepsleep`
+> implements `Node` over its RegFile/Status/mode/EventRing (thin adapter), then the wire codec when §0 lands.
 
 ### 5.6 Data model — APPROVED v0 (Henrik 2026-10-07)
 - **`WakeReason` = a byte enum, hardcoded in `stembus` source** (shared SoM↔MCU). The *reason* an MCU woke

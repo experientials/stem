@@ -183,6 +183,78 @@ pub enum Command {
     // FwUpdate row-stream (flashing, §3).
 }
 
+/// Identity payload (the `Identify` response) — COMMANDS.md §5.7.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Identity {
+    pub iface: u8,     // iface magic (deepsleep: 0xD0)
+    pub model: u16,    // silicon model id
+    pub role: u8,      // role / Stem address
+    pub build_id: u32, // per-image build stamp hash
+    pub ver: [u8; 3],  // fw version major/minor/patch
+}
+
+/// Status payload (the `Status` response) — COMMANDS.md §5.7. `wake` is the `WakeAttribution` byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StatusData {
+    pub flags: u8,
+    pub fault: u8,
+    pub dev_count: u8,
+    pub mode: u8, // current mode code
+    pub wake: WakeReason,
+}
+
+/// The semantic result of [`execute`]. Bulk event data goes to the caller's scratch slice (see
+/// [`execute`]); `Events` carries only the count + overflow flag so `Response` stays small + alloc-free.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Response {
+    Identity(Identity),
+    Status(StatusData),
+    Crc(u8),
+    Events { n: usize, overflowed: bool },
+    ModeNow(u8),
+    Ack,
+    Unsupported, // command not implemented by this node / invalid param
+}
+
+/// The **per-module `execute` seam** (COMMANDS.md §1/§5): what a node must provide for [`execute`] to
+/// answer the v0 command set. Each MCU module implements this over its own state; the dispatch
+/// ([`execute`]) is shared + host-testable. Hardware-free (plain data in/out) so it unit-tests with a mock.
+pub trait Node {
+    fn identity(&self) -> Identity;
+    fn status(&self) -> StatusData;
+    /// One CRC byte for the windowed `FramCrc` read (ADR-0010); 0 if `sector` is out of range.
+    fn fram_crc(&self, sector: u8) -> u8;
+    /// Drain the event ring into `out`, oldest→newest; returns `(count, overflowed)` (COMMANDS.md §5.6).
+    fn drain_events(&mut self, out: &mut [Event]) -> (usize, bool);
+    /// Request an operating-mode switch; return the mode code now reported.
+    fn set_mode(&mut self, mode: Mode) -> u8;
+    /// Set threshold `id` → `value`; `false` if `id` isn't in this node's catalog.
+    fn set_threshold(&mut self, id: u8, value: u16) -> bool;
+}
+
+/// Dispatch one [`Command`] against a [`Node`] → [`Response`] (COMMANDS.md §5.7). **Wire-agnostic**: a
+/// codec (deferred, §0) decodes bytes→`Command` and encodes `Response`→bytes around this. `events_out` is
+/// the caller's scratch for `EventHistory` bulk data — size it ≥ [`EVENT_RING_LEN`].
+pub fn execute<N: Node>(node: &mut N, cmd: Command, events_out: &mut [Event]) -> Response {
+    match cmd {
+        Command::Identify => Response::Identity(node.identity()),
+        Command::Status => Response::Status(node.status()),
+        Command::FramCrc { sector } => Response::Crc(node.fram_crc(sector)),
+        Command::EventHistory => {
+            let (n, overflowed) = node.drain_events(events_out);
+            Response::Events { n, overflowed }
+        }
+        Command::SetMode { mode } => Response::ModeNow(node.set_mode(mode)),
+        Command::SetThreshold { id, value } => {
+            if node.set_threshold(id, value) {
+                Response::Ack
+            } else {
+                Response::Unsupported
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +317,82 @@ mod tests {
         let e = Event::new(EventKind::ThresholdCross, 2, 1, 7);
         assert_eq!(Event::from_bytes(e.to_bytes()), e);
         assert_eq!(e.to_bytes(), [EventKind::ThresholdCross.code(), 2, 1, 7]);
+    }
+
+    // A minimal in-memory Node to exercise `execute` on the host (stands in for a real MCU module).
+    struct MockNode {
+        ring: EventRing<16>,
+        mode: u8,
+        thresholds: [u16; 3], // ids 0..3 valid; others rejected
+    }
+    impl MockNode {
+        fn new() -> Self {
+            Self { ring: EventRing::new(), mode: Mode::Passive.code(), thresholds: [0; 3] }
+        }
+    }
+    impl Node for MockNode {
+        fn identity(&self) -> Identity {
+            Identity { iface: 0xD0, model: 0x8240, role: 0x22, build_id: 0xDEADBEEF, ver: [0, 1, 0] }
+        }
+        fn status(&self) -> StatusData {
+            StatusData { flags: 0x01, fault: 0, dev_count: 0, mode: self.mode, wake: WakeReason::SoundTrigger }
+        }
+        fn fram_crc(&self, sector: u8) -> u8 {
+            if sector < 16 { sector ^ 0xA5 } else { 0 }
+        }
+        fn drain_events(&mut self, out: &mut [Event]) -> (usize, bool) {
+            self.ring.drain(out)
+        }
+        fn set_mode(&mut self, mode: Mode) -> u8 {
+            self.mode = mode.code();
+            self.mode
+        }
+        fn set_threshold(&mut self, id: u8, value: u16) -> bool {
+            if (id as usize) < self.thresholds.len() {
+                self.thresholds[id as usize] = value;
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn execute_dispatches_each_command() {
+        let mut n = MockNode::new();
+        let mut scratch = [Event::default(); EVENT_RING_LEN];
+
+        assert!(matches!(
+            execute(&mut n, Command::Identify, &mut scratch),
+            Response::Identity(Identity { iface: 0xD0, model: 0x8240, .. })
+        ));
+        assert!(matches!(
+            execute(&mut n, Command::Status, &mut scratch),
+            Response::Status(StatusData { wake: WakeReason::SoundTrigger, .. })
+        ));
+        assert_eq!(execute(&mut n, Command::FramCrc { sector: 3 }, &mut scratch), Response::Crc(3 ^ 0xA5));
+
+        // SetMode changes the reported mode.
+        assert_eq!(
+            execute(&mut n, Command::SetMode { mode: Mode::Sensing }, &mut scratch),
+            Response::ModeNow(Mode::Sensing.code())
+        );
+
+        // SetThreshold: valid id → Ack, out-of-catalog id → Unsupported.
+        assert_eq!(execute(&mut n, Command::SetThreshold { id: 1, value: 0x1234 }, &mut scratch), Response::Ack);
+        assert_eq!(n.thresholds[1], 0x1234);
+        assert_eq!(execute(&mut n, Command::SetThreshold { id: 9, value: 0 }, &mut scratch), Response::Unsupported);
+
+        // EventHistory drains what the node recorded.
+        n.ring.push(EventKind::Trigger, 1, 0);
+        n.ring.push(EventKind::ModeChange, Mode::Sensing.code(), 0);
+        match execute(&mut n, Command::EventHistory, &mut scratch) {
+            Response::Events { n: cnt, overflowed } => {
+                assert_eq!(cnt, 2);
+                assert!(!overflowed);
+                assert_eq!(scratch[0].id, 1);
+            }
+            other => panic!("expected Events, got {other:?}"),
+        }
     }
 }
