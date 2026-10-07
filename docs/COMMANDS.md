@@ -230,7 +230,7 @@ dressed up as an API." DEFER everything until truly needed.**
 | **RP2350** | product node (future) | ? | UF2 / picotool | ADR-0013 |
 | **nRF52** (nRF52840 / Raytac MDBT50Q) | BLE / bluetooth networking module | ? | DFU / SWD | datasheets; "bluetooth" module |
 | **i.MX8 SoM** | host: Linux A-core (Stem master) + M7 (Leaf master, tentative) | master | — | this session |
-| **"lowvision"** | future product module (own MCU) | ? | ? | DEEPSLEEP-EXTRACTION.md §1 |
+| **"lowvision"** | vision/sensing module **on a Pico** (RP2040/RP2350); keeps a history | ? | UF2 / picotool | Henrik 2026-10-07 |
 
 ### 5.4 Next (drive from the confirmed inventory, not this draft)
 1. **Confirm/correct §5.3** — the authoritative MCU list + roles is Henrik's; this is a repo-seeded draft.
@@ -238,6 +238,35 @@ dressed up as an API." DEFER everything until truly needed.**
    operation** (the proven node; introspection is the always-available baseline every MCU needs).
 3. Enumerate that MCU's exact `Command` set (name, params, response, access-path gating), then generalise
    the shared vocabulary from the real cases — not top-down.
+
+### 5.5 Derived command set v0 — from NAMED callers (Henrik 2026-10-07)
+First real operations, each with a caller + purpose (verbatim source):
+> SoM wakes up: Asks all MCUs did you wake me? what are recent events?
+> SoM asks PD Controller for a power state or history report
+> SoM asks lowvision(Pico) for a recent history report
+> SoM updates thresholds for PD controller, lowvision, deepsleep sensors/triggers
+
+Derived vocabulary (note: these are **cross-MCU COMMON** commands — validates one shared `Command` set):
+
+| Command | Caller → target | Purpose | Category |
+|---|---|---|---|
+| **WakeAttribution** ("did you wake me?") | SoM → **all MCUs** (on wake) | which node triggered the wake | operation/introspection |
+| **EventHistory** ("recent events" / "history report") | SoM → **all MCUs** (deepsleep, PD, lowvision) | read the node's recent-event log | operation/introspection |
+| **PowerStateReport** | SoM → **PD controller** | current power state (+ history) | operation |
+| **SetThreshold** | SoM → **PD, lowvision, deepsleep** | update a sensor/trigger threshold | operation |
+
+**Common capabilities these REQUIRE of every participating MCU** (the real design implications):
+- a **recent-event ring** — wake triggers, threshold crossings, mode changes — with **wake-source
+  attribution** (so "did you wake me?" + "recent events" are answerable). Bounded (small ring; MSP430 RAM).
+- **settable thresholds** for its sensors/triggers (deepsleep already has VSOM/CHARGE voltage thresholds
+  in I2C-API.md §2E; PD + lowvision have their own).
+- the **SoM wake-flow**: wake → poll every MCU (`WakeAttribution` + `EventHistory`) → read PD power state →
+  (re)set thresholds. This sequence is the anchor the vocabulary is derived from.
+
+**lowvision = a Pico** (RP2040/RP2350) running vision/sensing + its own history — update §5.3.
+
+Still DEFERRED (no named caller yet): per-pin GPIO, voltage *read* beyond thresholds, sensor proxying,
+bus firmware-patch (pending the in-field-vs-dev decision).
 
 ## References
 - [`I2C-API.md`](../I2C-API.md) — PCA9698 register map, extended/debug window, **role addressing** (transport contract).
