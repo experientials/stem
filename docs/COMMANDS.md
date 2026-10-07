@@ -319,6 +319,38 @@ row-update protocol are a **future target** — but its **row-based update is th
 
 Still DEFERRED (no named caller yet): per-pin GPIO, voltage *read* beyond thresholds, sensor proxying.
 
+### 5.6 Data model — APPROVED v0 (Henrik 2026-10-07)
+- **`WakeReason` = a byte enum, hardcoded in `stembus` source** (shared SoM↔MCU). The *reason* an MCU woke
+  the SoM: `None=0`, then per real trigger — e.g. `SoundTrigger`, `ThresholdCross`, `GpioEdge`, `Timer`,
+  `Fault`, … (fill from each MCU's actual triggers). **`WakeAttribution` = read this byte** from each node;
+  the SoM scans all nodes and the non-`None` one is the culprit (+ *why*, for free).
+- **Event record = `{ type, id, flag, seq }`**, common schema. `type` from a shared enum (trigger /
+  threshold-cross / mode-change / fault — reuses the `WakeReason` space for trigger events); `id` = which
+  trigger/threshold; `flag` = direction/aux; `seq` = **sequence number, NO clock/RTC**. Ordering =
+  **drain-on-read** (SoM reads → gets all since last read → MCU clears).
+- **Event ring = 16 deep**, drop-oldest + an `overflowed` bit (so the SoM knows it missed some while asleep).
+- **`SetThreshold` = uniform `(threshold_id: u8, value)`**; each MCU owns its threshold-id catalog.
+
+### 5.7 `deepsleep` command set v0 — WORKED EXAMPLE (the proven node; generalise from here)
+Mostly **formalises existing regmap** (I2C-API.md) into the vocabulary + adds `EventHistory`/`WakeReason`/
+`SetThreshold`. Tiers: `all` = every image; `debug` = Bob-929 default / Talki-debug build only (§5.0).
+
+| Command | Dir | Params | Response | Category | Tier |
+|---|---|---|---|---|---|
+| `Identify` | R | — | iface magic `0xD0`, model id, role, build-id, fw version | introspection | all |
+| `Status` | R | — | status flags, fault, dev-count, current mode, **`WakeReason`** | introspection | all |
+| `FramCrc` | R (windowed) | sector idx | per-sector CRC16 (ADR-0010) | introspection | all |
+| `EventHistory` | R (drain) | — | ≤16 × `{type,id,flag,seq}` + `overflowed`; clears ring | introspection/operation | all |
+| `SetMode` | W | mode (Passive/Sensing) | ack + current mode | operation | all |
+| `SetThreshold` | W | `threshold_id`, value | ack | operation | all (deepsleep ids: VSOM, CHARGE, … from I2C-API §2E) |
+| `Scan` / `Dump` / `SelfTest` | R/action | — | enumerate / reg dump / POST result | debugging | debug |
+| `FwUpdate` | W (rows) | enter → `write_row(idx,bytes)` → verify → activate | per-row ack/CRC | flashing | SoM + dev |
+
+**Open specifics to fill as we implement (not blocking the shape):** the concrete `WakeReason` enum values
+(from deepsleep's real triggers — eCOMP sound/analog, GPIO edges, the voltage thresholds), the
+`SetThreshold` value width (I2C-API §2E has 16-bit voltage thresholds), and the `FwUpdate` row size/verify
+(follows the PD/PMG1 row scheme, §3).
+
 ## References
 - [`I2C-API.md`](../I2C-API.md) — PCA9698 register map, extended/debug window, **role addressing** (transport contract).
 - [DEEPSLEEP-EXTRACTION.md](DEEPSLEEP-EXTRACTION.md) — the MSP430 `deepsleep` implementation + the `next_event` seam (Phase 2).
