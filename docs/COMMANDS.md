@@ -214,10 +214,77 @@ the kernel. `HELLO` + `GET_PROTOCOL_INFO` are exactly the handshake that binding
   appears) is a **separate, later** validation on the SoM — necessary before claiming "cros_ec works on
   Linux," and not covered by this slice. State it that way; don't overclaim the milestone.
 
+### Replacement plan — retire the PCA9698/regmap command surface (PROPOSED 2026-10-08, for Henrik)
+
+Goal: replace **all current command surfaces** with the cros_ec model (standard commands + a vendor
+command carrying postcard `stembus::command`). This is a staged migration, not a rip-out: the regmap
+slave is the **proven, shipping** path, so cros_ec reaches parity and is HW-proven *before* anything is
+retired. Grounded in the actual inventory below (not reconstructed from memory — sources cited).
+
+**Current command surfaces (what exists today):**
+- **(A) PCA9698/regmap I²C register interface** — `stembus::regmap` + `I2C-API.md`, served by
+  `deepsleep::stem::{Slave,RegFile}`. This is the real SoM↔MCU command channel cros_ec replaces.
+- **(B) MSP430 UART keystroke menu** (console/debug builds) — already declared **throwaway** (COMMANDS.md
+  §1 build-order canonical).
+- **(C) stem-probe (Pico) commands** — `id scan r w lscan lr sniff taps selftest vstem vleaf pass sens
+  sound0/1 por0/1 pins boot hello proto` (the master/bench side). Split: *regmap-driven* vs *bench-rig*.
+
+**Mapping — each current function → its cros_ec replacement:**
+
+| Current (regmap register) | Replacement | Kind |
+|---|---|---|
+| `DBG_IFACE/MODEL/FW_VER` (0x30–32, 3B–3D) | `Command::Identify`→`Identity` (vendor+postcard) **and** standard `GET_VERSION`/`GET_BUILD_INFO` (sysfs/`ectool` freebie) | introspection |
+| `DBG_STATUS/DEV_COUNT/KNOWN_PRESENT/FAULT` (0x37–3A) | `Command::Status`→`StatusData` (+`WakeReason`) | introspection |
+| `DBG_CRC` (0x3F, windowed) | `Command::FramCrc{sector}` | introspection |
+| `MODE_CTRL` (0x3E) | `Command::SetMode{mode}` + mode in `Status` | operation |
+| `VSOM_THRESHOLD` (0x2E) | `Command::SetThreshold{id,value}` | operation |
+| *(new — no regmap equiv)* | `Command::EventHistory` (the §5.6 event ring) | introspection |
+| `VSOM_VOLTAGE/CHARGE_VOLTAGE` (0x2C/2D) | a future `ReadVoltage{rail}` — **DEFER** (no named caller, §5) | deferred |
+| `INIT_CODE` (0x2B), `BAUD_RATE` (0x2F) | **DEFER** (no caller) | deferred |
+| PCA9698 GPIO banks `IP/OP/PI/IOC/MSK/OUTCONF/ALLBNK/MODE` (0x00–2A) | **DECISION (see below)**: retire, or re-expose via a standard cros_ec GPIO sub-driver / the optional PCA9698 gpiochip adapter (Phase 4) | decision |
+
+**stem-probe (C) commands:**
+- *regmap-driven* → rebuild on cros_ec: `vstem`→`ident`+`status`, `pass/sens`→`mode`, generic `r/w`→keep
+  as a raw-I²C debug aid (not everything should be a typed command). `hello`/`proto` already done.
+- *bench-rig* → **keep as-is** (they drive the Pico's OWN pins/USB, not the MCU command channel):
+  `scan sniff taps sound0/1 por0/1 pins boot id`. `lscan/lr/vleaf` = Leaf bus (separate, nice-to-have).
+
+**Phased sequencing (each phase independently provable on the FR2433+Pico bench):**
+1. **`Node`+`Operate` adapter** in `deepsleep` over real state → wire into `EcSlave` dispatch; add
+   standard `GET_VERSION`/`GET_BUILD_INFO`. *Proof:* `ectool version` / a probe `ident` returns the real
+   build id. (This is where the `Node` trait finally earns its keep — identity/status from live state.)
+2. **Vendor command + postcard**: define one vendor command id whose payload is a postcard-encoded
+   `Command`/`Response`; route it in `EcSlave` → `command::execute`. *Proof:* `status`/`crc`/`mode`/
+   `thresh`/`events` round-trips on HW via new stem-probe commands.
+3. **Migrate stem-probe** regmap commands (C) onto the cros_ec equivalents; keep the bench-rig set.
+4. **Flip the default**: run the `EcSlave` on the **dual** families (FR2355/FR2476, UCB1) too, not just
+   FR2433 behind a feature — cros_ec becomes the built-in slave. Retire `deepsleep::stem::Slave` as the
+   primary; keep the PCA9698 regmap only as the optional gpiochip adapter *if* decided (below).
+5. **Retire (B)** the UART keystroke menu; if a UART command path is needed, it's postcard-in-COBS
+   (COMMANDS.md §0), not the menu.
+6. **Real Linux `cros_ec` binding** on the SoM (DT node + kconfig) — the deferred kernel proof; `HELLO`
+   + `GET_PROTOCOL_INFO` (done) are its handshake.
+
+**Dependencies / risk:** `diag` brings up the **same** `stem::Slave` (DEEPSLEEP-EXTRACTION.md Phase 3),
+so retiring the regmap slave is a `prod`+`diag` migration — stage it after cros_ec reaches parity. The
+regmap path ships today; do not delete it until step 4 is HW-proven at parity on every family.
+
+**Decisions I need from you (not assumed):**
+- **(D1) GPIO expander fate.** The PCA9698 banks (0x00–0x2A) are a whole I/O-expander API — is that role
+  still wanted? Options: (a) retire it (no current consumer); (b) re-expose as a **standard cros_ec GPIO
+  sub-driver** so Linux gets a `gpiochip` for free; (c) keep the PCA9698-emulation gpiochip adapter as the
+  optional Phase-4 path. Default lean: **(a) retire until a real GPIO consumer appears**, since FR2433's
+  "I/O-expander role" is a placeholder (I2C-API.md).
+- **(D2) Identity via standard vs vendor.** Use standard `GET_VERSION`/`GET_BUILD_INFO` (ectool/sysfs
+  freebie) *in addition to* the vendor `Identify`, or only the vendor one? Lean: **both** (the standard
+  ones are nearly free and buy tooling interop).
+- **(D3) Default-flip scope.** Flip all families to cros_ec (step 4), or keep dual on regmap until the SoM
+  actually masters them via cros_ec? Lean: **flip**, once parity is proven, so there's one slave path.
+
 **Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
 firmware-patch streaming, per-module execute), but the *wire protocol* is now the cros_ec-framing +
-postcard-payload split decided just above (no longer PCA9698). Revise §1–§5 to match when they're next
-touched.
+postcard-payload split decided above (no longer PCA9698). The replacement plan above supersedes their
+command-surface details; revise §1–§5 to match when they're next touched.
 
 ## 1. The model — one command vocabulary, two transports, per-module `execute`
 - **One `Command` vocabulary** in the shared **`stembus`** crate (the codec + the command set the SoM and
