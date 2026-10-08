@@ -608,12 +608,37 @@ async fn main(_spawner: Spawner) {
                                 Err(e) => { let _ = write_str(&mut class, "  FAIL (").await; let _ = write_str(&mut class, e).await; let _ = write_str(&mut class, ")\r\n").await; }
                             }
                             let _ = write_str(&mut class, "> ").await;
+                        } else if contains_ci(line, b"crc") {
+                            // vendor+postcard: Command::FramCrc{sector} -> Response::Crc(byte), read over the
+                            // 16-byte window (8 sectors x u16 = per-sector CRC16, ADR-0010 integrity vector).
+                            let _ = write_str(&mut class, "\r\ncrc @0x").await;
+                            let _ = write_hex8(&mut class, ADDR_EXPANDER).await;
+                            let mut bytes = [0u8; stembus::regmap::DBG_CRC_BYTES];
+                            let mut ok = true;
+                            for (i, slot) in bytes.iter_mut().enumerate() {
+                                match vendor_cmd(&mut i2c, command::Command::FramCrc { sector: i as u8 }) {
+                                    Ok(command::Response::Crc(b)) => *slot = b,
+                                    _ => { ok = false; break; }
+                                }
+                            }
+                            if ok {
+                                let _ = write_str(&mut class, " sectors:").await;
+                                for s in 0..(stembus::regmap::DBG_CRC_BYTES / 2) {
+                                    let _ = write_str(&mut class, " ").await;
+                                    let _ = write_hex8(&mut class, bytes[2 * s]).await; // hi
+                                    let _ = write_hex8(&mut class, bytes[2 * s + 1]).await; // lo
+                                }
+                                let _ = write_str(&mut class, "  PASS\r\n").await;
+                            } else {
+                                let _ = write_str(&mut class, "  FAIL (crc read)\r\n").await;
+                            }
+                            let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"id") {
                             let _ = write_str(&mut class, "\r\nid ").await;
                             let _ = class.write_packet(serial.as_bytes()).await;
                             let _ = write_str(&mut class, "\r\n> ").await;
                         } else {
-                            let _ = write_str(&mut class, "\r\ncmds: id | scan | hello | proto | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
+                            let _ = write_str(&mut class, "\r\ncmds: id | scan | hello | proto | ident | status | crc | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
                         }
                     }
                     Err(_) => break, // disconnected → wait for the next connection
