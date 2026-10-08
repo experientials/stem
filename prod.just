@@ -21,7 +21,7 @@ cargo_cache := "-v msp430-cargo-registry:/opt/cargo/registry -v msp430-cargo-git
 #   mode:   auto (default) | native | fast | docker | docker-fast
 #   console: "console" (default; dev UART logging) | "" for a SILENT production image (smaller FRAM)
 # `-e PROD_BUILD` forwards a pinned stamp into the container; native path picks it up from the env.
-build family="fr247x" mode="auto" console="console" modes="":
+build family="fr247x" mode="auto" console="console" modes="" extra="":
     #!/usr/bin/env bash
     set -euo pipefail
     case "{{family}}" in
@@ -39,8 +39,9 @@ build family="fr247x" mode="auto" console="console" modes="":
     # `console` arg: "console" (lean UART log) | "" (silent) | "debug" (verbose: post-POST found-info).
     # The feature name IS the arg value (`debug` implies `console` in Cargo.toml), so it flows into FEATS.
     FEATS="{{family}},$MODES"; [ -n "{{console}}" ] && FEATS="$FEATS,{{console}}"
+    [ -n "{{extra}}" ] && FEATS="$FEATS,{{extra}}"  # extra features, e.g. cros_ec (COMMANDS.md §0 milestone)
     feats="--no-default-features --features $FEATS"
-    label="{{family}}$([ -n "{{console}}" ] && echo "+{{console}}" || echo ' silent')"
+    label="{{family}}$([ -n "{{console}}" ] && echo "+{{console}}" || echo ' silent')$([ -n "{{extra}}" ] && echo "+{{extra}}")"
     # VARIANT = the family (+ '-silent' when console is off). cargo always writes the same binary name
     # (`prod`) regardless of features, so both families — and console/silent — clobber one path. We copy
     # the built ELF to a variant-unique name `prod-<variant>` so a pinned artifact (hwd.toml image, CI
@@ -54,6 +55,7 @@ build family="fr247x" mode="auto" console="console" modes="":
         console) variant="{{family}}" ;;
         *)       variant="{{family}}-{{console}}" ;;  # e.g. debug → prod-<fam>-debug
     esac
+    [ -n "{{extra}}" ] && variant="$variant-{{extra}}"  # distinct artifact, e.g. prod-fr24xx-cros_ec
     finish() {  # $1 = cargo profile dir; copies to the variant artifact and gates THAT file
         local prof="$1" built art
         built="prod/target/msp430-none-elf/$prof/prod"
@@ -75,7 +77,7 @@ build family="fr247x" mode="auto" console="console" modes="":
         finish "$prof"
         exit 0
     fi
-    run_docker() { docker run --rm --platform linux/amd64 -e PROD_BUILD {{cargo_cache}} -v "$PWD":/work -w /work {{image}} just prod build {{family}} "$1" "{{console}}" "{{modes}}"; }
+    run_docker() { docker run --rm --platform linux/amd64 -e PROD_BUILD {{cargo_cache}} -v "$PWD":/work -w /work {{image}} just prod build {{family}} "$1" "{{console}}" "{{modes}}" "{{extra}}"; }
     mode="{{mode}}"
     if [ "$mode" = auto ]; then
         if scripts/native-available.sh; then mode=native

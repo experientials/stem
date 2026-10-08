@@ -46,10 +46,11 @@ default:
 build target *flags:
     #!/usr/bin/env bash
     set -euo pipefail
-    cls=default
+    cls=default; crosec=""; fam=""
     for f in {{flags}}; do case "${f#--}" in
         diag) cls=diag;; debug) cls=debug;; prod) cls=prod;;
-        *) echo "unknown flag '$f' — use --diag | --debug" >&2; exit 1;; esac; done
+        cros-ec|cros_ec) crosec=cros_ec;;  # cros_ec v3 EC-slave framing (COMMANDS.md §0 HELLO milestone)
+        *) echo "unknown flag '$f' — use --diag | --debug | --cros-ec" >&2; exit 1;; esac; done
     case "{{target}}" in
         fr2355|fr235x) fam=fr235x; diagt=fr2355; kind=msp ;;
         fr2476|fr247x) fam=fr247x; diagt=fr2476; kind=msp ;;
@@ -58,12 +59,17 @@ build target *flags:
         rp2040)        kind=cortex ;;
         *) echo "unknown chip '{{target}}' — fr2355|fr2476|fr2433|fr2155|rp2040" >&2; exit 1 ;;
     esac
+    # cros_ec is the FR2433 EC-slave path for now (prod run_fr24xx); reject it elsewhere rather than
+    # silently build a dead-code image (dual run_dual still serves the regmap slave).
+    if [ -n "$crosec" ] && [ "$fam" != fr24xx ]; then
+        echo "--cros-ec is FR2433-only for now (COMMANDS.md §0 milestone); got '{{target}}'" >&2; exit 1
+    fi
     if [ "$kind" = msp ]; then
         [ "$cls" = default ] && cls=prod
         case "$cls" in
-            prod)  just prod build "$fam" ;;
-            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;
-            debug) just prod build "$fam" auto debug ;;  # prod + `debug` feature (post-POST "what was found")
+            prod)  just prod build "$fam" auto console "" "$crosec" ;;
+            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; [ -z "$crosec" ] || { echo "--cros-ec applies to prod, not diag" >&2; exit 1; }; just diag build "$diagt" ;;
+            debug) just prod build "$fam" auto debug "" "$crosec" ;;  # prod + `debug` feature (post-POST "what was found")
         esac
     else  # cortex (rp2040): its only firmware is the debug bench host
         case "$cls" in
