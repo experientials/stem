@@ -33,6 +33,13 @@ pub const EC_CMD_HELLO: u16 = 0x0001;
 pub const EC_CMD_GET_VERSION: u16 = 0x0002;
 pub const EC_CMD_GET_BUILD_INFO: u16 = 0x0004;
 pub const EC_CMD_GET_PROTOCOL_INFO: u16 = 0x000B;
+/// Board-specific command range base (`EC_CMD_BOARD_SPECIFIC_BASE`, cros_ec_commands.h:6618) — vendor
+/// commands are `BASE + n`. A command id in this range is NOT a standard cros_ec command; the framer
+/// hands it to the caller's vendor dispatch (which carries our postcard `Command`), not its own.
+pub const EC_CMD_BOARD_SPECIFIC_BASE: u16 = 0x3E00;
+/// Our one vendor command: the payload is a postcard-encoded `stembus::command::Command`; the response
+/// payload is a postcard `Response` (COMMANDS.md §0 — the vendor+postcard path for our own semantics).
+pub const EC_CMD_STEMBUS: u16 = EC_CMD_BOARD_SPECIFIC_BASE;
 /// `EC_CMD_HELLO` echoes `in_data + 0x01020304` (cros_ec_commands.h).
 pub const HELLO_MAGIC: u32 = 0x0102_0304;
 
@@ -44,11 +51,13 @@ pub const EC_PROTOCOL_VERSIONS: u32 = 1 << 3;
 pub const MAX_REQUEST_PACKET_SIZE: u16 = (REQ_HDR + EC_PAYLOAD_MAX) as u16;
 pub const MAX_RESPONSE_PACKET_SIZE: u16 = (RESP_HDR + EC_PAYLOAD_MAX) as u16;
 
-// Result codes (enum ec_status) — the subset the v0 slice uses.
+// Result codes (enum ec_status, cros_ec_commands.h) — the subset the v0 slice uses.
 pub const EC_RES_SUCCESS: u16 = 0;
 pub const EC_RES_INVALID_COMMAND: u16 = 1;
+pub const EC_RES_ERROR: u16 = 2;
 pub const EC_RES_INVALID_PARAM: u16 = 3;
 pub const EC_RES_INVALID_CHECKSUM: u16 = 7;
+pub const EC_RES_RESPONSE_TOO_BIG: u16 = 14;
 
 /// A framing error from decoding a cros_ec packet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -244,6 +253,7 @@ pub struct EcSlave {
     resp_pos: usize,
     staged: bool,
     done: bool,
+    vendor_pending: bool,
 }
 
 impl EcSlave {
@@ -256,6 +266,7 @@ impl EcSlave {
             resp_pos: 0,
             staged: false,
             done: true,
+            vendor_pending: false,
         }
     }
 
@@ -268,6 +279,7 @@ impl EcSlave {
             self.resp_len = 0;
             self.resp_pos = 0;
             self.staged = false;
+            self.vendor_pending = false;
             self.done = false;
         }
     }
@@ -311,15 +323,53 @@ impl EcSlave {
     }
 
     fn dispatch(&mut self) {
-        // Parse into owned locals so the borrow of `self.req` ends before we write `self.resp`.
-        let (result, payload) = match parse_request(&self.req[..self.req_len]) {
-            Ok(r) => dispatch_command(&r),
-            Err(Error::BadChecksum) => (EC_RES_INVALID_CHECKSUM, Payload::empty()),
-            Err(_) => (EC_RES_INVALID_COMMAND, Payload::empty()),
+        // Board-specific (vendor) commands carry our postcard `Command` + need the node → the caller's
+        // vendor dispatch handles them (see `vendor_request`/`stage_response`). Standard commands
+        // (HELLO/proto) self-dispatch here. Parse into an owned outcome so the borrow of `self.req` ends
+        // before we write `self.resp`.
+        enum Outcome {
+            Vendor,
+            Std(u16, Payload),
+        }
+        let outcome = match parse_request(&self.req[..self.req_len]) {
+            Ok(r) if r.command >= EC_CMD_BOARD_SPECIFIC_BASE => Outcome::Vendor,
+            Ok(r) => {
+                let (result, payload) = dispatch_command(&r);
+                Outcome::Std(result, payload)
+            }
+            Err(Error::BadChecksum) => Outcome::Std(EC_RES_INVALID_CHECKSUM, Payload::empty()),
+            Err(_) => Outcome::Std(EC_RES_INVALID_COMMAND, Payload::empty()),
         };
-        self.resp_len = encode_response(result, payload.as_slice(), &mut self.resp).unwrap_or(0);
+        match outcome {
+            Outcome::Vendor => self.vendor_pending = true, // glue will dispatch + stage_response
+            Outcome::Std(result, payload) => self.stage_result(result, payload.as_slice()),
+        }
+    }
+
+    /// Build the cros_ec response frame into `self.resp` and mark it staged for the read phase.
+    fn stage_result(&mut self, result: u16, payload: &[u8]) {
+        self.resp_len = encode_response(result, payload, &mut self.resp).unwrap_or(0);
         self.resp_pos = 0;
         self.staged = self.resp_len > 0;
+    }
+
+    /// The pending **vendor** request (board-specific command id), if one is complete and not yet
+    /// answered — the caller decodes its postcard payload, runs `command::execute`, and replies via
+    /// [`stage_response`](EcSlave::stage_response). `None` for standard commands (self-dispatched) or when
+    /// nothing is pending. The `data` slice is the raw vendor payload (our postcard bytes).
+    pub fn vendor_request(&self) -> Option<Request<'_>> {
+        if self.vendor_pending && !self.staged {
+            parse_request(&self.req[..self.req_len]).ok()
+        } else {
+            None
+        }
+    }
+
+    /// Stage the caller's answer to a vendor request: `result` (EC_RES_*) + `payload` (our postcard
+    /// `Response` bytes). Clears the pending flag; the read phase serves it like any response.
+    pub fn stage_response(&mut self, result: u16, payload: &[u8]) {
+        self.stage_result(result, payload);
+        self.vendor_pending = false;
     }
 }
 
@@ -510,8 +560,10 @@ mod tests {
     #[test]
     fn framer_unknown_command_returns_invalid() {
         let mut f = EcSlave::new();
+        // An unknown STANDARD command (< board-specific base) self-dispatches to INVALID_COMMAND.
+        // (A ≥0x3E00 id would instead defer to the vendor path — see framer_vendor_command_defers_to_caller.)
         let mut req = [0u8; 16];
-        let n = encode_request(0x7FFF, 0, &[], &mut req).unwrap();
+        let n = encode_request(0x00FF, 0, &[], &mut req).unwrap();
         f.start();
         for &b in &req[..n] {
             f.feed(b);
@@ -559,6 +611,31 @@ mod tests {
         let mut resp = [0u8; 32];
         let pr = parse_response(drain(&mut f, &mut resp)).unwrap();
         assert_eq!(pr.result, EC_RES_INVALID_CHECKSUM);
+    }
+
+    #[test]
+    fn framer_vendor_command_defers_to_caller() {
+        // A board-specific command id is NOT self-dispatched: the framer exposes it via vendor_request()
+        // and waits for the caller to stage_response(). (The caller would postcard-decode + execute.)
+        let mut f = EcSlave::new();
+        let payload = [0xAA, 0xBB, 0xCC];
+        let mut req = [0u8; 32];
+        let n = encode_request(EC_CMD_STEMBUS, 0, &payload, &mut req).unwrap();
+        f.start();
+        for &b in &req[..n] {
+            f.feed(b);
+        }
+        // Not self-staged; surfaced to the caller instead.
+        assert_eq!(f.next_tx(), EC_FILLER, "vendor command must not self-dispatch");
+        let vr = f.vendor_request().expect("vendor request should be pending");
+        assert_eq!(vr.command, EC_CMD_STEMBUS);
+        assert_eq!(vr.data, &payload);
+        // Caller answers (here: echo a 2-byte payload) → framer stages a normal cros_ec response.
+        f.stage_response(EC_RES_SUCCESS, &[0x01, 0x02]);
+        let mut resp = [0u8; 32];
+        let pr = parse_response(drain(&mut f, &mut resp)).unwrap();
+        assert_eq!(pr.result, EC_RES_SUCCESS);
+        assert_eq!(pr.data, &[0x01, 0x02]);
     }
 
     #[test]

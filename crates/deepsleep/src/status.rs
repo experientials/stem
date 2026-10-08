@@ -114,6 +114,32 @@ impl Status {
         self.mode = code;
     }
 
+    /// Build the cros_ec `Identity` from this snapshot (COMMANDS.md §5.7). `role` is the node's Stem
+    /// address (role-based). Keeps all field access inside `status.rs`; the mapping lives in one place.
+    #[cfg(feature = "cros_ec")]
+    pub fn identity(&self, role: u8) -> stembus::command::Identity {
+        stembus::command::Identity {
+            iface: regmap::DBG_IFACE_MAGIC,
+            model: self.model_id,
+            role,
+            build_id: self.build_id,
+            ver: [crate::VER_MAJOR, crate::VER_MINOR, crate::VER_PATCH],
+        }
+    }
+
+    /// Build the cros_ec `StatusData` from this snapshot. `wake` is supplied by the caller (the node's
+    /// wake-attribution source; `None` until a node tracks one).
+    #[cfg(feature = "cros_ec")]
+    pub fn status_data(&self, wake: stembus::command::WakeReason) -> stembus::command::StatusData {
+        stembus::command::StatusData {
+            flags: self.status,
+            fault: self.fault,
+            dev_count: self.dev_count,
+            mode: self.mode,
+            wake,
+        }
+    }
+
     /// Read one debug register (0x30–0x3F). The shared read path for the slave ISR and the UART dump;
     /// reserved offsets read 0.
     pub fn read_reg(&self, reg: u8) -> u8 {

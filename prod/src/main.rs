@@ -84,6 +84,8 @@ pub use deepsleep::stem; // I²C-slave dispatch (RegFile/Slave/poll) — now in 
 #[cfg(all(feature = "fr24xx", feature = "cros_ec"))]
 pub use deepsleep::ec; // cros_ec EC-slave glue (COMMANDS.md §0 HELLO milestone) — replaces the regmap
                        // slave on the FR2433 cros_ec build; drives the same LPM pender + wake ISR.
+#[cfg(all(feature = "fr24xx", feature = "cros_ec"))]
+pub use deepsleep::node; // the Node/Operate adapter the vendor+postcard path dispatches against.
 // UART logging is the `console` feature (dev only). Off = silent production image; state then lives
 // only in the debug registers (served by the I2C-slave surface). See status.rs / the console question.
 // Console/UART is available to ANY family with `console` on (dual + fr24xx). `uart.rs` unifies the
@@ -591,9 +593,13 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     }
     #[cfg(feature = "cros_ec")]
     {
-        // HELLO needs no node state (pure echo), so `rf` (status/CRC) just isn't consulted by this path.
+        // Build the Node adapter from the boot snapshot (identity/status/CRC). Standard commands
+        // (HELLO/proto) need no node; the vendor+postcard path (ident/status/…) dispatches against it.
+        let ident = rf.status.identity(stem_addr as u8);
+        let status = rf.status.status_data(stembus::command::WakeReason::None);
+        let mut node = node::StaticNode::new(ident, status, crc);
         let mut ec_slave = stembus::cros_ec::EcSlave::new();
-        let mut task = core::pin::pin!(ec::serve_ec(p, &mut ec_slave));
+        let mut task = core::pin::pin!(ec::serve_ec(p, &mut ec_slave, &mut node));
         sched::run_pended(task.as_mut(), &STEM_PENDER, || fr24xx_idle(p));
     }
     // `serve*` never completes, so `run_pended` never returns; satisfy the `-> !` signature.

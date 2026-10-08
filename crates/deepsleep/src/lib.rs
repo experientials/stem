@@ -40,6 +40,11 @@ pub mod stem;
 #[cfg(feature = "cros_ec")]
 pub mod ec;
 
+/// The `Node`+`Operate` adapter (`stembus::command`) over this node's live state — what the vendor+postcard
+/// path dispatches against. Opt-in via `cros_ec`.
+#[cfg(feature = "cros_ec")]
+pub mod node;
+
 // ── Build identity (DEEPSLEEP-EXTRACTION.md §B) ──────────────────────────────────────────────────
 // The **capability** semver is THIS crate's `CARGO_PKG_VERSION` — reported over the Stem regmap
 // (DBG_FW_VER_*) + the boot log. The per-image **build stamp** is NOT here: it's crate-scoped

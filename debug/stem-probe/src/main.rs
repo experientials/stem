@@ -51,6 +51,9 @@ use stembus::regmap::{ADDR_DEV_STANDIN, ADDR_EXPANDER, ADDR_SUPERVISOR};
 // cros_ec v3 I²C framing (COMMANDS.md §0 milestone): the SAME codec the FR2433 EC slave runs, so the
 // master side can't drift from the slave — the point of putting it in `stembus` (used here on thumbv6m).
 use stembus::cros_ec;
+// The command vocabulary + its postcard codec — the vendor+postcard path (ident/status/…). Same wire
+// format the FR2433 node decodes/encodes; a vendor cros_ec command (EC_CMD_STEMBUS) carries it.
+use stembus::command;
 
 // ── Passive I²C sniffer (`sniff <sda> <scl> [ms]`) ────────────────────────────
 // Tap any TWO of these otherwise-free GPIOs and watch a live I²C bus WITHOUT driving it — pure inputs,
@@ -556,6 +559,55 @@ async fn main(_spawner: Spawner) {
                                 }
                             }
                             let _ = write_str(&mut class, "> ").await;
+                        } else if contains_ci(line, b"ident") {
+                            // vendor+postcard: Command::Identify -> Response::Identity (live node state).
+                            let _ = write_str(&mut class, "\r\nident @0x").await;
+                            let _ = write_hex8(&mut class, ADDR_EXPANDER).await;
+                            match vendor_cmd(&mut i2c, command::Command::Identify) {
+                                Ok(command::Response::Identity(id)) => {
+                                    let _ = write_str(&mut class, " iface=0x").await;
+                                    let _ = write_hex8(&mut class, id.iface).await;
+                                    let _ = write_str(&mut class, " model=0x").await;
+                                    let _ = write_hex8(&mut class, (id.model >> 8) as u8).await;
+                                    let _ = write_hex8(&mut class, id.model as u8).await;
+                                    let _ = write_str(&mut class, " role=0x").await;
+                                    let _ = write_hex8(&mut class, id.role).await;
+                                    let _ = write_str(&mut class, " build=0x").await;
+                                    let _ = write_hex32(&mut class, id.build_id).await;
+                                    let _ = write_str(&mut class, " ver=").await;
+                                    let _ = write_dec(&mut class, id.ver[0] as u16).await;
+                                    let _ = write_str(&mut class, ".").await;
+                                    let _ = write_dec(&mut class, id.ver[1] as u16).await;
+                                    let _ = write_str(&mut class, ".").await;
+                                    let _ = write_dec(&mut class, id.ver[2] as u16).await;
+                                    let _ = write_str(&mut class, "  PASS\r\n").await;
+                                }
+                                Ok(_) => { let _ = write_str(&mut class, "  FAIL (unexpected response)\r\n").await; }
+                                Err(e) => { let _ = write_str(&mut class, "  FAIL (").await; let _ = write_str(&mut class, e).await; let _ = write_str(&mut class, ")\r\n").await; }
+                            }
+                            let _ = write_str(&mut class, "> ").await;
+                        } else if contains_ci(line, b"status") {
+                            // vendor+postcard: Command::Status -> Response::Status.
+                            let _ = write_str(&mut class, "\r\nstatus @0x").await;
+                            let _ = write_hex8(&mut class, ADDR_EXPANDER).await;
+                            match vendor_cmd(&mut i2c, command::Command::Status) {
+                                Ok(command::Response::Status(st)) => {
+                                    let _ = write_str(&mut class, " flags=0x").await;
+                                    let _ = write_hex8(&mut class, st.flags).await;
+                                    let _ = write_str(&mut class, " fault=0x").await;
+                                    let _ = write_hex8(&mut class, st.fault).await;
+                                    let _ = write_str(&mut class, " devs=").await;
+                                    let _ = write_dec(&mut class, st.dev_count as u16).await;
+                                    let _ = write_str(&mut class, " mode=0x").await;
+                                    let _ = write_hex8(&mut class, st.mode).await;
+                                    let _ = write_str(&mut class, " wake=0x").await;
+                                    let _ = write_hex8(&mut class, st.wake.code()).await;
+                                    let _ = write_str(&mut class, "  PASS\r\n").await;
+                                }
+                                Ok(_) => { let _ = write_str(&mut class, "  FAIL (unexpected response)\r\n").await; }
+                                Err(e) => { let _ = write_str(&mut class, "  FAIL (").await; let _ = write_str(&mut class, e).await; let _ = write_str(&mut class, ")\r\n").await; }
+                            }
+                            let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"id") {
                             let _ = write_str(&mut class, "\r\nid ").await;
                             let _ = class.write_packet(serial.as_bytes()).await;
@@ -740,6 +792,28 @@ fn rd(i2c: &mut I2c<'_, I2C1, i2c::Blocking>, addr: u8, reg: u8) -> Option<u8> {
 /// Blocking Stem-bus register write (reg ptr + value). false = no ACK / error.
 fn wr(i2c: &mut I2c<'_, I2C1, i2c::Blocking>, addr: u8, reg: u8, val: u8) -> bool {
     i2c.blocking_write(addr, &[reg, val]).is_ok()
+}
+
+/// One **vendor+postcard** command round-trip (COMMANDS.md §0): encode `cmd` as postcard, wrap it in the
+/// `EC_CMD_STEMBUS` cros_ec request, write+repeated-START read @0x22, and decode the postcard `Response`.
+/// Pure sync (blocking I²C); the SAME `stembus` codec the FR2433 node runs, so no master/slave drift.
+fn vendor_cmd(
+    i2c: &mut I2c<'_, I2C1, i2c::Blocking>,
+    cmd: command::Command,
+) -> Result<command::Response, &'static str> {
+    let mut cbuf = [0u8; 32];
+    let cn = command::wire::encode_command(&cmd, &mut cbuf).map_err(|_| "encode cmd")?;
+    let mut req = [0u8; 48];
+    let rn = cros_ec::encode_request(cros_ec::EC_CMD_STEMBUS, 0, &cbuf[..cn], &mut req)
+        .map_err(|_| "encode req")?;
+    let mut resp = [0u8; 48];
+    i2c.blocking_write_read(ADDR_EXPANDER, &req[..rn], &mut resp)
+        .map_err(|_| "I2C no-ACK/timeout")?;
+    let pr = cros_ec::parse_response(&resp).map_err(|_| "bad response framing")?;
+    if pr.result != cros_ec::EC_RES_SUCCESS {
+        return Err("EC result != SUCCESS");
+    }
+    command::wire::decode_response(pr.data).map_err(|_| "response decode")
 }
 
 /// Role name for a Stem address (I2C-API.md role-based addressing).

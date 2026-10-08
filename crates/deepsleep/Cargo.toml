@@ -32,8 +32,9 @@ _dual = []
 console = []
 debug = ["console"]
 # `cros_ec` = the cros_ec v3 EC-slave framing path (COMMANDS.md §0 HELLO milestone) — adds `ec` (glue to
-# stembus::cros_ec::EcSlave). Opt-in; the consumer runs it INSTEAD of the regmap slave on the FR2433 build.
-cros_ec = []
+# stembus::cros_ec::EcSlave) + `node` (the Node/Operate adapter) and enables the postcard command codec in
+# stembus (vendor+postcard path). Opt-in; the consumer runs it INSTEAD of the regmap slave on FR2433.
+cros_ec = ["stembus/postcard"]
 # Operating modes (gate the `Mode` enum variants + their acquire/release actions) — forwarded by the
 # consumer. `mode-sensing` needs the Leaf master (dual only); `mode-passive` is the off-the-bus state.
 mode-passive = []
