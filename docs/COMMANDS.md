@@ -253,8 +253,17 @@ not binary "was it used":
 
 "Expensive" is concrete here: FRAM/RAM bytes (the FR2433 15 KB budget), dispatch complexity, and the
 maintenance surface of one more wire command. So each verb gets weighed, not grandfathered. The mapping
-table marks KEEP / FOLD / **DROP?**; the `DROP?`/`?` marks are my prune candidates — confirm them, and
-I'll measure the size side of any that are borderline before deciding.
+table marks KEEP / FOLD / **DROP?**; the `DROP?`/`?` marks are my prune candidates — confirm them.
+
+**This gate is mostly FORWARD-LOOKING (Henrik 2026-10-08):** *"The current commands are few, so this gate
+may be forward looking."* Right — with only a handful of current console verbs, building a measurement rig
+to prune them is itself over-engineering. Don't instrument the existing few; judge them by quick
+inspection and apply the real discipline to *new* commands. **And note where size actually bites:** the
+console verbs live on the **Pico (stem-probe), which is flash-rich (~2 MB)** — so their byte cost is
+nearly free; pruning there is for *clarity/clutter*, not bytes (`sniff` ~168 lines and `verify_stem` ~104
+are the largest, but the Pico affords them). The FRAM/size half of the gate bites on the **MCU
+wire-command side** (each new cros_ec/postcard command the FR2433 EC-slave must implement) — that is where
+"implementation size vs usefulness" is a hard constraint, and where the forward-looking gate matters most.
 
 **Mapping — each current console command → its replacement:**
 
