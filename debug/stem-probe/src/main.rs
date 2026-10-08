@@ -308,6 +308,32 @@ async fn main(_spawner: Spawner) {
                             } else {
                                 let _ = write_str(&mut class, "\r\nusage: w <addr> <reg> <val>  (hex)\r\n> ").await;
                             }
+                        } else if eq_ci(cmd0, b"mode") {
+                            // vendor+postcard: Command::SetMode -> Response::ModeNow. `mode <addr> <p|s>`
+                            // (default addr 0x20 supervisor). TOKEN-matched (not substring) so the 'sensing'
+                            // /'passive' args don't collide with the `sens`/`pass` regmap commands. The
+                            // switch is applied ASYNC by the node's mode machine → ModeNow reports the
+                            // pre-switch mode; follow with `status` to see it take effect.
+                            let target = if nt >= 2 { parse_hex(toks[1]).unwrap_or(ADDR_SUPERVISOR) } else { ADDR_SUPERVISOR };
+                            let m = if nt >= 3 && !toks[2].is_empty() && toks[2][0] | 0x20 == b's' {
+                                stembus::mode::Mode::Sensing
+                            } else {
+                                stembus::mode::Mode::Passive
+                            };
+                            let _ = write_str(&mut class, "\r\nmode @0x").await;
+                            let _ = write_hex8(&mut class, target).await;
+                            let _ = write_str(&mut class, " -> ").await;
+                            let _ = write_str(&mut class, m.name()).await;
+                            match vendor_cmd(&mut i2c, target, command::Command::SetMode { mode: m }) {
+                                Ok(command::Response::ModeNow(code)) => {
+                                    let _ = write_str(&mut class, " (was 0x").await;
+                                    let _ = write_hex8(&mut class, code).await;
+                                    let _ = write_str(&mut class, "; applied async \u{2014} confirm with 'status')  PASS\r\n").await;
+                                }
+                                Ok(_) => { let _ = write_str(&mut class, "  FAIL (unexpected response)\r\n").await; }
+                                Err(e) => { let _ = write_str(&mut class, "  FAIL (").await; let _ = write_str(&mut class, e).await; let _ = write_str(&mut class, ")\r\n").await; }
+                            }
+                            let _ = write_str(&mut class, "> ").await;
                         } else if eq_ci(cmd0, b"selftest") {
                             // Run T1–T3 across the role window + Leaf; end with one grep-able RESULT line.
                             let mut t = Tally::new();
@@ -561,9 +587,11 @@ async fn main(_spawner: Spawner) {
                             let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"ident") {
                             // vendor+postcard: Command::Identify -> Response::Identity (live node state).
+                            // optional arg = target addr (hex); default 0x22 FR2433, dual = 0x20/0x21.
+                            let target = if nt >= 2 { parse_hex(toks[1]).unwrap_or(ADDR_EXPANDER) } else { ADDR_EXPANDER };
                             let _ = write_str(&mut class, "\r\nident @0x").await;
-                            let _ = write_hex8(&mut class, ADDR_EXPANDER).await;
-                            match vendor_cmd(&mut i2c, command::Command::Identify) {
+                            let _ = write_hex8(&mut class, target).await;
+                            match vendor_cmd(&mut i2c, target, command::Command::Identify) {
                                 Ok(command::Response::Identity(id)) => {
                                     let _ = write_str(&mut class, " iface=0x").await;
                                     let _ = write_hex8(&mut class, id.iface).await;
@@ -587,10 +615,11 @@ async fn main(_spawner: Spawner) {
                             }
                             let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"status") {
-                            // vendor+postcard: Command::Status -> Response::Status.
+                            // vendor+postcard: Command::Status -> Response::Status. optional arg = target addr.
+                            let target = if nt >= 2 { parse_hex(toks[1]).unwrap_or(ADDR_EXPANDER) } else { ADDR_EXPANDER };
                             let _ = write_str(&mut class, "\r\nstatus @0x").await;
-                            let _ = write_hex8(&mut class, ADDR_EXPANDER).await;
-                            match vendor_cmd(&mut i2c, command::Command::Status) {
+                            let _ = write_hex8(&mut class, target).await;
+                            match vendor_cmd(&mut i2c, target, command::Command::Status) {
                                 Ok(command::Response::Status(st)) => {
                                     let _ = write_str(&mut class, " flags=0x").await;
                                     let _ = write_hex8(&mut class, st.flags).await;
@@ -611,12 +640,13 @@ async fn main(_spawner: Spawner) {
                         } else if contains_ci(line, b"crc") {
                             // vendor+postcard: Command::FramCrc{sector} -> Response::Crc(byte), read over the
                             // 16-byte window (8 sectors x u16 = per-sector CRC16, ADR-0010 integrity vector).
+                            let target = if nt >= 2 { parse_hex(toks[1]).unwrap_or(ADDR_EXPANDER) } else { ADDR_EXPANDER };
                             let _ = write_str(&mut class, "\r\ncrc @0x").await;
-                            let _ = write_hex8(&mut class, ADDR_EXPANDER).await;
+                            let _ = write_hex8(&mut class, target).await;
                             let mut bytes = [0u8; stembus::regmap::DBG_CRC_BYTES];
                             let mut ok = true;
                             for (i, slot) in bytes.iter_mut().enumerate() {
-                                match vendor_cmd(&mut i2c, command::Command::FramCrc { sector: i as u8 }) {
+                                match vendor_cmd(&mut i2c, target, command::Command::FramCrc { sector: i as u8 }) {
                                     Ok(command::Response::Crc(b)) => *slot = b,
                                     _ => { ok = false; break; }
                                 }
@@ -638,7 +668,7 @@ async fn main(_spawner: Spawner) {
                             let _ = class.write_packet(serial.as_bytes()).await;
                             let _ = write_str(&mut class, "\r\n> ").await;
                         } else {
-                            let _ = write_str(&mut class, "\r\ncmds: id | scan | hello | proto | ident | status | crc | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
+                            let _ = write_str(&mut class, "\r\ncmds: id | scan | hello | proto | ident [a] | status [a] | crc [a] | mode [a] <p|s> | r <a> <reg> | w <a> <reg> <v> | lscan | lr <a> <reg> | sniff <sda> <scl> [ms] | taps | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins | boot | help   (type 'help' for full semantics)\r\n> ").await;
                         }
                     }
                     Err(_) => break, // disconnected → wait for the next connection
@@ -824,6 +854,7 @@ fn wr(i2c: &mut I2c<'_, I2C1, i2c::Blocking>, addr: u8, reg: u8, val: u8) -> boo
 /// Pure sync (blocking I²C); the SAME `stembus` codec the FR2433 node runs, so no master/slave drift.
 fn vendor_cmd(
     i2c: &mut I2c<'_, I2C1, i2c::Blocking>,
+    addr: u8,
     cmd: command::Command,
 ) -> Result<command::Response, &'static str> {
     let mut cbuf = [0u8; 32];
@@ -832,7 +863,7 @@ fn vendor_cmd(
     let rn = cros_ec::encode_request(cros_ec::EC_CMD_STEMBUS, 0, &cbuf[..cn], &mut req)
         .map_err(|_| "encode req")?;
     let mut resp = [0u8; 48];
-    i2c.blocking_write_read(ADDR_EXPANDER, &req[..rn], &mut resp)
+    i2c.blocking_write_read(addr, &req[..rn], &mut resp)
         .map_err(|_| "I2C no-ACK/timeout")?;
     let pr = cros_ec::parse_response(&resp).map_err(|_| "bad response framing")?;
     if pr.result != cros_ec::EC_RES_SUCCESS {
