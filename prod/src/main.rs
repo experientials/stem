@@ -81,11 +81,12 @@ pub use deepsleep::mode; // operating-mode machine (Passive↔Sensing) — now i
 pub use deepsleep::stem; // I²C-slave dispatch (RegFile/Slave/poll) — now in `deepsleep` (Phase 1a);
                          // its transport (eUSCI programming + pins) is `bsp::stem_i2c`. Re-export keeps
                          // `crate::stem::*` resolving for main.rs unchanged.
-#[cfg(all(feature = "fr24xx", feature = "cros_ec"))]
-pub use deepsleep::ec; // cros_ec EC-slave glue (COMMANDS.md §0 HELLO milestone) — replaces the regmap
-                       // slave on the FR2433 cros_ec build; drives the same LPM pender + wake ISR.
-#[cfg(all(feature = "fr24xx", feature = "cros_ec"))]
-pub use deepsleep::node; // the Node/Operate adapter the vendor+postcard path dispatches against.
+#[cfg(feature = "cros_ec")]
+pub use deepsleep::ec; // cros_ec EC-slave glue (COMMANDS.md §0) — replaces the regmap slave on the
+                       // cros_ec build (fr24xx via serve_ec; dual via ec::poll in run_dual).
+#[cfg(feature = "cros_ec")]
+pub use deepsleep::node; // the Node/Operate adapter the vendor+postcard path dispatches against
+                         // (StaticNode on fr24xx; LiveNode on dual).
 // UART logging is the `console` feature (dev only). Off = silent production image; state then lives
 // only in the debug registers (served by the I2C-slave surface). See status.rs / the console question.
 // Console/UART is available to ANY family with `console` on (dual + fr24xx). `uart.rs` unifies the
@@ -172,7 +173,8 @@ fn run_dual(p: &Peripherals) -> ! {
     // AFTER the Leaf enumerate, so a wedged/slow sensor bus — e.g. two masters contending — delayed or
     // could indefinitely block the SoM's only way in. See DESIGN.md "Boot logic".) `stem::init` only
     // configures eUSCI_B1 + its pins; the RegFile it serves is assembled once status is ready, below.
-    stem::init(p, stem_addr);
+    stem::init(p, stem_addr); // configures eUSCI_B1 + pins — the transport, shared by both slave faces
+    #[cfg(not(feature = "cros_ec"))]
     let mut slave = stem::Slave::new();
 
     // Enter the boot-default operating mode. In Sensing this ACQUIRES the sensor bus (B0 master); in
@@ -210,6 +212,19 @@ fn run_dual(p: &Peripherals) -> ! {
     let crc = post::fram_crcs();
     rf.set_crc(crc);
 
+    // cros_ec EC-slave (feature-gated flip, COMMANDS.md §0 plan phase 4): the vendor+postcard command
+    // surface on eUSCI_B1, replacing the regmap slave. `LiveNode` is refreshed from `rf.status` each loop
+    // pass and sinks `SetMode` requests for the loop to apply via the mode machine. Default (no feature)
+    // keeps the proven regmap slave.
+    #[cfg(feature = "cros_ec")]
+    let mut ec_slave = stembus::cros_ec::EcSlave::new();
+    #[cfg(feature = "cros_ec")]
+    let mut live = node::LiveNode::new(
+        rf.status.identity(stem_addr as u8),
+        rf.status.status_data(stembus::command::WakeReason::None),
+        crc,
+    );
+
     // Dev observability: banner + human report + on-demand commands over the backchannel UART.
     #[cfg(feature = "console")]
     {
@@ -226,7 +241,9 @@ fn run_dual(p: &Peripherals) -> ! {
             rf.status.dump(p);
             post::debug_leaf(p);
             // Boot loopback self-test: eUSCI_B0 MASTER → eUSCI_B1 SLAVE (needs Stem↔Leaf jumpers,
-            // stem::LOOPBACK_JUMPER_HINT). Only meaningful in Sensing (B0 up as master).
+            // stem::LOOPBACK_JUMPER_HINT). Only meaningful in Sensing (B0 up as master). Exercises the
+            // REGMAP slave, so it's not built on the cros_ec flip (the slave face is cros_ec there).
+            #[cfg(not(feature = "cros_ec"))]
             if mach.is_sensing() {
                 let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
                 uart::puts(p, "loopback B0->B1 @0x");
@@ -269,7 +286,15 @@ fn run_dual(p: &Peripherals) -> ! {
 
     loop {
         bsp::board::wdt_pet(p); // reload the backstop; a genuine hang stops petting → reset
-        stem::poll(p, &mut slave, &mut rf); // service the SoM/Stem master
+        // Service the SoM/Stem master. Default = regmap slave; cros_ec flip = the EcSlave framer +
+        // vendor+postcard dispatch against the live node (refreshed from rf.status this pass).
+        #[cfg(not(feature = "cros_ec"))]
+        stem::poll(p, &mut slave, &mut rf);
+        #[cfg(feature = "cros_ec")]
+        {
+            live.set_status(rf.status.status_data(stembus::command::WakeReason::None));
+            ec::poll(p, &mut ec_slave, &mut live);
+        }
         let _ = scanner.as_mut().poll(&mut acx); // advance the Leaf scan (forever task → always Pending)
         // A completed scan deposits its result; publish it into the RegFile — but ONLY while still
         // Sensing (a result that lands after we left Sensing is stale and must not overwrite status).
@@ -286,8 +311,13 @@ fn run_dual(p: &Peripherals) -> ! {
                 }
             }
         }
-        // A SoM write to MODE_CTRL (0x3E) queues a mode switch; begin it here (non-blocking).
-        if let Some(code) = rf.take_mode_request() {
+        // A SoM mode-switch request — regmap `MODE_CTRL` write, or a cros_ec `SetMode` recorded by the
+        // live node — queues a switch; begin it here (non-blocking).
+        #[cfg(not(feature = "cros_ec"))]
+        let mode_req = rf.take_mode_request();
+        #[cfg(feature = "cros_ec")]
+        let mode_req = live.take_mode_request();
+        if let Some(code) = mode_req {
             match mode::Mode::from_code(code) {
                 Some(m) if m != mach.current() => {
                     begin_mode(p, &mut mach, &mut rf, model, &mut last, m);
@@ -343,6 +373,7 @@ fn run_dual(p: &Peripherals) -> ! {
                         uart::puts(p, "  sensor bus released (SoM owns it)\n");
                     }
                 }
+                #[cfg(not(feature = "cros_ec"))]
                 b'l' | b'L' => {
                     if mach.is_sensing() {
                         let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);

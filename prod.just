@@ -39,9 +39,9 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
     # `console` arg: "console" (lean UART log) | "" (silent) | "debug" (verbose: post-POST found-info).
     # The feature name IS the arg value (`debug` implies `console` in Cargo.toml), so it flows into FEATS.
     FEATS="{{family}},$MODES"; [ -n "{{console}}" ] && FEATS="$FEATS,{{console}}"
-    [ -n "{{extra}}" ] && FEATS="$FEATS,{{extra}}"  # extra features, e.g. cros_ec (COMMANDS.md §0 milestone)
+    if [ -n "{{extra}}" ]; then FEATS="$FEATS,{{extra}}"; fi  # extra features, e.g. cros_ec (COMMANDS.md §0)
     feats="--no-default-features --features $FEATS"
-    label="{{family}}$([ -n "{{console}}" ] && echo "+{{console}}" || echo ' silent')$([ -n "{{extra}}" ] && echo "+{{extra}}")"
+    label="{{family}}$([ -n "{{console}}" ] && echo "+{{console}}" || echo ' silent')$([ -n "{{extra}}" ] && echo "+{{extra}}" || echo '')"
     # VARIANT = the family (+ '-silent' when console is off). cargo always writes the same binary name
     # (`prod`) regardless of features, so both families — and console/silent — clobber one path. We copy
     # the built ELF to a variant-unique name `prod-<variant>` so a pinned artifact (hwd.toml image, CI
@@ -55,7 +55,7 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
         console) variant="{{family}}" ;;
         *)       variant="{{family}}-{{console}}" ;;  # e.g. debug → prod-<fam>-debug
     esac
-    [ -n "{{extra}}" ] && variant="$variant-{{extra}}"  # distinct artifact, e.g. prod-fr24xx-cros_ec
+    if [ -n "{{extra}}" ]; then variant="$variant-{{extra}}"; fi  # distinct artifact, e.g. prod-fr24xx-cros_ec
     finish() {  # $1 = cargo profile dir; copies to the variant artifact and gates THAT file
         local prof="$1" built art
         built="prod/target/msp430-none-elf/$prof/prod"

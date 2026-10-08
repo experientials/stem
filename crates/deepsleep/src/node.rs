@@ -57,3 +57,62 @@ impl Operate for StaticNode {
         false
     }
 }
+
+/// A **live** node for the dual families (FR2355/FR2476): identity is static, but `status` is
+/// **refreshed** each loop pass (enumeration/mode change it at runtime), and `set_mode` **records a
+/// request** the node's `run_dual` loop drains and applies through the real mode machine (the switch
+/// does sensor-bus acquire/release, which must not run inside dispatch — same deferral the regmap
+/// `MODE_CTRL` used). `drain_events`/`set_threshold` stay stubbed until a real source/catalog exists.
+pub struct LiveNode {
+    identity: Identity,
+    status: StatusData,
+    crc: [u8; DBG_CRC_BYTES],
+    mode_request: Option<u8>,
+}
+
+impl LiveNode {
+    pub fn new(identity: Identity, status: StatusData, crc: [u8; DBG_CRC_BYTES]) -> Self {
+        Self { identity, status, crc, mode_request: None }
+    }
+    /// Refresh the status served by `Status`/introspection (call each loop pass, or on change).
+    pub fn set_status(&mut self, status: StatusData) {
+        self.status = status;
+    }
+    /// Take any pending SoM-requested mode code (from a `SetMode` command), clearing it. The loop decodes
+    /// it via `mode::Mode::from_code` and applies the switch through the mode machine.
+    pub fn take_mode_request(&mut self) -> Option<u8> {
+        self.mode_request.take()
+    }
+}
+
+impl Node for LiveNode {
+    fn identity(&self) -> Identity {
+        self.identity
+    }
+    fn status(&self) -> StatusData {
+        self.status
+    }
+    fn fram_crc(&self, sector: u8) -> u8 {
+        let i = sector as usize;
+        if i < self.crc.len() {
+            self.crc[i]
+        } else {
+            0
+        }
+    }
+    fn drain_events(&mut self, _out: &mut [Event]) -> (usize, bool) {
+        (0, false)
+    }
+}
+
+impl Operate for LiveNode {
+    /// Record the mode-switch request; report the CURRENT mode (the switch is applied asynchronously by
+    /// the loop, which re-publishes status after acquire/release). Matches the regmap `MODE_CTRL` deferral.
+    fn set_mode(&mut self, mode: Mode) -> u8 {
+        self.mode_request = Some(mode.code());
+        self.status.mode
+    }
+    fn set_threshold(&mut self, _id: u8, _value: u16) -> bool {
+        false
+    }
+}

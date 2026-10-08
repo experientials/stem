@@ -59,10 +59,10 @@ build target *flags:
         rp2040)        kind=cortex ;;
         *) echo "unknown chip '{{target}}' — fr2355|fr2476|fr2433|fr2155|rp2040" >&2; exit 1 ;;
     esac
-    # cros_ec is the FR2433 EC-slave path for now (prod run_fr24xx); reject it elsewhere rather than
-    # silently build a dead-code image (dual run_dual still serves the regmap slave).
-    if [ -n "$crosec" ] && [ "$fam" != fr24xx ]; then
-        echo "--cros-ec is FR2433-only for now (COMMANDS.md §0 milestone); got '{{target}}'" >&2; exit 1
+    # cros_ec is an MSP430 EC-slave path (prod run_fr24xx / run_dual, both gated on the feature). Valid on
+    # any MSP430 family now (FR2433 + dual FR2355/FR2476/FR2155); reject only non-MSP targets (rp2040).
+    if [ -n "$crosec" ] && [ "$kind" != msp ]; then
+        echo "--cros-ec applies to MSP430 families (fr2433|fr2355|fr2476|fr2155), not '{{target}}'" >&2; exit 1
     fi
     if [ "$kind" = msp ]; then
         [ "$cls" = default ] && cls=prod
