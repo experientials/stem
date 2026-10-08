@@ -291,13 +291,15 @@ MSP UART console becomes boot banner + POST + optional status logging only — c
 `r`→`events`, `d`→`ident`+`status`, `m`→`mode`, `l`→`selftest`.
 
 **Phased sequencing (each phase HW-provable on the FR2433+Pico bench):**
-1. **`Node`+`Operate` adapter** in `deepsleep` over real state → wire into `EcSlave`; add standard
-   `GET_VERSION`/`GET_BUILD_INFO`. *Proof:* `ectool version` / a probe `ident` returns the real build id.
-   (Where the `Node` trait earns its keep — identity/status from live state.)
-2. **Vendor command + postcard**: one vendor command id whose payload is a postcard `Command`/`Response`;
-   route it in `EcSlave` → `command::execute`. *Proof:* `status`/`crc`/`mode`/`thresh`/`events` round-trip.
-3. **Rebuild stem-probe's device verbs** on the unified vocabulary (`ident status mode crc thresh events`),
-   replacing `vstem`/`pass`/`sens`; keep the bench-rig set and raw `r`/`w`.
+1. ✅ **DONE (2026-10-08)** — **`Node`+`Operate` adapter** (`deepsleep::node::StaticNode`) +
+   **vendor command + postcard** (phase 2 merged in): `EC_CMD_STEMBUS` payload = postcard `Command`/
+   `Response`, routed in `EcSlave` → `command::execute`. Standard `GET_VERSION`/`GET_BUILD_INFO`
+   **deferred** (Linux-only payoff, premature). *HW-proven:* `ident` (real model 0x8240 / build
+   0x1AE847E2 / ver), `status`, `crc` (8 per-sector CRC16s); postcard fits FR2433 (6494/15360 B).
+2. ✅ merged into 1.
+3. **Rebuild stem-probe's device verbs** on the unified vocabulary — `ident`/`status`/`crc` **DONE**;
+   `mode`/`thresh`/`events` deferred (FR2433 can't act on them — see below). Replacing `vstem`/`pass`/
+   `sens` is **GATED on step 4** (they target the dual supervisor @0x20/0x21, which still runs regmap).
 4. **Retire the MSP `prod` keystroke menu** (A) → read-only logging; functions now reachable as bus
    commands. (Does not touch (B) diag's test menu.)
 5. **Converge diag (B)** onto the same verbs where it overlaps the operator set; keep diag-specific test
