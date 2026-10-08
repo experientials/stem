@@ -13,6 +13,7 @@ use crate::mode::Mode;
 /// `Status` response (`WakeAttribution`): the SoM scans every node and the non-`None` one is the culprit,
 /// *and* says why. Extend per each MCU's real triggers; the numbers are the wire contract, keep them stable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 pub enum WakeReason {
     None = 0,          // this node did not wake the SoM
@@ -48,6 +49,7 @@ impl WakeReason {
 /// The kind of a recorded [`Event`] (COMMANDS.md §5.6) — the `type` field. Trigger events reuse the
 /// `WakeReason` space conceptually; `id` disambiguates *which* trigger/threshold.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 pub enum EventKind {
     Trigger = 0,       // a trigger fired (id = which; see WakeReason-style ids)
@@ -75,6 +77,7 @@ impl EventKind {
 /// One recorded event — a fixed **4 bytes** on the wire: `{ kind, id, flag, seq }` (COMMANDS.md §5.6).
 /// `seq` is a sequence number (NO clock/RTC); ordering is by read-drain, not timestamp.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 pub struct Event {
     pub kind: u8, // EventKind::code()
     pub id: u8,   // which trigger / threshold / mode / fault
@@ -166,6 +169,7 @@ impl<const N: usize> Default for EventRing<N> {
 /// Wire-agnostic: a codec (deferred, §0) turns bytes ↔ `Command`/`Response`; a node's `execute` maps
 /// `Command` → `Response` against its state. v0 = introspection + operation (the `deepsleep` set).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 pub enum Command {
     /// Introspection: identity (iface magic, model, role, build-id, version).
     Identify,
@@ -185,6 +189,7 @@ pub enum Command {
 
 /// Identity payload (the `Identify` response) — COMMANDS.md §5.7.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 pub struct Identity {
     pub iface: u8,     // iface magic (deepsleep: 0xD0)
     pub model: u16,    // silicon model id
@@ -195,6 +200,7 @@ pub struct Identity {
 
 /// Status payload (the `Status` response) — COMMANDS.md §5.7. `wake` is the `WakeAttribution` byte.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 pub struct StatusData {
     pub flags: u8,
     pub fault: u8,
@@ -206,6 +212,7 @@ pub struct StatusData {
 /// The semantic result of [`execute`]. Bulk event data goes to the caller's scratch slice (see
 /// [`execute`]); `Events` carries only the count + overflow flag so `Response` stays small + alloc-free.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 pub enum Response {
     Identity(Identity),
     Status(StatusData),
@@ -283,6 +290,74 @@ pub fn execute<N: Node + Operate>(node: &mut N, cmd: Command, events_out: &mut [
         }
         // introspection already handled by execute_core
         _ => Response::Unsupported,
+    }
+}
+
+/// postcard payload codec for the command vocabulary (COMMANDS.md §0 decision): the bytes carried inside
+/// a cros_ec vendor command (`EC_CMD_BOARD_SPECIFIC_BASE + n`). Gated on the `postcard` feature so
+/// size-sensitive builds (diag) opt out entirely; the FR2433 cros_ec build enables it. The SAME codec
+/// runs on every Rust end (FR2433 EC, Pico/stem-probe master, M7) and backs the future Python wheel, so
+/// no end can drift from another.
+#[cfg(feature = "postcard")]
+pub mod wire {
+    use super::{Command, Response};
+    pub use postcard::Error;
+
+    /// Encode a `Command` into `out` (postcard); returns the byte length written.
+    pub fn encode_command(cmd: &Command, out: &mut [u8]) -> Result<usize, Error> {
+        Ok(postcard::to_slice(cmd, out)?.len())
+    }
+    /// Decode a `Command` from `bytes` (postcard).
+    pub fn decode_command(bytes: &[u8]) -> Result<Command, Error> {
+        postcard::from_bytes(bytes)
+    }
+    /// Encode a `Response` into `out` (postcard); returns the byte length written.
+    pub fn encode_response(resp: &Response, out: &mut [u8]) -> Result<usize, Error> {
+        Ok(postcard::to_slice(resp, out)?.len())
+    }
+    /// Decode a `Response` from `bytes` (postcard).
+    pub fn decode_response(bytes: &[u8]) -> Result<Response, Error> {
+        postcard::from_bytes(bytes)
+    }
+}
+
+#[cfg(all(test, feature = "postcard"))]
+mod wire_tests {
+    use super::*;
+
+    #[test]
+    fn command_round_trips_through_postcard() {
+        let cmds = [
+            Command::Identify,
+            Command::Status,
+            Command::FramCrc { sector: 3 },
+            Command::EventHistory,
+            Command::SetMode { mode: Mode::Sensing },
+            Command::SetThreshold { id: 1, value: 0x1234 },
+        ];
+        for cmd in cmds {
+            let mut buf = [0u8; 32];
+            let n = wire::encode_command(&cmd, &mut buf).unwrap();
+            assert_eq!(wire::decode_command(&buf[..n]).unwrap(), cmd);
+        }
+    }
+
+    #[test]
+    fn response_round_trips_through_postcard() {
+        let resps = [
+            Response::Identity(Identity { iface: 0xD0, model: 0x8240, role: 0x22, build_id: 0xDEAD_BEEF, ver: [0, 1, 0] }),
+            Response::Status(StatusData { flags: 1, fault: 0, dev_count: 0, mode: 0, wake: WakeReason::SoundTrigger }),
+            Response::Crc(0xA5),
+            Response::ModeNow(1),
+            Response::Ack,
+            Response::Unsupported,
+            Response::Events { n: 3, overflowed: true },
+        ];
+        for r in resps {
+            let mut buf = [0u8; 32];
+            let n = wire::encode_response(&r, &mut buf).unwrap();
+            assert_eq!(wire::decode_response(&buf[..n]).unwrap(), r);
+        }
     }
 }
 

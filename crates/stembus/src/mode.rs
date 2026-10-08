@@ -7,6 +7,7 @@ use crate::regmap::{MODE_CODE_PASSIVE, MODE_CODE_SENSING};
 /// The operating mode a `MODE_CTRL` byte encodes. `Unknown` carries the raw code (a mode this reader
 /// doesn't know, or that the node doesn't support).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "postcard", derive(serde::Serialize, serde::Deserialize))]
 pub enum Mode {
     Passive, // SoM owns the buses; the node is an I/O-extender, off the sensor bus
     Sensing, // SoM suspended; the node masters + monitors the sensor bus
