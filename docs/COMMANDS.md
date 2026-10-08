@@ -214,72 +214,98 @@ the kernel. `HELLO` + `GET_PROTOCOL_INFO` are exactly the handshake that binding
   appears) is a **separate, later** validation on the SoM — necessary before claiming "cros_ec works on
   Linux," and not covered by this slice. State it that way; don't overclaim the milestone.
 
-### Replacement plan — retire the PCA9698/regmap command surface (PROPOSED 2026-10-08, for Henrik)
+### Replacement plan — the CONSOLE command vocabulary (PROPOSED 2026-10-08, for Henrik)
 
-Goal: replace **all current command surfaces** with the cros_ec model (standard commands + a vendor
-command carrying postcard `stembus::command`). This is a staged migration, not a rip-out: the regmap
-slave is the **proven, shipping** path, so cros_ec reaches parity and is HW-proven *before* anything is
-retired. Grounded in the actual inventory below (not reconstructed from memory — sources cited).
+**Scope correction (Henrik 2026-10-08):** *"When I say commands, I'm talking about console commands. The
+I/O-Extender commands were never used or planned in any detail."* So this plan is about the **console
+command surfaces** — the typed operator/dev verbs — NOT the PCA9698/regmap register interface. The
+I/O-extender regmap is simply **dropped** (never used/planned in detail), not migrated; the `DBG_*`
+identity/status/CRC/mode window it also carried is the only part that survives, re-expressed as the
+commands below.
 
-**Current command surfaces (what exists today):**
-- **(A) PCA9698/regmap I²C register interface** — `stembus::regmap` + `I2C-API.md`, served by
-  `deepsleep::stem::{Slave,RegFile}`. This is the real SoM↔MCU command channel cros_ec replaces.
-- **(B) MSP430 UART keystroke menu** (console/debug builds) — already declared **throwaway** (COMMANDS.md
-  §1 build-order canonical).
-- **(C) stem-probe (Pico) commands** — `id scan r w lscan lr sniff taps selftest vstem vleaf pass sens
-  sound0/1 por0/1 pins boot hello proto` (the master/bench side). Split: *regmap-driven* vs *bench-rig*.
+**Current console command surfaces (grounded, what exists today):**
+- **(A) MSP430 `prod` UART keystroke menu** (debug builds) — `s`=scan, `r`=report, `d`=debug-regs dump,
+  `m`=switch mode, `l`=loopback self-test (`prod/src/main.rs` ~313). Already declared **throwaway**
+  (COMMANDS.md §1 build-order canonical).
+- **(B) MSP430 `diag` console menu** — the one-feature-at-a-time test driver (`diag/src/tasks.rs` getc).
+  Separate concern (a test harness, not the operator command set).
+- **(C) stem-probe (Pico) CDC console** — the bench/dev operator surface:
+  `id scan r w lscan lr sniff taps selftest vstem vleaf pass sens sound0/1 por0/1 pins boot hello proto`.
 
-**Mapping — each current function → its cros_ec replacement:**
+**Target: ONE console vocabulary that mirrors the WIRE vocabulary.** A Developer / `thepia hwd` types the
+same verbs whether driving a board over the USB console or the command bus, because the console is a thin
+front-end that encodes the unified command (`stembus::command` over cros_ec/postcard, or a cros_ec
+standard command), issues it, and prints the `Response`. This is the "unified vocab, sections" Henrik
+asked for — now realized as: **console verb == wire command**.
 
-| Current (regmap register) | Replacement | Kind |
+**Prune, don't grandfather (Henrik 2026-10-08):** *"you created the UART menus. We used them successfully,
+but you might have added commands that were never used, and never needed. All we know is that the current
+console command set has been of some value."* So the current set is **not a requirements spec** to port
+1:1 — the *set* has proven some value, individual verbs have not. The migration is the moment to **drop
+the speculative ones**.
+
+**Judge each command on implementation size vs usefulness (Henrik 2026-10-08).** The test is cost/benefit,
+not binary "was it used":
+- **cheap + any real use → keep** (a few bytes for an occasional aid is fine);
+- **expensive + marginal → drop** (the clearest gold-plating — big code for rare value);
+- **expensive + essential → keep** (pay for it deliberately);
+- **cheap + useless → drop** (low stakes, but no reason to carry it).
+
+"Expensive" is concrete here: FRAM/RAM bytes (the FR2433 15 KB budget), dispatch complexity, and the
+maintenance surface of one more wire command. So each verb gets weighed, not grandfathered. The mapping
+table marks KEEP / FOLD / **DROP?**; the `DROP?`/`?` marks are my prune candidates — confirm them, and
+I'll measure the size side of any that are borderline before deciding.
+
+**Mapping — each current console command → its replacement:**
+
+Verdicts: **KEEP** (earns its place) · **FOLD** (subsumed by a unified verb) · **DROP?** (prune candidate)
+· **WEIGH** (needs your usage + my size measurement). `?` = my guess, confirm.
+
+| Current console command | New console verb (→ wire command) | Verdict |
 |---|---|---|
-| `DBG_IFACE/MODEL/FW_VER` (0x30–32, 3B–3D) | `Command::Identify`→`Identity` (vendor+postcard) **and** standard `GET_VERSION`/`GET_BUILD_INFO` (sysfs/`ectool` freebie) | introspection |
-| `DBG_STATUS/DEV_COUNT/KNOWN_PRESENT/FAULT` (0x37–3A) | `Command::Status`→`StatusData` (+`WakeReason`) | introspection |
-| `DBG_CRC` (0x3F, windowed) | `Command::FramCrc{sector}` | introspection |
-| `MODE_CTRL` (0x3E) | `Command::SetMode{mode}` + mode in `Status` | operation |
-| `VSOM_THRESHOLD` (0x2E) | `Command::SetThreshold{id,value}` | operation |
-| *(new — no regmap equiv)* | `Command::EventHistory` (the §5.6 event ring) | introspection |
-| `VSOM_VOLTAGE/CHARGE_VOLTAGE` (0x2C/2D) | a future `ReadVoltage{rail}` — **DEFER** (no named caller, §5) | deferred |
-| `INIT_CODE` (0x2B), `BAUD_RATE` (0x2F) | **DEFER** (no caller) | deferred |
-| PCA9698 GPIO banks `IP/OP/PI/IOC/MSK/OUTCONF/ALLBNK/MODE` (0x00–2A) | **DECISION (see below)**: retire, or re-expose via a standard cros_ec GPIO sub-driver / the optional PCA9698 gpiochip adapter (Phase 4) | decision |
+| MSP `d` (debug regs) · stem-probe `vstem` | `ident` (`Identify`) + `status` (`Status`) | FOLD |
+| MSP `m` · stem-probe `pass`/`sens` | `mode [passive\|sensing]` (`SetMode`) | FOLD |
+| MSP `s` (scan) + `r` (report) | `status` (dev_count/known) + `events` (`EventHistory`) | FOLD |
+| MSP `l` · stem-probe `selftest` | `selftest` | WEIGH (dev-only; how often actually run?) |
+| stem-probe `hello` / `proto` | `hello` / `proto` (cros_ec standard) | KEEP — done (HW-proven) |
+| *(new)* `crc` / `thresh` | `crc [sector]` (`FramCrc`) · `thresh <id> <val>` (`SetThreshold`) | KEEP (cheap, real callers) |
+| stem-probe `r` / `w` (raw bus poke) | raw cros_ec request-builder (regmap being dropped) | WEIGH / D1 |
+| stem-probe `scan` · `boot` · `id` | kept bench-rig (Pico's own USB/bus) | KEEP (cheap, clearly used) |
+| stem-probe `sniff` | — | WEIGH (sniffer may be sizeable; how often used?) |
+| stem-probe `taps` · `pins` · `sound0/1` · `por0/1` | kept bench-rig (drive/read the Pico's sideband pins) | WEIGH (which of these do you actually use?) |
+| stem-probe `lscan` / `lr` / `vleaf` (Leaf bus) | — | DROP? (Leaf inactive / nice-to-have) |
 
-**stem-probe (C) commands:**
-- *regmap-driven* → rebuild on cros_ec: `vstem`→`ident`+`status`, `pass/sens`→`mode`, generic `r/w`→keep
-  as a raw-I²C debug aid (not everything should be a typed command). `hello`/`proto` already done.
-- *bench-rig* → **keep as-is** (they drive the Pico's OWN pins/USB, not the MCU command channel):
-  `scan sniff taps sound0/1 por0/1 pins boot id`. `lscan/lr/vleaf` = Leaf bus (separate, nice-to-have).
+**The MSP console goes read-only.** The MSP430 is a *slave*; operator commands now arrive over the bus
+(cros_ec) from the master (SoM / Pico / hwd), so the interactive keystroke menu (A) is **retired**. The
+MSP UART console becomes boot banner + POST + optional status logging only — consistent with the canonical
+"the UART keystroke menu is throwaway." Its five functions become bus commands: `s`→`status`/rescan,
+`r`→`events`, `d`→`ident`+`status`, `m`→`mode`, `l`→`selftest`.
 
-**Phased sequencing (each phase independently provable on the FR2433+Pico bench):**
-1. **`Node`+`Operate` adapter** in `deepsleep` over real state → wire into `EcSlave` dispatch; add
-   standard `GET_VERSION`/`GET_BUILD_INFO`. *Proof:* `ectool version` / a probe `ident` returns the real
-   build id. (This is where the `Node` trait finally earns its keep — identity/status from live state.)
-2. **Vendor command + postcard**: define one vendor command id whose payload is a postcard-encoded
-   `Command`/`Response`; route it in `EcSlave` → `command::execute`. *Proof:* `status`/`crc`/`mode`/
-   `thresh`/`events` round-trips on HW via new stem-probe commands.
-3. **Migrate stem-probe** regmap commands (C) onto the cros_ec equivalents; keep the bench-rig set.
-4. **Flip the default**: run the `EcSlave` on the **dual** families (FR2355/FR2476, UCB1) too, not just
-   FR2433 behind a feature — cros_ec becomes the built-in slave. Retire `deepsleep::stem::Slave` as the
-   primary; keep the PCA9698 regmap only as the optional gpiochip adapter *if* decided (below).
-5. **Retire (B)** the UART keystroke menu; if a UART command path is needed, it's postcard-in-COBS
-   (COMMANDS.md §0), not the menu.
-6. **Real Linux `cros_ec` binding** on the SoM (DT node + kconfig) — the deferred kernel proof; `HELLO`
-   + `GET_PROTOCOL_INFO` (done) are its handshake.
-
-**Dependencies / risk:** `diag` brings up the **same** `stem::Slave` (DEEPSLEEP-EXTRACTION.md Phase 3),
-so retiring the regmap slave is a `prod`+`diag` migration — stage it after cros_ec reaches parity. The
-regmap path ships today; do not delete it until step 4 is HW-proven at parity on every family.
+**Phased sequencing (each phase HW-provable on the FR2433+Pico bench):**
+1. **`Node`+`Operate` adapter** in `deepsleep` over real state → wire into `EcSlave`; add standard
+   `GET_VERSION`/`GET_BUILD_INFO`. *Proof:* `ectool version` / a probe `ident` returns the real build id.
+   (Where the `Node` trait earns its keep — identity/status from live state.)
+2. **Vendor command + postcard**: one vendor command id whose payload is a postcard `Command`/`Response`;
+   route it in `EcSlave` → `command::execute`. *Proof:* `status`/`crc`/`mode`/`thresh`/`events` round-trip.
+3. **Rebuild stem-probe's device verbs** on the unified vocabulary (`ident status mode crc thresh events`),
+   replacing `vstem`/`pass`/`sens`; keep the bench-rig set and raw `r`/`w`.
+4. **Retire the MSP `prod` keystroke menu** (A) → read-only logging; functions now reachable as bus
+   commands. (Does not touch (B) diag's test menu.)
+5. **Converge diag (B)** onto the same verbs where it overlaps the operator set; keep diag-specific test
+   commands as their own section.
+6. **Real Linux `cros_ec` binding** on the SoM (DT + kconfig) — the deferred kernel proof; `HELLO` +
+   `GET_PROTOCOL_INFO` (done) are its handshake. At that point `ectool` is itself a console onto the node.
 
 **Decisions I need from you (not assumed):**
-- **(D1) GPIO expander fate.** The PCA9698 banks (0x00–0x2A) are a whole I/O-expander API — is that role
-  still wanted? Options: (a) retire it (no current consumer); (b) re-expose as a **standard cros_ec GPIO
-  sub-driver** so Linux gets a `gpiochip` for free; (c) keep the PCA9698-emulation gpiochip adapter as the
-  optional Phase-4 path. Default lean: **(a) retire until a real GPIO consumer appears**, since FR2433's
-  "I/O-expander role" is a placeholder (I2C-API.md).
-- **(D2) Identity via standard vs vendor.** Use standard `GET_VERSION`/`GET_BUILD_INFO` (ectool/sysfs
-  freebie) *in addition to* the vendor `Identify`, or only the vendor one? Lean: **both** (the standard
-  ones are nearly free and buy tooling interop).
-- **(D3) Default-flip scope.** Flip all families to cros_ec (step 4), or keep dual on regmap until the SoM
-  actually masters them via cros_ec? Lean: **flip**, once parity is proven, so there's one slave path.
+- **(D1) Keep raw `r`/`w` on the console?** A raw bus read/write is a useful debug aid even once typed
+  verbs exist. Lean: **keep** (label it a low-level escape hatch), but it pokes the regmap which is being
+  dropped — so it'd become a raw cros_ec request-builder instead. Confirm you want a raw escape hatch at all.
+- **(D2) MSP console: read-only, or a tiny local verb set?** Lean: **read-only logging** (commands come
+  over the bus); but a handful of *local* dev verbs (dump status without a master) could stay under
+  `debug`. Confirm whether the MSP console keeps ANY interactive input.
+- **(D3) diag menu (B): converge or leave standalone?** diag is a test harness with its own
+  one-feature-test verbs. Lean: **leave it standalone**, adopting the shared verbs only where they already
+  overlap (status/ident), not forcing a rewrite.
 
 **Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
 firmware-patch streaming, per-module execute), but the *wire protocol* is now the cros_ec-framing +
