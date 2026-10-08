@@ -167,11 +167,24 @@ This **resolves open decisions #1 and #4** above. The split:
 product-specific = vendor command with a postcard payload · COBS-framed postcard over UART · Python client
 = PyO3 wheel over `stembus`. Open decision #2 (FR2433 fit) and #3 (bus mastership) remain open.
 
-### First milestone — thinnest cros_ec slice over I²C on FR2433 + Pico (CANONICAL — verbatim, Henrik 2026-10-07)
+### First milestone — thinnest cros_ec slice over I²C on FR2433 + Pico ✅ ACHIEVED 2026-10-08 (CANONICAL — verbatim, Henrik 2026-10-07)
 > One milestone I would like to reach i to have the thinnest slice of cros_ec API supported over I2C on
 > FR2433 and Pico
 >
 > I would also want stem-probe codebase to use crates whenever possible
+
+**ACHIEVED on hardware (2026-10-08)** — `@fr2433` (cros_ec EC-slave firmware) ↔ Pico (`stem-probe` master),
+both calling the shared `stembus::cros_ec` codec:
+```
+cros_ec HELLO @0x22              in=A5A51234 out=A6A71538  PASS   (out == in + 0x01020304)
+cros_ec GET_PROTOCOL_INFO @0x22  versions=0x00000008 max_req=40 max_resp=40  PASS (v3)
+```
+`EcSlave` framer (pure, host-tested 23/23) + `deepsleep::ec` glue + prod `--features cros_ec`
+(`just build fr2433 --cros-ec`; image 4244/15360 B FRAM). The HELLO PASS also proves the board is
+*running* the cros_ec build (regmap firmware at 0x22 cannot produce a valid cros_ec reply) and that it
+wakes from LPM on the eUSCI_B0 slave ISR. **Still deferred** (the honest limit): a *real Linux `cros_ec`
+driver* binding on the SoM (DT node + kconfig) — the Pico proves our framing against our own master, not
+the kernel. `HELLO` + `GET_PROTOCOL_INFO` are exactly the handshake that binding performs, so it's unblocked.
 
 **Derivation (subordinate to the verbatim block).** First end-to-end cros_ec target, chosen to prove the
 *protocol skeleton* on real hardware at minimum cost — **before** any SoM/Yocto/Linux-driver involvement:

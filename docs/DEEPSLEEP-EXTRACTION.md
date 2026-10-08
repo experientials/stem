@@ -320,8 +320,15 @@ Cargo's crate-scoping dictates one answer:
     boots → LPM (no reset-loop) → the master wakes the async sleeper, `scan`→`0x21 0x22`, 2× `r 0x22`
     bit-stable (model `0x8240`, build `0x51EC29D9` == boot stamp). Functionally identical to 1b, now in the
     one async model the dual reshape reuses. This satisfies **ADR-0013 follow-up #5** for `deepsleep`.
-- **Phase 2 — command surface.** One `Command` enum + `execute`; Stem-regmap face + UART face. Keep the
-  PCA9698 region layout reserved (§2).
+- **Phase 2 — command surface.** IN PROGRESS. The pivot (COMMANDS.md §0) replaced the "Stem-regmap +
+  UART face" plan with **cros_ec v3 framing + postcard payloads**. Landed so far:
+  - `stembus::command` — the wire-agnostic vocabulary + the narrowed `Node`(introspection)/`Operate`
+    seam + `execute_core`/`execute` (host-tested).
+  - `stembus::cros_ec` — the v3 I²C framing codec + `EcSlave` framer + standard commands `HELLO` /
+    `GET_PROTOCOL_INFO`; `deepsleep::ec` glue; prod `--features cros_ec`.
+  - ✅ **HELLO + GET_PROTOCOL_INFO HW-proven on FR2433 ↔ Pico (2026-10-08)** — the COMMANDS.md §0 first
+    milestone. Next: the `Node` adapter (`GET_VERSION`/`GET_BUILD_INFO` = identity) + vendor+postcard for
+    our own `Command` data, then retire the regmap/PCA9698 command surface (see the replacement plan).
 - **Phase 3 — diag consumes `deepsleep` + same-boot.** diag brings up the slave identically; ~1 s grace
   window (master commands mode before POST auto-runs); converge diag's `diag.rs` scanner onto
   `deepsleep`'s enumerate. **Size-watch:** diag ~72 % of 32 KB today (~9 KB free); `deepsleep` ~5 KB.
