@@ -267,22 +267,25 @@ wire-command side** (each new cros_ec/postcard command the FR2433 EC-slave must 
 
 **Mapping — each current console command → its replacement:**
 
-Verdicts: **KEEP** (earns its place) · **FOLD** (subsumed by a unified verb) · **DROP?** (prune candidate)
-· **WEIGH** (needs your usage + my size measurement). `?` = my guess, confirm.
+Verdicts: **KEEP** (earns its place) · **FOLD** (subsumed by a unified verb).
+**Prune settled (Henrik 2026-10-08): keep all — no drops.** Corrected premises: Leaf verbs aren't dead
+(they're meaningful where **deepsleep masters Leaf**; FR2433 simply has no Leaf), `sniff` is very useful
+on any dual-I²C, and `selftest` is near-zero-cost (required on diag; runs in POST, reduced form OK). So
+the current console set is retained; the work is FOLDING the regmap verbs into unified ones, not dropping.
 
 | Current console command | New console verb (→ wire command) | Verdict |
 |---|---|---|
 | MSP `d` (debug regs) · stem-probe `vstem` | `ident` (`Identify`) + `status` (`Status`) | FOLD |
 | MSP `m` · stem-probe `pass`/`sens` | `mode [passive\|sensing]` (`SetMode`) | FOLD |
 | MSP `s` (scan) + `r` (report) | `status` (dev_count/known) + `events` (`EventHistory`) | FOLD |
-| MSP `l` · stem-probe `selftest` | `selftest` | WEIGH (dev-only; how often actually run?) |
+| MSP `l` · stem-probe `selftest` | `selftest` | KEEP (Henrik: required on diag; runs in POST, reduced form OK → near-zero cost) |
 | stem-probe `hello` / `proto` | `hello` / `proto` (cros_ec standard) | KEEP — done (HW-proven) |
 | *(new)* `crc` / `thresh` | `crc [sector]` (`FramCrc`) · `thresh <id> <val>` (`SetThreshold`) | KEEP (cheap, real callers) |
 | stem-probe `r` / `w` (raw bus poke) | raw cros_ec request-builder (regmap being dropped) | WEIGH / D1 |
 | stem-probe `scan` · `boot` · `id` | kept bench-rig (Pico's own USB/bus) | KEEP (cheap, clearly used) |
-| stem-probe `sniff` | — | WEIGH (sniffer may be sizeable; how often used?) |
-| stem-probe `taps` · `pins` · `sound0/1` · `por0/1` | kept bench-rig (drive/read the Pico's sideband pins) | WEIGH (which of these do you actually use?) |
-| stem-probe `lscan` / `lr` / `vleaf` (Leaf bus) | — | DROP? (Leaf inactive / nice-to-have) |
+| stem-probe `sniff` | — | KEEP (Henrik: very useful on any dual-I²C) |
+| stem-probe `taps` · `pins` · `sound0/1` · `por0/1` | kept bench-rig (drive/read the Pico's sideband pins) | KEEP |
+| stem-probe `lscan` / `lr` / `vleaf` (Leaf bus) | — | KEEP — meaningful where **deepsleep masters Leaf** (dual); FR2433 just has no Leaf |
 
 **The MSP console goes read-only.** The MSP430 is a *slave*; operator commands now arrive over the bus
 (cros_ec) from the master (SoM / Pico / hwd), so the interactive keystroke menu (A) is **retired**. The
@@ -297,9 +300,17 @@ MSP UART console becomes boot banner + POST + optional status logging only — c
    **deferred** (Linux-only payoff, premature). *HW-proven:* `ident` (real model 0x8240 / build
    0x1AE847E2 / ver), `status`, `crc` (8 per-sector CRC16s); postcard fits FR2433 (6494/15360 B).
 2. ✅ merged into 1.
-3. **Rebuild stem-probe's device verbs** on the unified vocabulary — `ident`/`status`/`crc` **DONE**;
-   `mode`/`thresh`/`events` deferred (FR2433 can't act on them — see below). Replacing `vstem`/`pass`/
-   `sens` is **GATED on step 4** (they target the dual supervisor @0x20/0x21, which still runs regmap).
+3. **Rebuild stem-probe's device verbs** on the unified vocabulary — `ident`/`status`/`crc`/`mode` **DONE**
+   (`mode` token-matched to avoid the `sens`/`pass` collision; addr arg targets any node). `thresh`/`events`
+   deferred (no threshold catalog / event source yet).
+4. ✅ **DONE (2026-10-08)** — **Flip the dual families to cros_ec** (gated `cros_ec` feature; default dual
+   stays regmap). `run_dual` swaps the regmap slave for `EcSlave` + `deepsleep::node::LiveNode` (status
+   refreshed each pass; `SetMode` records a request the loop applies via the real mode machine). *HW-proven
+   on @fr2476 @0x21:* `ident` → model 0x832A; `mode sensing`→`status` mode=0x01 devs=1 (mode machine
+   acquired Leaf + enumerated), `mode passive`→ mode=0x00. Dual image 7654/32768 B. **Still open:** remove
+   the gate (make cros_ec the default for all families) once the regmap path's remaining consumers are
+   migrated; migrate stem-probe's `vstem`/`pass`/`sens` (now that the dual answers cros_ec) or just drop
+   them in favor of `ident`/`status`/`mode`.
 4. **Retire the MSP `prod` keystroke menu** (A) → read-only logging; functions now reachable as bus
    commands. (Does not touch (B) diag's test menu.)
 5. **Converge diag (B)** onto the same verbs where it overlaps the operator set; keep diag-specific test
