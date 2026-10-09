@@ -46,11 +46,14 @@ default:
 build target *flags:
     #!/usr/bin/env bash
     set -euo pipefail
-    cls=default; crosec=""; fam=""
+    # cros_ec is now the DEFAULT command interface (COMMANDS.md §0 — regmap register-poke is being retired).
+    # `--regmap` is a TRANSITION escape hatch to build the old regmap slave until that path is deleted (Rb).
+    cls=default; crosec=cros_ec; fam=""
     for f in {{flags}}; do case "${f#--}" in
         diag) cls=diag;; debug) cls=debug;; prod) cls=prod;;
-        cros-ec|cros_ec) crosec=cros_ec;;  # cros_ec v3 EC-slave framing (COMMANDS.md §0 HELLO milestone)
-        *) echo "unknown flag '$f' — use --diag | --debug | --cros-ec" >&2; exit 1;; esac; done
+        cros-ec|cros_ec) crosec=cros_ec;;  # explicit (now the default); kept for compatibility
+        regmap) crosec="";;                # TRANSITION-ONLY: build the legacy regmap slave (to be removed)
+        *) echo "unknown flag '$f' — use --diag | --debug | --regmap(transition)" >&2; exit 1;; esac; done
     case "{{target}}" in
         fr2355|fr235x) fam=fr235x; diagt=fr2355; kind=msp ;;
         fr2476|fr247x) fam=fr247x; diagt=fr2476; kind=msp ;;
@@ -68,7 +71,7 @@ build target *flags:
         [ "$cls" = default ] && cls=prod
         case "$cls" in
             prod)  just prod build "$fam" auto console "" "$crosec" ;;
-            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; [ -z "$crosec" ] || { echo "--cros-ec applies to prod, not diag" >&2; exit 1; }; just diag build "$diagt" ;;
+            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;  # diag ignores crosec for now (converges onto the unified vocabulary in Rd)
             debug) just prod build "$fam" auto debug "" "$crosec" ;;  # prod + `debug` feature (post-POST "what was found")
         esac
     else  # cortex (rp2040): its only firmware is the debug bench host

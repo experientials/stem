@@ -287,11 +287,68 @@ the current console set is retained; the work is FOLDING the regmap verbs into u
 | stem-probe `taps` · `pins` · `sound0/1` · `por0/1` | kept bench-rig (drive/read the Pico's sideband pins) | KEEP |
 | stem-probe `lscan` / `lr` / `vleaf` (Leaf bus) | — | KEEP — meaningful where **deepsleep masters Leaf** (dual); FR2433 just has no Leaf |
 
-**The MSP console goes read-only.** The MSP430 is a *slave*; operator commands now arrive over the bus
-(cros_ec) from the master (SoM / Pico / hwd), so the interactive keystroke menu (A) is **retired**. The
-MSP UART console becomes boot banner + POST + optional status logging only — consistent with the canonical
-"the UART keystroke menu is throwaway." Its five functions become bus commands: `s`→`status`/rescan,
-`r`→`events`, `d`→`ident`+`status`, `m`→`mode`, `l`→`selftest`.
+**REVISED (Henrik 2026-10-09) — command INTERFACE reorganization, NO functionality removed; transport
+exposure is PER-VARIANT (diag vs prod).**
+> *"I expect you to not remove functionality, just replace the command interface. Both UART/console and
+> I2C interfaces will be implemented."*
+> *"At the very least we have commands with --diag. In prod, it can be console readonly with I2C command
+> interface."*
+
+So the regmap→cros_ec work removes NO capability — it swaps the interface and the command VOCABULARY is
+shared; which TRANSPORT exposes it is per diag/prod variant:
+- **One command vocabulary** (`stembus::command` + `execute_core`), transport-agnostic.
+- **I2C command interface** (cros_ec framing, `EcSlave` → `execute`): present in **prod AND diag**.
+- **UART/console command interface** (parser → the SAME `execute`): **diag has it** (the test-harness verbs
+  — "at the very least we have commands with --diag"). **prod MAY be console read-only** (banner + POST +
+  logging) with its commands arriving over **I2C** — read-only prod console is acceptable, not required.
+- So the ORIGINAL "console goes read-only" plan is **correct for prod**, **wrong for diag** (diag keeps the
+  console command interface). No command is dropped — every function is reachable over I2C always, and over
+  the console in diag (optionally in prod under `debug`).
+- **No capability is dropped** — every function the regmap register surface provided is **recreated** as a
+  cros_ec command reachable over both transports. What goes away is only the *regmap register-poke WAY*
+  (PCA9698 pointer + `r`/`w` on a 0x30–0x3F window), not any function.
+- **RESOLVED — GPIO is PER-ROLE, not one generic surface (Henrik 2026-10-09):**
+  > *"When we talk about GPIO-expander, I see it being a particular MCU role. We have deepsleep and
+  > expander. While deepsleep will have GPIO pins that can be toggled, they will have a known role, not a
+  > generic pin ID. The expander could simply be like an expander with pin IDs, since I don't yet know the
+  > exact purpose it will have in our product line. I just know that FR2433 would work well as a
+  > programmable I/O expander."*
+
+  So the generic pin-ID GPIO is an **EXPANDER-role capability (FR2433)**, NOT a deepsleep capability:
+  - **expander (FR2433):** a generic programmable I/O expander — cros_ec command addressing pins by
+    **generic pin ID** (read/write/direction), mirroring what the regmap banks did. Keep it **minimal**:
+    the exact product purpose is TBD, so recreate the generic read/write/config and **defer** the richer
+    semantic/topic-mapping layer (STEM-DIRECTION §"Expanders & semantic pin identity" — uid/topic/topic-pin)
+    until a purpose lands. This is its own role/capability → belongs in the future `expander` module/crate
+    (modules/msp-expander), distinct from `deepsleep`.
+  - **deepsleep (supervisor):** its GPIO pins have a **KNOWN ROLE, addressed semantically (by role), NOT a
+    generic pin ID** → a *different, future* command shape (toggle-pin-by-role), not the generic bank. The
+    regmap GPIO banks on the dual/deepsleep side were shadow (no real pins) → **simply deleted** in Rb, not
+    recreated.
+  - **Net (REVISED, Henrik 2026-10-09):**
+    - *"So far the expander and passive firmware designs have been CONCEPTUAL and not served any role."* →
+      the regmap GPIO banks are **not real functionality to preserve** — conceptual scaffolding, safe to
+      **drop** (reconciles with "dropped, never used"). "Do not remove functionality" governs the **real**
+      functions = deepsleep's `ident`/`status`/`mode`/`crc`, which are already recreated in cros_ec. The
+      generic-pin expander command is **future design**, built when the `expander` module gets a real
+      product role (purpose TBD). `deepsleep` = dual SUPERVISOR (FR2476/FR2355/FR2155, real/HW-proven);
+      `expander` = FR2433 (conceptual placeholder).
+    - *"We will not refactor the current codebase with this distinction, but we will reorganise according
+      to this modules structure."* → the **deepsleep/expander DISTINCTION** (role split, per-role GPIO, the
+      `expander` module) happens in the **`modules/` REORG**, not as in-place surgery.
+    - *"Plus as soon as we have parity we drop regmap fully."* + *"the reorg can just leave it out"* +
+      *"I don't care. If we have parity I'm happy however we proceed."* → **parity is the only gate, and it
+      is met.** Mechanism is open and doesn't matter: the simplest is to **drop regmap by OMISSION in the
+      `modules/` reorg** — carry only the cros_ec path forward; the regmap slave/debug-window/PCA9698 banks
+      (conceptual) simply aren't brought across. No separate surgical in-place deletion is required. Current
+      codebase stands at Ra (cros_ec default; regmap reachable behind `--regmap` until the reorg leaves it
+      out). The per-variant console + expander GPIO + terse verbs + `--dark` are also reorg/future work.
+    [[role-based-stem-addressing]] [[talki-pins-use-pinmux-skill]]
+
+(Below was the SUPERSEDED plan — kept for history:) ~~The MSP console goes read-only.~~ The MSP430 is a
+*slave*; operator commands also arrive over the bus (cros_ec) from the master (SoM / Pico / hwd). Its five
+menu functions map to unified commands: `s`→`status`/rescan, `r`→`events`, `d`→`ident`+`status`,
+`m`→`mode`, `l`→`selftest` — but reachable over BOTH the console AND I2C, not bus-only.
 
 **Phased sequencing (each phase HW-provable on the FR2433+Pico bench):**
 1. ✅ **DONE (2026-10-08)** — **`Node`+`Operate` adapter** (`deepsleep::node::StaticNode`) +
@@ -328,6 +385,52 @@ MSP UART console becomes boot banner + POST + optional status logging only — c
 - **(D3) diag menu (B): converge or leave standalone?** diag is a test harness with its own
   one-feature-test verbs. Lean: **leave it standalone**, adopting the shared verbs only where they already
   overlap (status/ident), not forcing a rewrite.
+
+### Command discovery: `--dark` vs discoverable builds + terse verbs (PLAN · Henrik 2026-10-09)
+
+**Verbatim (Henrik 2026-10-09):**
+> *"We should also record a plan for having a `--dark` vs `--help` flag for the build. The question is
+> whether you can discover commands by poking the MCU. While developing, testing, debugging the discovery
+> is very helpful. In a production product we would want to be able to build a prod build that is dark to
+> discovery. It would provide a build+device ID that allows looking up the exact interfaces available using
+> MCP or developer documentation."*
+> *"I would also think that console commands can be single/double letter, as they will mostly be used by
+> hackers/ai-agents."*
+
+**Derived plan (not verbatim):**
+- **A build-time DISCOVERY axis, orthogonal to diag/prod and to the chip axis:**
+  - **discoverable build (dev — `--help`/default-for-dev):** the device can **enumerate its own command
+    interface** when poked over the bus/console — on-device introspection (the `stembus::command` **`Node`
+    introspection** surface + a cros_ec "list commands / versions" query). Invaluable for dev/test/debug
+    and for an AI agent exploring an unknown node.
+  - **DEFAULT = discoverable; `--dark` is OPT-IN (Henrik 2026-10-09):** *"we don't want to build dark by
+    default at this time"* — during the dev/test/debug phase discovery stays on everywhere. The flag
+    **SETS dark** (adds the restriction), it does not clear a dark default. (Polarity may flip to
+    dark-by-default for *shipping* products later; not now.)
+  - **dark build (prod — opt-in `--dark`):** on-device command **introspection is COMPILED OUT**. The node exposes
+    only a **build ID + device ID** (already have both: `ident` → model + build-id). The actual interface is
+    looked up **out-of-band** — an **MCP server / developer-docs catalog keyed by (build ID, device ID)**
+    returns the exact command set that build supports. Build-time (not a runtime toggle) so the introspection
+    is genuinely absent (smaller image; can't be re-enabled by an attacker) — fits the FR2433 size budget too.
+- **Terse console verbs (1–2 chars):** the UART/console command binding uses **single/double-letter tokens**
+  (optimized for hackers + AI-agents, not human mnemonics). Consistent with dark+catalog: on-device names
+  need not be self-descriptive because discovery is external. (The cros_ec I2C side is numeric `EC_CMD_*`
+  already; this is purely the text binding's verb names.)
+- **Maps onto existing pieces:** the discovery surface to gate = the `Node` introspection trait (narrowed
+  per [[purity-seam-trait]]); the (build,device) ID already ships in `ident`; an MCP catalog server is the
+  new external piece (an AI agent queries it with a device's ident to learn the verbs — ties the dark device
+  to AI-agent tooling).
+
+**My critical notes (quality-bar — flagging, not rubber-stamping):**
+- **"Dark to discovery" is obscurity of the INTERFACE LIST, not access control.** A dark node's commands
+  still execute if a caller knows them (from the catalog). That's a legitimate product hardening (don't
+  self-advertise the attack surface; save code) but it is NOT authentication — real command access control
+  (auth/signing on sensitive commands) is a SEPARATE concern to track, not satisfied by `--dark`.
+- **Naming (polarity DECIDED, exact token TBD):** default discoverable + opt-in `--dark` (above). `--help`
+  as a *build* flag reads oddly (help feels runtime); the axis is *discoverable* vs *dark*. Exact token and
+  whether it folds into the diag(discoverable)/prod(dark-capable) split rather than a standalone flag — TBD.
+- **Deferred / not now** — recorded so it isn't lost; sequence it after the regmap→cros_ec reorg (Ra–Rd)
+  lands, since it builds on the finished `Node`/`ident` surface.
 
 **Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
 firmware-patch streaming, per-module execute), but the *wire protocol* is now the cros_ec-framing +

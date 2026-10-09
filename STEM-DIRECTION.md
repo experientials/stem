@@ -102,6 +102,63 @@ consequence: the host's capability set (`host-core`) should mirror the **M7's in
 API**, so the same test harness can target the RP2040 (bench/CI) or the real M7 (on a UCM). See the
 design doc [docs/RP2040-BENCH-HOST.md](docs/RP2040-BENCH-HOST.md).
 
+### Pico as a product MCU + in-system probe (verbatim · Henrik 2026-10-07)
+
+**Standing context (Henrik 2026-10-07): the Pico (RP2040/RP2350) has been a possible MCU on all
+products so far — just not sufficiently spelled out.** So the point below is NOT specific to one named
+module: it is a property of *the Pico wherever it lands in a product*. `lowvision` is a **recent name**
+Henrik introduced (likely the **"Inner vision" RP2350 role** in the role table above — confirm the
+relationship), and it is the current concrete example, not the sole vehicle.
+
+**What `lowvision` is (role meaning, Henrik 2026-10-07):** a **(super-low-res) IR camera** — in the
+**mouth of Talki**, or hidden elsewhere — that **runs while the device sleeps** to provide **monitoring
+beyond the Bosch IR-range sensor**. So it is a **richer sensing tier above the always-on range sensor**:
+the sleep-supervisor/Detector (FR2355) watches at µA with cheap presence/range sensors (incl. the
+IR-range ToF sensor), and `lowvision` adds low-res IR *vision* that can also run during sleep — monitoring
+the range sensor alone can't do. (This is the "super-low-res IR ML vision" of the role table's **"Inner
+vision" RP2350** entry — confirm whether `lowvision` renames that whole role or just its vision half.)
+
+**Optional observer, not base (Henrik 2026-10-07):** lowvision is *"an optional observer on some products,
+not a required base functionality."* It is therefore **not bound by the µA sleep budget** that governs the
+required base (the FR2355 Detector watching for weeks in a drawer): an IR camera + ML running during sleep
+costs mA–tens-of-mA, and that cost is accepted by the products that *choose* to include it — not forced on
+every product. Architecturally this = a **feature-gated / per-product build axis** (LTO-strippable, opt-in),
+the same opt-in model as the `devices` drivers and the probe/programmer capability. Any
+escalation-vs-duty-cycle power strategy for *when* the observer runs is a **per-product concern**, not a
+base-architecture decision.
+
+> **Range sensor = the VL53L0X** ([crates/devices/src/vl53l0x.rs](crates/devices/src/vl53l0x.rs), Henrik
+> pointed here 2026-10-07). NOTE/CORRECTION: Henrik called it "the Bosch IR-range sensor", but the
+> VL53L0X is an **STMicroelectronics** ToF IR ranging part (I²C 0x29, MODEL_ID 0xEE) — vendor to confirm
+> (ToF ranging is not a Bosch Sensortec line; likely a label mix-up). Also currently **identity-only** in
+> the devices crate — ranging is a tracked TODO (needs ST's init sequence, not in `datasheets/`).
+
+This is the concrete realization of the "dev/debug module that can be slotted into products for deep
+tests" + "prod base that can grow into something used in the products" above — the slotted-debug-module
+is not a separate SKU, it rides a Pico that is already in the product:
+
+> lowvision runs on a Pico and is connected to the Stem bus. It has an USB connection, so it would be
+> possible to expose it on T-USB for Bob 929. It should have space in flash for additional
+> diag/programming/JTAG-access to MCUs and the SoM. That is essentially a stem-probe extension on top of
+> the prod firmware
+
+**Implications (derived, for planning — confirm):**
+- A **Pico in a product** is a Stem-bus node (RP2350 product node, COMMANDS.md §5.3) running its
+  product role (e.g. vision/sensing + history), AND can carry the host/probe capability (`stem-probe`)
+  layered on **as a feature on top of its prod firmware** — same "prod base; dev/inspection as a build
+  axis on top" stack as the MSP430 nodes.
+- Because the Pico has **USB**, that probe surface is reachable in-product over **T-USB on Bob 929** —
+  the bench `stem-probe` console/command path becomes a product-time deep-inspection + programming path.
+- "diag/programming/JTAG-access to MCUs and the SoM" = the Pico additionally acts as an **in-system
+  programmer/debug probe** for its peers: SBW/BSL to the MSP430 nodes (cf. `msp-fw-ota-host-root-of-trust`
+  — this makes the Pico a second host root-of-trust alongside the M7) and JTAG/SWD to the SoM. This is
+  **new** capability not in today's stem-probe (bus inspect only); needs flash headroom budgeted on the
+  Pico, and the SBW/JTAG lines physically routed to it (not just Stem I²C).
+- This resolves the "enabled in prod" question for the shared host/probe layer: the probe logic belongs
+  in **shared crates** consumed by (a) the bench `stem-probe` binary and (b) any **Pico product firmware**
+  — so the in-product probe and the bench probe are one implementation. See the host/probe shared-layer
+  proposal (pending ADR).
+
 ### Structural direction across MCUs (verbatim · Henrik 2026-09-30)
 
 > 1. *"special debug firmware makes sense in a special location. prod crates do not"*
@@ -324,6 +381,68 @@ code**, not a parallel reimplementation, so the maximum prod surface is under te
 - **Size:** the FR2433 15 KB gate applies to the **prod binary**; diag (32 KB budget) carries prod-core
   + test harness and is expected to be larger — no conflict.
 
+### MSP430 is not special; prod/diag/bench are chip-neutral (verbatim · Henrik 2026-10-07)
+
+Sharpens the "orthogonal to the chip axis" line above — the top-level trees are **roles/variants**, not
+chips, and **MSP430 is one island of several**, not a privileged base:
+
+> MSP430 should not have a special status in the repo, it is one of a handful MCUs we compile Stem
+> firmware for
+
+> debug/ -> bench/ is ok, but why would diag/ not also be bench/? Why should we consider diag/ to be
+> MSP430 only? prod/ should not be MSP430 only
+
+> We might have to slot it on top of Zephyr in order to support existing codebases, but M7 is part of the
+> product stem, so it belongs here
+
+**Derived synthesis (not verbatim) — the chip-neutral layout these imply:**
+- `prod/` and `diag/` are the **variant pair** (prod ⊆ diag; prod-core → {prod bin, diag}), **per node
+  chip**, NOT MSP430-only. MSP430 is just the only chip whose node roles are *filled* today; RP2350
+  (lowvision), nRF52 (bluetooth), CYPM1111 (power) are node chips too. The firmware trees must be
+  organised so no chip is the implicit default — each node chip is a fill under the same variant axis.
+- `debug/` → **`bench/`** (rename accepted): the host / M7-stand-in binary.
+- **`diag/` ≠ `bench/` because of ROLE, not chip:** `diag` is **node (device-under-test) self-test
+  firmware**, a build variant of what ships on each node chip (coupled to `prod` via prod-core). `bench/`
+  is the **host/master** side — the opposite end of the bus (the thing that *drives* the DUTs). Both are
+  "test", but node-DUT-firmware vs test-driver are different roles (the §142 master/slave split). *(If
+  Henrik instead wants a single diagnostics umbrella spanning both ends, that's a deliberate merge to
+  decide — flagged, not assumed.)*
+- **The M7 belongs in this repo.** It is product stem (the real master), so the **shared master client**
+  (the `stembus` client / host-core, §142) is its home — possibly **slotted on top of Zephyr** to reuse
+  existing codebases. That client is the one consumed by M7 (product) + the RP probe + Mac/Linux CI alike.
+
+### stem-probe = host-side diagnostics, not a "bench" (verbatim · Henrik 2026-10-07)
+
+Refines the "debug firmware → special location" framing (§"Public master-side client", point 1) and the
+`bench/` idea above — the probe is **not inherently a bench tool**:
+
+> I still don't understand why bench/stem-probe is so special. What if I create a product module with
+> stem-probe firmware. That is no longer a bench, but a module to plug into a product. It is used for
+> diagnosis, just like diag firmware loaded on an MCU to give extra diagnostic functions
+
+**Derived synthesis (not verbatim) — the 2×2 this implies (role × variant):**
+
+| | node (slave) | host (master) |
+|---|---|---|
+| **prod** | operational node fw (deepsleep…) | operational mastering (the product M7 master) |
+| **diag** | node self-test (today's `diag/`) | deep inspect / sniff / probe / JTAG (today's `stem-probe`) |
+
+- **stem-probe = the host/master-role analog of node `diag`** — extra diagnostic functions, from the
+  master end. `prod ⊆ diag` holds on BOTH sides; shared cores = feature-crates (node) / `stembus-client`
+  (host).
+- **"Bench" is a DEPLOYMENT CONTEXT (dev board / CI), not a code identity.** The same host-diag firmware
+  can ship as a **product diagnostic module** on a product Pico (reachable over T-USB). So there is **no
+  special `bench/` tree** for the firmware.
+- **The "module to plug into a product" IS a crate:** the probe/inspection capability is a **pluggable
+  diagnostic module** built on `stembus-client`; the standalone probe binary AND a product image both
+  *compose* it.
+- **Only genuinely bench-only artifact:** the **PC-side (std) CLI / soak harness** that drives the probe
+  remotely over USB from a Mac/Linux/CI host. That is dev *tooling*, not shippable firmware — it alone
+  wants a `tools/`-type home.
+- **Net on §142:** the "special debug location" narrows to genuinely-debug-only artifacts (the PC
+  harness); its crate-vs-binary rule still holds, but stem-probe's *firmware* is reclassified out of
+  "debug" into prod-capable **host-diag**.
+
 **Named + scoped since (2026-10-06):** this "prod-core library" is the **`deepsleep` crate** — the MSP430
 deepsleep-supervisor module (per-product-module crates, siblings `lowvision`/`bluetooth` on their own
 MCUs; *not* a generic `prod-core`/`node`). The slave **driver → `bsp/src/stem_i2c.rs`**, dispatch +
@@ -366,6 +485,139 @@ Derived requirements (from the verbatim above):
   — prod already owns the Stem slave + regmap, so command-over-I²C belongs in the shared prod-core and
   diag inherits it; UART command routing (diag has it today) becomes the second transport over the same
   dispatch.
+
+## Repo layout — `modules/<product>` + the build matrix (verbatim + derived · Henrik 2026-10-08)
+
+**SUPERSEDES the "prod is the root dir / diag for the diag images" framing above (§462, 2026-10-06).**
+That earlier line is retained for history, but the directory model below replaces it: there is **no
+top-level `prod/` or `diag/` tree**. prod/diag is a build-axis FLAG per product module, never a folder.
+
+**Verbatim (Henrik 2026-10-08):**
+> *"I do not like the current directory structure at all. It looks like a toy project made for a single
+> MCU family. I need something for multiple MCUs and variations in multiple dimensions beyond a
+> directory tree."*
+>
+> *"diag can be seen as an extended POST on top of a prod codebase. --log is just extra console log
+> statement. --debug is just debug info."*
+>
+> *"I would start with root Cargo.toml, and ask what would give it a natural structure."*
+>
+> *"Build matrix sounds like a good center."*
+>
+> On the transition case: *"we change the hardware for the PD Controller, but want to keep all the
+> logic. We want to develop the firmware for two different chipsets during a transition period. Or
+> deepsleep is migrated from MSP430 to the newer TI M0 low power architecture and maintained in parallel
+> during transition … each existing/planned product module firmware is a thin crate that depends on
+> feature/util crates. It could also be a crate per role, where the actual board is feature flags (but
+> that sounds like a big if statement in main)."*
+>
+> *"prod/ should be prod/<product-name>/ … We would have prod/pico-probe, prod/msp-deepsleep/ and
+> prod/msp-expander/."* (naming since refined to `modules/` — below)
+>
+> *"pico-probe is a product, it is a board or particular bench assembly that can be thought of as a
+> product."*
+>
+> *"I think modules/ as you suggest is a good name."*
+
+**Derived model (agreed in dialogue 2026-10-08) — the structure these imply:**
+
+1. **Organise the TREE by dependency altitude (what a crate may depend on) — the one axis Cargo
+   enforces.** Every other axis (chip, role, prod/diag, log, debug) is a **feature or target triple**, a
+   *matrix* dimension, NOT a directory. Tiers, each defined by its dependency ceiling:
+   - `contract/` — pure spec (regmap/stembus), no HAL/embassy/chip; builds on host + every target + C
+     header gen. (= today's `crates/stembus`, held to language-neutral contract discipline.)
+   - `capabilities/` — feature/device logic generic over `embedded-hal` traits + `contract`; **host-
+     testable**; no embassy, no bsp, no PAC. (= `crates/devices`, `deepsleep-core`, `pd-core`, plus the
+     two harness runtimes `prod-runtime`/`diag-runtime`.)
+   - `bsp/` — **per-arch**, never cfg-merged across unrelated silicon: `bsp-msp430`, `rp-bsp`
+     (RP2040+RP2350), future `ti-m0-bsp`, `nrf-bsp`. Each implements the capability traits + exposes
+     semantic bus roles.
+   - `modules/<product>/[<chip>/]` — **thin binary crate per product module** (see 2–4).
+   - `stembus-client` — the one public master-side crate (M7/host/CI), transport-abstracted.
+   - `xtask/` — the build-matrix driver. `target/` is ONE shared Cargo-owned dir.
+
+2. **`modules/<product>/` holds a thin binary per product module; prod/diag/log/debug are FLAGS on it,
+   not trees.** diag = prod + extended POST/test harness (`prod ⊆ diag`); `--log`/`--debug` are additive
+   features. The only `cfg` allowed in a module `main` is **harness selection**
+   (`prod-runtime` vs `diag-runtime` over the shared `*-core`) — never a chip if-ladder.
+
+3. **Chip/arch is bound by CRATE COMPOSITION, not feature flags.** Incompatible chips (different
+   arch/HAL/triple, or a transition needing BOTH live) → **separate thin binary crates** sharing one
+   `*-core`, chip bound via a trait seam ([[purity-seam-trait]]). Feature-flag-selects-the-board is
+   rejected for this axis: it degrades to a big `cfg` in main AND cannot span two target triples in one
+   build — so it literally cannot express a parallel-chip transition. Feature flags survive ONLY for
+   **compatible within-family** variation (the runtime model-detect of §"One image per product module").
+   Transition siblings group by role with chip as the leaf, so they read as obvious pairs:
+   ```
+   modules/deepsleep/{fr247x, fr235x, fr215x, ti-m0}/ → capabilities/deepsleep-core  (dual SUPERVISOR: FR2476/FR2355/FR2155; ti-m0 = the migration)
+   modules/expander/{fr24xx}/           → capabilities/expander-core   (FR2433 programmable I/O EXPANDER: generic pin IDs)
+   modules/pd/{cypm1111, <next>}/       → capabilities/pd-core           (PD-controller swap)
+   modules/pico-probe/                  → stembus-client  (host/master; a product in its own right)
+   ```
+   Delete a leaf when a transition ends; the `*-core` never moves. **This settles that firmware binaries
+   are separate workspace members** (a transition requires two to coexist on different triples).
+
+4. **The build MATRIX is the real artifact, not the tree.** Flag/chip/variant combinations are **matrix
+   rows** the `xtask` enumerates; outputs are **named artifacts in `dist/`** (NOT per-flag `target/` dirs
+   — that fights Cargo's one-target-dir + fingerprint model and loses cross-crate caching). Example:
+   `dist/deepsleep-msp430-fr2433-prod.elf`, `dist/deepsleep-msp430-fr2433-diag-log.elf`,
+   `dist/pico-probe-rp2040-prod.elf`, `dist/pico-probe-rp2040-diag.elf`. Every product module (incl.
+   pico-probe) emits BOTH a prod and a diag artifact — no module is privileged; prod/diag is purely the
+   flag.
+
+5. **Root `Cargo.toml` = virtual workspace** (`resolver = "2"`), `[workspace.dependencies]` pins shared
+   versions once, `default-members` = only the **host-buildable** crates (contract, capabilities,
+   stembus-client, xtask) so `cargo test` on the dev host Just Works and exercises max shared surface.
+   **No bare `cargo build` builds all firmware** — it can't (feature unification would collide two
+   chips' `compile_error!`; multiple triples can't share one invocation). Firmware is built per-target
+   by the matrix driver.
+
+**Precision note (per `quality-bar`):** items 2–5 are *derived synthesis agreed in dialogue*, not
+Henrik verbatim, EXCEPT the quoted block. Exemplars to verify before templating the matrix driver:
+**Tock** (`tock/tock`, per-board binary crates — the precedent for item 3), **embassy**
+(`embassy-rs/embassy`, how far features+codegen take the chip axis), **ZMK** (`zmkfirmware/zmk`,
+`build.yaml`→CI matrix — the precedent for item 4). These are described from recollection (cutoff
+2026-01) and are a **verification debt** — read the live repos + cache per `save-sources-locally`
+before adopting any as a template.
+
+### Build frontend — `just` now; `xtask` DEFERRED (adopt only on these conditions · 2026-10-08)
+
+**Decision (Henrik 2026-10-08):** keep `just` as the build frontend for now; hold `xtask` as an **open
+option to adopt if** one of the conditions below is hit. Henrik is **neutral** on xtask (noted lack of
+detailed knowledge), so this is a deliberate *defer-with-triggers*, not a rejection. Do NOT migrate to
+xtask on aesthetics/idiom alone.
+
+**Why deferred (the balance today):** xtask's headline win — "one toolchain, no external installs" — is
+**undercut in stem**: the MSP430 build *requires* the Docker/msp430-gcc image and RP needs picotool
+(`stem-build-paths`), so xtask would still shell out to them; it changes *where* orchestration lives
+(Rust vs `just`), not the toolchain you must install. Meanwhile `just` already works and has real
+investment (`justfile` + `bsp.just`/`diag.just`/`prod.just`/`pac.just`/`probe.just`/`usb.just`/…). So
+the cost/benefit only flips when the **matrix logic outgrows what `just` can sanely express**.
+
+**Adopt xtask (for the MATRIX/LOGIC layer only) when ANY of these becomes true:**
+1. **The matrix stops being a clean cartesian product** — legal `(module, chip, variant, log, debug)`
+   rows need filtering/exclusions/special-cases/derived values, i.e. you catch yourself writing a
+   bash/python script *to generate the matrix*. That script should be xtask (typed, shares `contract`).
+2. **`dist/` naming or build inputs must share types with the firmware** — chip list, role addresses,
+   feature sets start getting **duplicated** in the justfile and drift from `contract`/`bsp` constants
+   becomes a real bug risk.
+3. **A `just` recipe exceeds ~15–20 lines of shell with branching/loops** (loops over targets,
+   conditionals on chip family, retries/error handling) — the readability/testability smell.
+4. **The matrix needs to be testable** because a wrong/missing combo has actually shipped or left a CI
+   gap — "unit-test the expansion" stops being theoretical.
+5. **A new frontend need `just` can't model** — generating a CI job matrix from the same source (the
+   ZMK `build.yaml`→GitHub-Actions pattern), parallel matrix execution with dependency ordering, or
+   staleness-aware skipping beyond cargo's own.
+6. **Cross-platform / multi-contributor friction** — Windows support needed, or recipes break across
+   zsh/bash/CI shells.
+
+**Shape WHEN adopted (keep it cheap to exercise):** xtask takes **only** the matrix/`dist` expansion;
+`just` stays the human **verb layer** (`just build`/`flash`/`dev` call `cargo xtask …` underneath).
+Keep the matrix itself **declarative data** (`modules.toml` or `[workspace.metadata]`, à la ZMK
+`build.yaml`) with xtask as the small typed **expander**. Never move the simple verb aliases into xtask.
+
+**Anti-trigger (do NOT adopt for these):** "it's more idiomatic", "it'd be cleaner", or wanting a
+single toolchain — the Docker/picotool deps mean the single-toolchain argument never fully applies here.
 
 ## One image per product module — avoid chip-specific firmware (verbatim · Henrik 2026-10-06)
 
