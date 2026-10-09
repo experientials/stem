@@ -455,6 +455,13 @@ menu functions map to unified commands: `s`→`status`/rescan, `r`→`events`, `
   catalog**, which is itself generated from the *same* command defs (so on-device `help` and off-device
   catalog can never disagree). Terse 1–2-char verbs are fine precisely because the names are generated +
   documented, not memorized.
+- **Decoration (ANSI color / emoji) is a RENDER concern, not source data (Henrik 2026-10-09):** the
+  generated catalog stays **clean structured data** (verb/help/args/**`category`**); a **host-side renderer**
+  (`thepia hwd console`/`chat` or `pico-probe`) adds ANSI + emoji — zero MSP430 size cost, and the surface
+  `hwd chat` introspects stays escape-code-free (machine reads data, human sees icons). Never hardcode escape
+  codes/emoji into help strings. For *semantic* color/emoji, map the structured `category` → icon/color in
+  the renderer (🔎 introspection, ⚙️ operation, red destructive). In-firmware color only if a node's *direct*
+  console needs it, gated behind a `color` feature, OFF on prod/FR2433 (budget).
 - **Concrete debt:** today the stem-probe `help` is a **hand-maintained string** (`debug/stem-probe`
   main.rs) — exactly the drift risk this forbids. The reorg's command work must replace it with codegen
   from the `stembus::command` defs. (Deferred with the rest of the discovery work, but this is the governing
