@@ -1,8 +1,7 @@
 # thepia hwd board aliases — the fault-resistant identity map for the current bench.
 #
 # THE BENCH = 3 MSP430 + 1 Pico (the MCU bench, docs/MCU-BENCH.md). One shared Stem I²C bus:
-#   • RP2040 Pico  — Stem-bus MASTER (stem-probe fw), the SoM/M7 stand-in. Drive via its running-CDC
-#                    serial E6614C311B471322 (NOT the BOOTSEL serial below). `thepia hwd console -b … `.
+#   • RP2040 Pico  — Stem-bus MASTER / COORDINATOR (stem-probe fw), the SoM/M7 stand-in.
 #   • FR2476 @0x21 — dual-I²C dev node   (Stem on P3.2/P3.6).
 #   • FR2355 @0x20 — dual-I²C sensing node (Stem on P4.6/P4.7).
 #   • FR2433 @0x22 — single-I²C passive expander (Stem on P1.2/P1.3; its only bus).
@@ -22,29 +21,96 @@
 # collapses — chip-id is only trustworthy SINGLE-ADAPTER. The ids below were each read solo (2026-09-30).
 # (Henrik has many boards; these are the 3 currently on the bench. Old toy-a/toy-b were other units.)
 #
-# NON-eZ-FET boards use a DIFFERENT identity. The RP2040 below is NOT an MSP430/eZ-FET board: it has no
-# JTAG device-id and no eZ-FET. Its `serial` is the RP2040's **BOOTSEL USB serial = QSPI flash unique
-# id** (the `picotool --ser` key). Loading is USB (picotool), not SBW — see docs/proposals/
-# thepia-hwd-pico-support.md for the proposed `hwd rp2`/`pico` support.
+# NON-eZ-FET boards use a DIFFERENT identity. The RP2040 (the `rp2040` coordinator below) is NOT an
+# MSP430/eZ-FET board: no JTAG device-id, no eZ-FET. Its USB serial is MODE-DEPENDENT (one physical
+# board, two serials):
+#   • running / CDC  → E6614C311B471322  (the firmware's QSPI flash unique id, reported as USB iSerial;
+#                                         what console/chat/scan resolve — the alias uses THIS)
+#   • BOOTSEL / flash → E0C9125B0D9B     (the `picotool --ser` key; present ONLY in BOOTSEL)
+# The alias is declared under the RUNNING serial so console/chat work. `thepia hwd pico flash` reaches
+# the board itself (auto-forces BOOTSEL via the fw reset interface, or pass --board E0C9125B0D9B when it
+# is already in BOOTSEL). Loading is USB (picotool), not SBW — see docs/proposals/thepia-hwd-pico-support.md.
+#
+# ── TOPOLOGY (declared, 2026-10-07) ─────────────────────────────────────────────────────────────────
+# This file DECLARES the product shape so `thepia hwd chat` / `thepia hwd "…"` get roles + I²C addresses
+# as context instead of inferring them by live-scanning. The Pico (`rp2040`) is the `coordinator` (bus
+# master); the three MSP430s are `subordinate` nodes it commands over I²C at their role-based addresses.
+# Discovery-first: we declare the shape + a `help` hook, not the whole command set — the device's own
+# `help` is authoritative; the `[[command]]` entries are only a curated annotation of a few.
 
+[board]
+select = "@rp2040"   # product default: chat/console/scan resolve the coordinator when --board is omitted
+
+# ── Subordinates: the three MSP430 nodes, commanded by @rp2040 over the shared Stem I²C bus ──
 [[board.alias]]
 name = "fr2476"
 serial = "0E5D41510A002800"   # MSP430FR2476, id 0x0210 (fr247x, dual-I²C dev). Console usbmodem233203.
+role = "subordinate"
+controller = "@rp2040"
+i2c_addr = "0x21"
 
 [[board.alias]]
 name = "fr2355"
 serial = "8E57A36E1E000B00"   # MSP430FR2355, id 0x01ff (dual-I²C; the Detector/sensing dev part). Console usbmodem233303.
+role = "subordinate"
+controller = "@rp2040"
+i2c_addr = "0x20"
 
 [[board.alias]]
 name = "fr2433"
 serial = "2FAFB46F29002500"   # MSP430FR2433, id 0x01c6 (fr24xx, single-I²C passive expander). Console usbmodem233103.
+role = "subordinate"
+controller = "@rp2040"
+i2c_addr = "0x22"
 
+# ── Coordinator: the RP2040 Pico (Stem-bus master / SoM-M7 stand-in, stem-probe fw) ──
+# ONE alias for the one physical Pico, under its RUNNING serial (see the mode-dependent-serial note
+# above). This is the coordinator — a role on the rp2040, not a separate board.
 [[board.alias]]
 name = "rp2040"
-serial = "E0C9125B0D9B"        # RP2040 rev B2 — bench dev HOST / M7 stand-in. This is the BOOTSEL/`RP2
-                               # Boot` USB serial = the `picotool --ser` key when flashing. NOT eZ-FET.
-# IMPORTANT (found on bench 2026-09-30): the BOOTSEL serial DIFFERS from the running firmware's id.
-# The stem-probe firmware reports the true 64-bit QSPI flash unique id as its USB iSerial:
-#   flash_uid = "E6614C311B471322"   # what the OS/CDC sees while the app runs
-# So the board key is MODE-DEPENDENT: picotool/BOOTSEL → E0C9125B0D9B; running/CDC → E6614C311B471322.
-# hwd must map both to this one board (see docs/proposals/thepia-hwd-pico-support.md §3).
+serial = "E6614C311B471322"   # RUNNING/CDC serial (QSPI flash uid). BOOTSEL/flash serial = E0C9125B0D9B.
+role = "coordinator"
+
+[board.alias.console]
+kind = "repl"
+prompt = ">"
+line_ending = "crlf"
+reply_timeout_ms = 2000
+about = "stem-probe RP2040 CLI; Stem-bus master, commands the MSP430 nodes over I2C"
+help_command = "help"   # verified live on firmware v0.1.0 (prints the full CLI reference); `?`/`h`/`/h` alias it
+
+# Curated highlights only — run `help` on the device for the authoritative, complete vocabulary.
+[[board.alias.command]]
+name = "scan"
+usage = "scan"
+desc = "probe the Stem bus 0x08..0x77 and list node addresses that ACK (expect the subordinates: 0x20 0x21 0x22)"
+
+[[board.alias.command]]
+name = "vstem"
+usage = "vstem"
+desc = "full Stem verify of a node: role discovery, identity magic, model id, fw version, status, mode control, sideband"
+
+[[board.alias.command]]
+name = "r"
+usage = "r <addr> <reg>"
+desc = "read one Stem register (hex; 0x optional), e.g. `r 0x20 0x30` → identity magic"
+
+[[board.alias.command]]
+name = "w"
+usage = "w <addr> <reg> <val>"
+desc = "write one Stem register (hex), e.g. `w 0x20 0x3e 01` sets MODE_CTRL → Sensing"
+
+[[board.alias.command]]
+name = "lscan"
+usage = "lscan"
+desc = "bit-bang scan the Leaf sensor bus (GP4/GP5) and list devices that ACK (Pico masters Leaf, then re-parks)"
+
+[[board.alias.command]]
+name = "id"
+usage = "id"
+desc = "print the board identity (QSPI flash uid = USB iSerial = the @rp2040 running serial)"
+
+[[board.alias.command]]
+name = "selftest"
+usage = "selftest"
+desc = "run vstem+vleaf and end with one grep-able line: `RESULT pass=N fail=M`"
