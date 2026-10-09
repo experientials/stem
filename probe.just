@@ -1,4 +1,4 @@
-# `just probe <verb>` — the RP2040 bench-host firmware (debug/stem-probe; the SoM/M7 stand-in).
+# `just probe <verb>` — the RP2040 bench-host firmware (modules/pico-probe; the SoM/M7 stand-in).
 #
 # Cortex-M (thumbv6m): links with **rust-lld, built into Rust** → HOST cargo, **no container**, and
 # identical on Linux + macOS. That's the only reason it differs from the MSP430 firmware (prod/diag),
@@ -9,7 +9,7 @@
 #   just probe flash     build + picotool program over USB (BOOTSEL)
 #   just probe run       alias for flash
 
-crate  := "debug/stem-probe"
+crate  := "modules/pico-probe"
 triple := "thumbv6m-none-eabi"
 bin    := "stem-probe"
 

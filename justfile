@@ -29,7 +29,7 @@ mod pac
 mod memory     # per-chip linker memory maps (prod/memory-<chip>.x) — generate from TI .ld + lint
 mod diag       # MSP430 POST/diagnostic firmware (Docker toolchain)
 mod prod       # MSP430 product Stembus node firmware (Docker toolchain; family axis)
-mod probe      # RP2040 bench-host firmware (debug/stem-probe) — host cargo, Linux+macOS
+mod probe      # RP2040 bench-host firmware (modules/pico-probe) — host cargo, Linux+macOS
 mod usb
 mod bsp
 
@@ -62,11 +62,9 @@ build target *flags:
         rp2040)        kind=cortex ;;
         *) echo "unknown chip '{{target}}' — fr2355|fr2476|fr2433|fr2155|rp2040" >&2; exit 1 ;;
     esac
-    # cros_ec is an MSP430 EC-slave path (prod run_fr24xx / run_dual, both gated on the feature). Valid on
-    # any MSP430 family now (FR2433 + dual FR2355/FR2476/FR2155); reject only non-MSP targets (rp2040).
-    if [ -n "$crosec" ] && [ "$kind" != msp ]; then
-        echo "--cros-ec applies to MSP430 families (fr2433|fr2355|fr2476|fr2155), not '{{target}}'" >&2; exit 1
-    fi
+    # cros_ec is an MSP430 EC-slave path (the default command interface on the nodes). It does not apply to
+    # the RP2040 (it's the bus MASTER / stem-probe, not a node) — so clear the default crosec for non-MSP.
+    [ "$kind" = msp ] || crosec=""
     if [ "$kind" = msp ]; then
         [ "$cls" = default ] && cls=prod
         case "$cls" in

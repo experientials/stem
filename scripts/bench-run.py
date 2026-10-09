@@ -5,7 +5,7 @@
 # ///
 """stem-probe bench runner — drive the RP2040 USB-CDC console from the host.
 
-The RP2040 `stem-probe` firmware (debug/stem-probe) is the Stem-bus master / SoM stand-in. It exposes a
+The RP2040 `stem-probe` firmware (modules/pico-probe) is the Stem-bus master / SoM stand-in. It exposes a
 line console (id | scan | r | w | selftest | vstem | vleaf | pass | sens | sound0/1 | por0/1 | pins).
 This script auto-finds that CDC port (USB 2e8a:000a, product "stem-probe"), issues a command, prints the
 reply, and — for `selftest` — parses the final `RESULT pass=N fail=M` line and exits non-zero on any
