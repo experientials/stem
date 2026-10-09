@@ -39,7 +39,7 @@ fn main() {
 }
 
 /// Build target (chip/config variant) for the stamp. Defaults from the active family feature
-/// (`fr2476` for fr247x, `fr2433` for fr24xx); override with `PROD_TARGET` for a finer variant.
+/// (`fr2476` for fr247x, `fr2155`/`fr2355` for fr215x/fr235x); override with `PROD_TARGET`.
 fn target() -> String {
     if let Some(t) = std::env::var("PROD_TARGET").ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
         return t;
@@ -50,8 +50,6 @@ fn target() -> String {
         "fr2155".into()
     } else if std::env::var_os("CARGO_FEATURE_FR235X").is_some() {
         "fr2355".into()
-    } else if std::env::var_os("CARGO_FEATURE_FR24XX").is_some() {
-        "fr2433".into()
     } else {
         "unknown".into()
     }
@@ -100,10 +98,8 @@ fn emit_memory_x() {
         "memory-fr2155.x"
     } else if has("CARGO_FEATURE_FR235X") {
         "memory-fr2355.x"
-    } else if has("CARGO_FEATURE_FR24XX") {
-        "memory-fr2433.x"
     } else {
-        panic!("prod: no family feature — build with --features fr247x|fr215x|fr235x|fr24xx");
+        panic!("prod: no family feature — build with --features fr247x|fr215x|fr235x");
     };
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     std::fs::copy(src, out.join("memory.x")).unwrap_or_else(|e| panic!("prod: copy {src} → OUT_DIR: {e}"));

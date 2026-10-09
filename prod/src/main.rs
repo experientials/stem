@@ -1,8 +1,8 @@
 #![no_main]
 #![no_std]
 #![feature(asm_experimental_arch)] // core::arch::asm! for SCG0 in clock.rs (fr247x); harmless otherwise
-#![cfg_attr(any(feature = "fr24xx", feature = "_dual"), feature(abi_msp430_interrupt))] // eUSCI_B slave
-// wake ISRs (fr2433 UCB0 / dual UCB1) use `extern "msp430-interrupt"` — experimental ABI.
+#![cfg_attr(feature = "_dual", feature(abi_msp430_interrupt))] // eUSCI_B1 slave
+// wake ISR (dual UCB1) uses `extern "msp430-interrupt"` — experimental ABI.
 
 //! bob-929 PRODUCT firmware (Rust) — **Stembus node**, primary dev target MSP430FR2476 (FR247x).
 //!
@@ -29,17 +29,14 @@ extern crate panic_msp430; // infinitely-looping panic handler (a hang trips the
 
 use msp430_rt::entry;
 
-// Family axis: exactly one family feature selects the PAC (and, via build.rs, the memory map).
-#[cfg(not(any(feature = "_dual", feature = "fr24xx")))]
-compile_error!("prod: enable one family — fr247x (default) | fr215x | fr235x | fr24xx");
-#[cfg(all(feature = "_dual", feature = "fr24xx"))]
-compile_error!("prod: enable exactly ONE family — a dual-I²C family XOR fr24xx, not both");
+// Family axis: exactly one DUAL-I²C family feature selects the PAC (and, via build.rs, the memory map).
+// (The single-I²C FR2433 node is a separate binary now — `modules/expander/`, S2a.)
+#[cfg(not(feature = "_dual"))]
+compile_error!("prod: enable one dual-I²C family — fr247x (default) | fr215x | fr235x");
 
-// OPERATING MODES (DESIGN.md): compile in ≥1 mode; sensing needs a 2nd I²C so it's dual-I²C only.
+// OPERATING MODES (DESIGN.md): compile in ≥1 mode; sensing needs a 2nd I²C (always available on dual).
 #[cfg(not(any(feature = "mode-passive", feature = "mode-sensing")))]
 compile_error!("prod: enable at least one mode — `--features mode-passive` and/or `mode-sensing`");
-#[cfg(all(feature = "fr24xx", feature = "mode-sensing"))]
-compile_error!("prod: `mode-sensing` requires a dual-I²C family — FR2433 (fr24xx) is Passive-only");
 
 // The chip-select PAC alias + the shared board/hal/i2c layer live in `bsp` (STEM-DIRECTION.md: diag
 // and prod share ONE family/board axis). Re-export `pac` so every module keeps
@@ -70,26 +67,25 @@ pub use deepsleep::regmap; // I²C-slave register-map contract (PCA9698 emulatio
 #[cfg(feature = "_dual")]
 pub use deepsleep::enumerate; // Leaf sensor-bus enumeration — now in `deepsleep` (Phase 0a); re-export
                              // keeps `crate::enumerate::*` resolving for main.rs/status.rs unchanged.
-// The I²C-slave surface (status + stem transport + regmap) serves BOTH the dual node (eUSCI_B1) and
-// the fr24xx Passive node (its single eUSCI_B0) — it's the fr24xx node's whole job. `enumerate`/`mode`
-// stay dual-only (no sensor bus / mode machine on the single-I²C part).
-#[cfg(any(feature = "_dual", feature = "fr24xx"))]
+// The I²C-slave surface (status + stem transport + regmap) serves the dual node (eUSCI_B1).
+// `enumerate`/`mode` are also dual (sensor bus + mode machine).
+#[cfg(feature = "_dual")]
 pub use deepsleep::status; // identity/status model (regmap 0x30–0x3F) — now in deepsleep (Phase 0b)
 #[cfg(feature = "_dual")]
 pub use deepsleep::mode; // operating-mode machine (Passive↔Sensing) — now in deepsleep (Phase 0c)
-#[cfg(any(feature = "_dual", feature = "fr24xx"))]
+#[cfg(feature = "_dual")]
 pub use deepsleep::stem; // I²C-slave dispatch (RegFile/Slave/poll) — now in `deepsleep` (Phase 1a);
                          // its transport (eUSCI programming + pins) is `bsp::stem_i2c`. Re-export keeps
                          // `crate::stem::*` resolving for main.rs unchanged.
 #[cfg(feature = "cros_ec")]
 pub use deepsleep::ec; // cros_ec EC-slave glue (COMMANDS.md §0) — replaces the regmap slave on the
-                       // cros_ec build (fr24xx via serve_ec; dual via ec::poll in run_dual).
+                       // cros_ec build (dual via ec::poll in run_dual).
 #[cfg(feature = "cros_ec")]
 pub use deepsleep::node; // the Node/Operate adapter the vendor+postcard path dispatches against
-                         // (StaticNode on fr24xx; LiveNode on dual).
+                         // (LiveNode on dual).
 // UART logging is the `console` feature (dev only). Off = silent production image; state then lives
 // only in the debug registers (served by the I2C-slave surface). See status.rs / the console question.
-// Console/UART is available to ANY family with `console` on (dual + fr24xx). `uart.rs` unifies the
+// Console/UART is available to any dual family with `console` on. `uart.rs` unifies the
 // eUSCI_A0 field-name difference (e_usci_a0 vs usci_a0_uart_mode) via a macro.
 #[cfg(feature = "console")]
 mod uart;
@@ -145,11 +141,7 @@ fn main() -> ! {
     // Keep the build stamp live for the family paths below.
     let _ = FW_BUILD;
 
-    #[cfg(feature = "_dual")]
-    run_dual(&p);
-
-    #[cfg(feature = "fr24xx")]
-    run_fr24xx(&p);
+    run_dual(&p)
 }
 
 /// Dual-I²C node bring-up (fr247x/fr215x/fr235x — via the `pac` alias): clock → pins → sensor-bus I2C
@@ -492,55 +484,19 @@ fn oled_splash(p: &Peripherals, scan: &enumerate::Scan) {
     let _ = oled.off(&mut bus);
 }
 
-/// PROBE (Phase 1b): eUSCI_B0 slave ISR on fr2433 — HAND-ROLLED wake trampoline (alternative to the
-/// msp430-rt `wake_cpu` macro, whose `jmp {inner}` truncates under LTO: R_MSP430_10_PCREL, ±1 KB).
-/// `br #{inner}` is an ABSOLUTE branch (R_MSP430_16, full range) → placement-independent, LTO-safe, and
-/// self-contained (no dependency patch). The naked outer clears SCG1|SCG0|OSCOFF|CPUOFF (0xF0) in the
-/// stacked SR (0(r1), r1=SP) so the CPU returns to active mode after the inner handler's `reti`.
-#[cfg(feature = "fr24xx")]
-#[unsafe(naked)]
-#[no_mangle]
-unsafe extern "msp430-interrupt" fn USCI_B0() {
-    core::arch::naked_asm!(
-        "bic.b #0xF0, 0(r1)", // wake: clear the LPM bits in the pushed SR
-        "br #{inner}",        // absolute branch to the real handler (full range)
-        inner = sym usci_b0_inner,
-    );
-}
-/// Real eUSCI_B0 slave handler body. `extern "msp430-interrupt"` → the compiler emits `reti` at the end,
-/// which pops the (wake-modified) SR. Reached via `br` from the trampoline above.
-///
-/// Does **no byte work** (§3 / docs/references/firmware-architecture.md): it only MASKS the slave IE so
-/// the still-latched IFG won't immediately re-fire while the CPU is awake, then returns — the trampoline
-/// already cleared `CPUOFF`, so the main loop resumes and drains `next_event()` + re-enables the IE. The
-/// register file is never touched here, so it needs no critical section (it stays in the main context).
-#[cfg(feature = "fr24xx")]
-extern "msp430-interrupt" fn usci_b0_inner() {
-    // SAFETY: single-core; this ISR masks its own source and runs only while main is in LPM (or at the
-    // atomic sleep instruction), so there is no concurrent RMW of UCB0IE with the main context.
-    let p = unsafe { Peripherals::steal() };
-    bsp::stem_i2c::irq_disable(&p);
-    STEM_PENDER.wake(); // tell the sched executor a wake arrived (closes the wake-during-poll race, 1c)
-}
-
-/// The LPM pender for the fr2433 Stem-slave dispatch task (ADR-0013 §5). The ISR `wake()`s it; the
-/// `run_pended` executor idles (LPM) only when a poll round made no progress and this flag is clear.
-#[cfg(feature = "fr24xx")]
-static STEM_PENDER: sched::Pender = sched::Pender::new();
-
 /// Enter LPM0 with interrupts enabled, atomically (SR = r2; CPUOFF|GIE = 0x18). One instruction, so there
 /// is no window between "decide to sleep" and "an interrupt can wake me" (Samek's chicken-and-egg;
-/// docs/references/firmware-architecture.md §1). The eUSCI_B0 slave ISR wakes us (its `wake_cpu`
+/// docs/references/firmware-architecture.md §1). The eUSCI_B1 slave ISR wakes us (its `wake_cpu`
 /// trampoline clears CPUOFF in the stacked SR); a pending IFG at this point fires immediately rather than
 /// sleeping. Default (memory-clobbering) asm → a barrier, so loads/stores aren't reordered across sleep.
-#[cfg(any(feature = "fr24xx", feature = "_dual"))]
+#[cfg(feature = "_dual")]
 #[inline(always)]
 fn enter_lpm0_gie() {
     unsafe { core::arch::asm!("bis #0x18, r2", options(nostack)) };
 }
 
-/// Dual Stem-slave (eUSCI_B1) wake ISR — the SAME hand-rolled `br` trampoline as fr2433's `USCI_B0`,
-/// extended to UCB1 (vector `EUSCI_B1`). Clears the LPM bits in the stacked SR so the CPU wakes; the
+/// Dual Stem-slave (eUSCI_B1) wake ISR — a hand-rolled `br` trampoline on UCB1 (vector `EUSCI_B1`;
+/// the same technique the expander uses on UCB0). Clears the LPM bits in the stacked SR so the CPU wakes; the
 /// inner masks UCB1's slave IE so the latched IFG won't re-fire before the serve loop drains it. No
 /// pender here — the dual serve loop is the 1b-style hand loop (re-polls on wake), not `run_pended`.
 #[cfg(feature = "_dual")]
@@ -558,109 +514,4 @@ extern "msp430-interrupt" fn eusci_b1_inner() {
     // SAFETY: single-core; masks its own source, runs only while main is in LPM (or at the atomic sleep).
     let p = unsafe { Peripherals::steal() };
     bsp::stem_i2c::irq_disable(&p);
-}
-
-/// FR24xx (FR2433) single-I²C **slave-only** node. Its whole job: answer the SoM's PCA9698-emulation
-/// register file on the one eUSCI_B0 (UCB0, P1.2/P1.3) — identity/status/version (real) + the GPIO
-/// bank shadow (regmap.rs / stem.rs, the SAME contract the dual node serves on eUSCI_B1). FR2433 is
-/// Passive-only (no sensor master → no scan/mode machine), so it publishes a booted, Passive status
-/// and serves reads/writes forever. Physical GPIO/ADC backing of the banks is the next step (#3).
-#[cfg(feature = "fr24xx")]
-fn run_fr24xx(p: &Peripherals) -> ! {
-    let model = model::detect();
-    // Host-clean chip identity for the de-welded `deepsleep::{post,status}` (Phase 6c), built once from
-    // the detected model; `model` stays for the role/addr codec below.
-    let chip = node_hal::ChipId { device_id: model.device_id(), family_ok: model.matches_build_family() };
-
-    // Publish identity + booted/Passive status behind the slave surface (no sensor scan on this part).
-    let mut st = status::Status::booted(chip, FW_BUILD);
-    st.set_mode(regmap::MODE_CODE_PASSIVE);
-    let mut rf = stem::RegFile::new(st);
-    // POST integrity (ADR-0010): per-sector FRAM CRCs, always — the M7 reads them over I²C at 0x3F.
-    let crc = post::fram_crcs();
-    rf.set_crc(crc);
-    #[cfg(not(feature = "cros_ec"))]
-    let mut slave = stem::Slave::new();
-    // role-based (I2C-API.md): FR2433 = 0x22 (I/O-expander placeholder). Shared codec in stembus::role.
-    let stem_addr = stembus::role::role_for_model(model.device_id()).addr() as u16;
-    // MSP430 hardware handle for the de-welded `deepsleep::stem` seams (Phase 6a): the dispatch is generic
-    // over `node-hal` traits, so wrap the PAC `Peripherals` once and pass `&hw`. The LPM/ISR path
-    // (`fr24xx_idle` → `bsp::stem_i2c::irq_enable(p)`) still uses `p` directly (bin-owned, stays as-is).
-    let hw = bsp::StemHw(p);
-    stem::init(&hw, stem_addr); // eUSCI_B0 as I²C slave @ stem_addr on P1.2/P1.3
-
-    // Dev console (`console` feature): a locked 1 MHz clock (clean UART baud) + the eUSCI_A0 backchannel
-    // on P1.4/P1.5 (distinct from UCB0 on P1.2/P1.3 — no pin clash). Print the banner + debug window
-    // ONCE, then fall through to serving the slave. The slave itself needs no clock (the master drives
-    // SCL), so a production (console-off) build serves it on the default DCO with no clock init.
-    #[cfg(feature = "console")]
-    {
-        bsp::board::clock_init_1mhz(p);
-        bsp::board::route_console_uart_pins(p); // P1.4/P1.5 -> UCA0 (FR2433 backchannel)
-        uart::init(p);
-        // Lean boot log: version + per-sector FRAM checksums (same as the dual node). fr24xx is
-        // Passive-only (no mode machine), so the mode name is the constant "passive".
-        post::boot_log(&hw, chip, "passive", &crc, FW_BUILD);
-        uart::puts(p, "fr24xx I2C-slave @0x");
-        uart::hex8(p, stem_addr as u8);
-        uart::putc(p, b'\n');
-        rf.status.dump(&hw); // the exact 0x30–0x3F bytes a master would read
-        // Prove the physical GPIO bank backing end-to-end (no I²C master needed): drive P1.0 via the
-        // regmap OP/IOC path and sense it back on IP. Auto-runs so hwd's READ-ONLY console captures
-        // PASS/FAIL with no keystroke (matches the dual node's boot self-test discipline).
-        let gp = stem::gpio_selftest(&hw, &mut rf);
-        uart::puts(p, "gpio bank0 self-test (P1.0 drive->sense): ");
-        uart::puts(p, if gp { "PASS\n" } else { "FAIL\n" });
-    }
-
-    // INTERRUPT-DRIVEN + LPM dispatch as an ASYNC `sched` task (Phase 1c, ADR-0013 §5 LPM pender).
-    // FR2433 is Passive-only: its whole job is to answer the Stem master on eUSCI_B0, so it SLEEPS in LPM
-    // between transactions and wakes on the slave ISR (slau445i §24.3.10). `stem::serve` is a
-    // never-completing future that `.await`s one SlaveEvent at a time; `sched::run_pended` polls it and
-    // runs the `idle` closure below whenever a poll round finds the bus idle (no progress + no pending
-    // wake) — functionally identical to 1b's hand loop, now expressed in the one async model the dual
-    // multi-task reshape will reuse. See DEEPSLEEP-EXTRACTION.md §3 + docs/references/msp430-lpm-wake-pattern.md.
-    //
-    // WATCHDOG vs LPM (slau445i §12): a sleeping CPU can't pet, and the reset-mode WDT has a clock
-    // fail-safe (ACLK loss → VLOCLK) so LPM does NOT stop it. So the `idle` closure HOLDs the backstop
-    // across the sleep and re-arms it on wake; the backstop guards only the awake servicing (where a hang
-    // can occur). Ordering: disable GIE BEFORE arming the slave IE, so no ISR fires between the arm and
-    // the atomic `bis #0x18,r2` (which would otherwise mask IE and then sleep forever).
-    bsp::board::wdt_arm_backstop(p); // guard the first poll round before the executor can idle
-
-    // Serve the slave forever, sleeping in LPM between transactions ([`fr24xx_idle`]). The ONE difference
-    // is which framing the slave speaks: the cros_ec milestone build (COMMANDS.md §0) runs the cros_ec v3
-    // EC-slave framer; the default build runs the PCA9698-regmap slave. Both drive the identical LPM
-    // pender + eUSCI_B0 wake ISR, so the low-power path is unchanged.
-    #[cfg(not(feature = "cros_ec"))]
-    {
-        let mut task = core::pin::pin!(stem::serve(&hw, &mut slave, &mut rf));
-        sched::run_pended(task.as_mut(), &STEM_PENDER, || fr24xx_idle(p));
-    }
-    #[cfg(feature = "cros_ec")]
-    {
-        // Build the Node adapter from the boot snapshot (identity/status/CRC). Standard commands
-        // (HELLO/proto) need no node; the vendor+postcard path (ident/status/…) dispatches against it.
-        let ident = rf.status.identity(stem_addr as u8);
-        let status = rf.status.status_data(stembus::command::WakeReason::None);
-        let mut node = node::StaticNode::new(ident, status, crc);
-        let mut ec_slave = stembus::cros_ec::EcSlave::new();
-        let mut task = core::pin::pin!(ec::serve_ec(&hw, &mut ec_slave, &mut node));
-        sched::run_pended(task.as_mut(), &STEM_PENDER, || fr24xx_idle(p));
-    }
-    // `serve*` never completes, so `run_pended` never returns; satisfy the `-> !` signature.
-    loop {}
-}
-
-/// The fr2433 serve-loop idle: disable GIE, arm the slave IE, HOLD the WDT backstop across LPM, sleep
-/// atomically ([`enter_lpm0_gie`]), then re-arm the backstop on wake. Shared verbatim by the regmap and
-/// cros_ec serve loops (slau445i §12 WDT-vs-LPM; see DEEPSLEEP-EXTRACTION.md Phase 1b).
-#[cfg(feature = "fr24xx")]
-#[inline(always)]
-fn fr24xx_idle(p: &Peripherals) {
-    msp430::interrupt::disable();
-    bsp::stem_i2c::irq_enable(p);
-    bsp::board::wdt_hold(p);
-    enter_lpm0_gie(); // wakes on the eUSCI_B0 slave ISR (masks IE + STEM_PENDER.wake())
-    bsp::board::wdt_arm_backstop(p); // awake again — re-guard the next poll round
 }

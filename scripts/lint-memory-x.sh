@@ -35,7 +35,8 @@ if [ -z "$LD_DIR" ]; then
 fi
 
 for chip in fr2155 fr2355 fr2476 fr2433; do
-  f="$ROOT/prod/memory-$chip.x"
+  # fr2433's map lives with its binary (modules/expander/, S2a reorg); the dual families stay in prod/.
+  if [ "$chip" = fr2433 ]; then f="$ROOT/modules/expander/memory-$chip.x"; else f="$ROOT/prod/memory-$chip.x"; fi
   pac="$ROOT/pac/msp430$chip/src/lib.rs"
   echo "== memory-$chip.x =="
   [ -f "$f" ] || { err "missing $f"; continue; }

@@ -2,12 +2,14 @@
 name = "prod"
 version = "0.1.0"
 edition = "2021"
-description = "bob-929 Stembus node firmware (Rust) — family axis: FR247x (default) + FR24xx"
+description = "bob-929 Stembus node firmware (Rust) — DUAL-I²C family axis: FR247x (default) / FR215x / FR235x"
 
-# COMPILE-TIME FAMILY AXIS (one image per register/memory-compatible family — see DESIGN.md).
+# COMPILE-TIME FAMILY AXIS (one image per register/memory-compatible DUAL-I²C family — see DESIGN.md).
 # Exactly one family feature is active; it selects the PAC + memory map (build.rs) + gate budget
 # (prod.just). This is how BOTH production families stay first-class — `fr247x` is just the default
 # (the on-hand dev boards), NOT the only supported target.
+# NOTE (STEM-DIRECTION Repo-layout reorg S2a): the FR2433 single-I²C slave-only node was EXTRACTED from
+# here into its own binary crate `modules/expander/` (cros_ec-only). prod/ is now dual-I²C only.
 [features]
 default = ["fr247x", "console", "mode-passive", "mode-sensing"]
 # DUAL-I²C families (2× eUSCI_B → Stem SLAVE + local sensor MASTER) all enable the internal `_dual`
@@ -19,8 +21,7 @@ default = ["fr247x", "console", "mode-passive", "mode-sensing"]
 fr247x = ["bsp/fr2476", "deepsleep/fr2476", "_dual", "bsp/rt", "msp430-rt/device"] # FR2476/FR2475 — primary dev target
 fr215x = ["bsp/fr2155", "deepsleep/fr2155", "_dual", "bsp/rt", "msp430-rt/device"] # FR2155 — production dual-I²C baseline
 fr235x = ["bsp/fr2355", "deepsleep/fr2355", "_dual", "bsp/rt", "msp430-rt/device"] # FR2355 — dev LaunchPad, superset of FR2155
-# FR24xx (FR2433) — SINGLE-I²C slave-only expander. The cheap, small, well-stocked production node.
-fr24xx = ["bsp/fr2433", "deepsleep/fr2433", "bsp/rt", "msp430-rt/device"]
+# (FR2433 single-I²C slave-only node REMOVED in S2a — it is now `modules/expander/`, a separate binary.)
 # Internal marker: "this is a dual-I²C family" — gates the shared dual-I²C code; forwards to deepsleep's
 # `_dual` so its `enumerate` module compiles. Not selected directly.
 _dual = ["deepsleep/_dual"]
@@ -35,14 +36,13 @@ console = ["deepsleep/console"]
 # status dump + a Leaf/eUSCI diagnostic) and the interactive s/r/d/m/l commands. Built via
 # `just build <chip> --debug`. "Not a full diag, but some basic info" (DESIGN.md, Henrik 2026-10-04).
 debug = ["console", "deepsleep/debug"]
-# `cros_ec` — the cros_ec v3 EC-slave framing path (COMMANDS.md §0 HELLO milestone). On the FR2433 build
-# it runs the cros_ec framer INSTEAD of the PCA9698-regmap slave. Opt-in; pair with `fr24xx`
-# (e.g. `--features cros_ec`). Independent of the family axis (dual support added when that slice lands).
+# `cros_ec` — the cros_ec v3 EC-slave framing path (COMMANDS.md §0). On the dual node it runs the cros_ec
+# framer INSTEAD of the PCA9698-regmap slave. Opt-in via `--features cros_ec`; the regmap removal on the
+# dual path is a later slice (S2b). (The FR2433 cros_ec node now lives in `modules/expander/`, S2a.)
 cros_ec = ["deepsleep/cros_ec"]
 
 # OPERATING MODES (see DESIGN.md "Operating modes"). A build compiles in the modes it supports; the
 # active mode is a RUNTIME switch among them. At least ONE mode is required (compile_error guard).
-# `mode-sensing` needs a 2nd I²C to master the sensor bus → NOT valid on fr24xx (compile_error).
 # `mode-passive` — SoM masters; MSP is a pure I/O-extender on the B1 slave, never touches the sensor bus.
 mode-passive = ["deepsleep/mode-passive"]
 # `mode-sensing` — SoM suspended; MSP acquires the sensor bus (B0 master), monitors, wakes the PMIC.

@@ -1,19 +1,24 @@
-# prod — bob-929 Stembus node firmware (family axis)
+# prod — bob-929 Stembus node firmware (DUAL-I²C family axis)
 
-The **shipping** MSP430 firmware for the bob-929 Stembus nodes. One source, a **compile-time family
-axis** — `fr247x` (default) and `fr24xx` — selects the PAC + memory map + size-gate budget, so both
-production node roles build from this crate. See [DESIGN.md](DESIGN.md) (requirements + strategy) and
+> **S2a reorg (STEM-DIRECTION "Repo layout"):** the single-I²C **FR2433** slave-only node was EXTRACTED
+> from this crate into its own binary — [`modules/expander/`](../modules/expander/) (cros_ec-only). Build
+> it with `just build fr2433`. **prod is now DUAL-I²C only.** (The DESIGN.md sections below still describe
+> the pre-split FR2433 design in places — a doc pass is pending; the authority for FR2433 is now the
+> expander crate.)
+
+The **shipping** MSP430 firmware for the bob-929 **dual-I²C** Stembus nodes. One source, a **compile-time
+family axis** — `fr247x` (default) / `fr215x` / `fr235x` — selects the PAC + memory map + size-gate budget.
+See [DESIGN.md](DESIGN.md) (requirements + strategy) and
 [../docs/MCU_SELECTION.md](../docs/MCU_SELECTION.md) (part eval).
 
 | Family feature | Parts | Role | I²C | Budget (gate) |
 |---|---|---|---|---|
 | **`fr247x`** (default) | FR2476 / FR2475 | **dual-I²C** node: Stem SLAVE + local sensor MASTER | 2× eUSCI_B | 32 KB / 8 KB |
-| `fr24xx` | FR2433 | **single-I²C** slave-only expander | 1× eUSCI_B | 15 KB / 4 KB |
+| `fr215x` / `fr235x` | FR2155 / FR2355 | **dual-I²C** node (production baseline / dev superset) | 2× eUSCI_B | 32 KB / 4 KB |
 
 `fr247x` is the **primary dev target** (the on-hand FR2476 dev boards). The production dual-I²C part is
-the **FR2155**; it joins as a future `fr215x` family once an FR2355 LaunchPad (its strict superset) is
-available to sign off (the FR2476 can't exercise the 2nd eCOMP). `fr24xx`/FR2433 stays a first-class
-family — the cheap, well-stocked slave-only node.
+the **FR2155** (`fr215x`); `fr235x`/FR2355 is its strict-superset dev LaunchPad (the FR2476 can't exercise
+the 2nd eCOMP). The cheap FR2433 slave-only node lives in `modules/expander/` now (see note above).
 
 > **Status.** `fr247x` now has its first working function: at boot it inits clock + UART + the sensor
 > I²C master, prints a banner (`PROD_BUILD` + detected model), **enumerates the I²C bus**, and reports
@@ -32,7 +37,8 @@ bidirectional terminal, e.g. `screen /dev/cu.usbmodem* 9600`, to send `s`/`r` fo
 
 ```sh
 just prod build            # build fr247x (default) + gate 32 KB/8 KB (FR2476/FR2475)
-just prod build fr24xx     # build FR2433 single-I²C + gate 15 KB/4 KB
+just prod build fr235x     # build FR2355 dual-I²C + gate 32 KB/4 KB
+just build fr2433          # build the FR2433 expander (modules/expander) — NOT prod
 just prod build fr247x fast  # no-LTO quick build (may exceed budget — release is what ships)
 just prod flash            # program the connected board (match the family you built!)
 ```

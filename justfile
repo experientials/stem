@@ -28,7 +28,8 @@ mod example
 mod pac
 mod memory     # per-chip linker memory maps (prod/memory-<chip>.x) — generate from TI .ld + lint
 mod diag       # MSP430 POST/diagnostic firmware (Docker toolchain)
-mod prod       # MSP430 product Stembus node firmware (Docker toolchain; family axis)
+mod prod       # MSP430 product Stembus node firmware (Docker toolchain; DUAL-I²C family axis)
+mod expander   # FR2433 single-I²C I/O-expander firmware (modules/expander; cros_ec-only)
 mod probe      # RP2040 bench-host firmware (modules/pico-probe) — host cargo, Linux+macOS
 mod usb
 mod bsp
@@ -57,7 +58,7 @@ build target *flags:
     case "{{target}}" in
         fr2355|fr235x) fam=fr235x; diagt=fr2355; kind=msp ;;
         fr2476|fr247x) fam=fr247x; diagt=fr2476; kind=msp ;;
-        fr2433|fr24xx) fam=fr24xx; diagt="";     kind=msp ;;  # no diag image for FR2433
+        fr2433|fr24xx) kind=expander ;;  # FR2433 I/O expander — its OWN binary crate (modules/expander), cros_ec-only; no diag image
         fr2155|fr215x) fam=fr215x; diagt=fr2155; kind=msp ;;
         rp2040)        kind=cortex ;;
         *) echo "unknown chip '{{target}}' — fr2355|fr2476|fr2433|fr2155|rp2040" >&2; exit 1 ;;
@@ -71,6 +72,15 @@ build target *flags:
             prod)  just prod build "$fam" auto console "" "$crosec" ;;
             diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;  # diag ignores crosec for now (converges onto the unified vocabulary in Rd)
             debug) just prod build "$fam" auto debug "" "$crosec" ;;  # prod + `debug` feature (post-POST "what was found")
+        esac
+    elif [ "$kind" = expander ]; then
+        # FR2433 I/O expander (modules/expander): cros_ec is UNCONDITIONAL in that crate, so there is no
+        # crosec/regmap toggle to pass — `--regmap` is not applicable here (this crate has no regmap path).
+        [ "$cls" = default ] && cls=prod
+        case "$cls" in
+            prod)  just expander build auto console ;;
+            diag)  echo "no diag image for {{target}} (FR2433 is slave-only — no POST harness)" >&2; exit 1 ;;
+            debug) just expander build auto debug ;;
         esac
     else  # cortex (rp2040): its only firmware is the debug bench host
         case "$cls" in

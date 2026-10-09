@@ -1,23 +1,22 @@
-# `just prod <verb>` — build/flash the PRODUCT Stembus node firmware (prod/, Rust; family axis).
+# `just prod <verb>` — build/flash the PRODUCT Stembus node firmware (prod/, Rust; DUAL-I²C family axis).
 #
-#   just prod build [family]   build for a family + GATE against its part budget (default fr247x)
-#   just prod build fr24xx     build the FR2433 single-I²C node instead
+#   just prod build [family]   build for a dual family + GATE against its part budget (default fr247x)
 #   just prod flash            program the connected board (host; needs msp430-macos-dev setup)
 #
-# TWO production families are first-class (see DESIGN.md / MCU_SELECTION.md): fr247x (FR2476/FR2475
-# dual-I²C — the on-hand dev boards, DEFAULT) and fr24xx (FR2433 single-I²C slave-only). The FR2155
-# production dual-I²C part joins as a future fr215x family. `build` fails if the footprint exceeds the
-# family budget (scripts/size-check.sh). Same build-path selection as `just diag build`: native if set
-# up, else the Docker toolchain image, native in-container on CI.
+# The DUAL-I²C families are first-class (see DESIGN.md / MCU_SELECTION.md): fr247x (FR2476/FR2475 — the
+# on-hand dev boards, DEFAULT), fr215x (FR2155 — production baseline), fr235x (FR2355 — dev superset).
+# (The single-I²C FR2433 node was extracted to `modules/expander/` — build it via `just build fr2433`.)
+# `build` fails if the footprint exceeds the family budget (scripts/size-check.sh). Same build-path
+# selection as `just diag build`: native if set up, else the Docker toolchain image, native on CI.
 
 image    := env_var_or_default("MSP430_IMAGE", "msp430-c-rust:local")
 mspdebug := env_var_or_default("MSPDEBUG_BIN", "/usr/local/bin/mspdebug")
 libdir   := env_var_or_default("MSP430_LIBDIR", "/usr/local/lib")
 cargo_cache := "-v msp430-cargo-registry:/opt/cargo/registry -v msp430-cargo-git:/opt/cargo/git"
 
-# Build prod for a FAMILY and gate its footprint against that family's part budget.
+# Build prod for a DUAL-I²C FAMILY and gate its footprint against that family's part budget.
 #   family: fr247x (default; FR2476/FR2475 dual-I²C, 32 KB window / 8 KB / 1 KB floor)
-#           fr24xx (FR2433 single-I²C slave-only, 15 KB / 4 KB / 512 B floor)
+#           fr215x | fr235x (FR2155/FR2355, 32 KB / 4 KB / 1 KB floor)
 #   mode:   auto (default) | native | fast | docker | docker-fast
 #   console: "console" (default; dev UART logging) | "" for a SILENT production image (smaller FRAM)
 # `-e PROD_BUILD` forwards a pinned stamp into the container; native path picks it up from the env.
@@ -27,15 +26,11 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
     case "{{family}}" in
         fr247x)        FRAM_BUDGET=32768; RAM_BUDGET=8192; FLOOR=1024;;  # FR2476 dev (8 KB SRAM)
         fr215x|fr235x) FRAM_BUDGET=32768; RAM_BUDGET=4096; FLOOR=1024;;  # FR2155/FR2355 (4 KB SRAM)
-        fr24xx)        FRAM_BUDGET=15360; RAM_BUDGET=4096; FLOOR=512;;   # FR2433 single-I²C
-        *) echo "unknown family '{{family}}' — use fr247x|fr215x|fr235x|fr24xx" >&2; exit 1;;
+        *) echo "unknown family '{{family}}' — use fr247x|fr215x|fr235x (FR2433 → just build fr2433)" >&2; exit 1;;
     esac
-    # Operating modes to compile in (DESIGN.md). Default per family: dual-I²C gets both (runtime-
-    # switchable); fr24xx is Passive-only (sensing needs a 2nd I²C). Override with the `modes` arg,
-    # e.g. `just prod build fr247x auto console mode-sensing` for a sensing-only image.
-    if [ -n "{{modes}}" ]; then MODES="{{modes}}"; else
-        case "{{family}}" in fr247x|fr215x|fr235x) MODES="mode-passive,mode-sensing";; fr24xx) MODES="mode-passive";; esac
-    fi
+    # Operating modes to compile in (DESIGN.md). Dual-I²C families get both (runtime-switchable).
+    # Override with the `modes` arg, e.g. `just prod build fr247x auto console mode-sensing`.
+    if [ -n "{{modes}}" ]; then MODES="{{modes}}"; else MODES="mode-passive,mode-sensing"; fi
     # `console` arg: "console" (lean UART log) | "" (silent) | "debug" (verbose: post-POST found-info).
     # The feature name IS the arg value (`debug` implies `console` in Cargo.toml), so it flows into FEATS.
     FEATS="{{family}},$MODES"; [ -n "{{console}}" ] && FEATS="$FEATS,{{console}}"
@@ -55,7 +50,7 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
         console) variant="{{family}}" ;;
         *)       variant="{{family}}-{{console}}" ;;  # e.g. debug → prod-<fam>-debug
     esac
-    if [ -n "{{extra}}" ]; then variant="$variant-{{extra}}"; fi  # distinct artifact, e.g. prod-fr24xx-cros_ec
+    if [ -n "{{extra}}" ]; then variant="$variant-{{extra}}"; fi  # distinct artifact, e.g. prod-fr247x-cros_ec
     finish() {  # $1 = cargo profile dir; copies to the variant artifact and gates THAT file
         local prof="$1" built art
         built="prod/target/msp430-none-elf/$prof/prod"
@@ -92,11 +87,11 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
     esac
 
 # flash prod's built ELF to the connected board (host; needs msp430-macos-dev setup).
-# `family`: fr247x (default) | fr24xx — picks the variant-unique artifact `prod-<family>` so you flash
-#           the family you mean, not whatever last clobbered the shared `prod` path.
+# `family`: fr247x (default) | fr215x | fr235x — picks the variant-unique artifact `prod-<family>` so you
+#           flash the family you mean, not whatever last clobbered the shared `prod` path.
 # `console`: "console" (default) | "" — flashes the '-silent' artifact when empty.
 # `profile`: "release" (default) or "fast".
-# Make sure the connected board matches the family (`fr247x` → an FR2476; `fr24xx` → an FR2433).
+# Make sure the connected board matches the family (`fr247x` → an FR2476; `fr235x` → an FR2355).
 # Cross-flashing is a mistake (different register map); boot's matches_build_family() flags it, and
 # `thepia hwd msp flash` refuses it when the family is declared. Prefer `thepia hwd msp flash` (hwd.toml).
 flash family="fr247x" profile="release" console="console":

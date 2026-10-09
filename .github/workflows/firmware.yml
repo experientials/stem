@@ -26,14 +26,16 @@ jobs:
       - name: Build diag (FR2476) — gated at 32 KB FRAM / 8 KB SRAM
         run: just diag build     # size-check.sh fails the job on overflow
 
-      # Both prod families are first-class — build and gate each. `just prod build` now emits a
+      # prod is the DUAL-I²C family axis — build and gate the dev default. `just prod build` emits a
       # variant-unique artifact `prod-<family>` (cargo's shared `prod` path is still clobbered per
       # build, but the suffixed copy is stable), so no hand-copy is needed here.
       - name: Build prod fr247x (FR2476/FR2475 dual-I²C) — gated 32 KB / 8 KB
         run: just prod build fr247x
 
-      - name: Build prod fr24xx (FR2433 single-I²C) — gated 15 KB / 4 KB
-        run: just prod build fr24xx
+      # FR2433 single-I²C node is its own binary crate now (modules/expander, cros_ec-only). Route via
+      # the chip-first frontend so it builds modules/expander and gates at 15 KB / 4 KB.
+      - name: Build expander fr2433 (FR2433 single-I²C, cros_ec) — gated 15 KB / 4 KB
+        run: just build fr2433
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
@@ -44,5 +46,5 @@ jobs:
             examples/hello-rust/target/msp430-none-elf/release/hello-rust
             diag/target/msp430-none-elf/release/diag
             prod/target/msp430-none-elf/release/prod-fr247x
-            prod/target/msp430-none-elf/release/prod-fr24xx
+            modules/expander/target/msp430-none-elf/release/expander-cros_ec
           if-no-files-found: error
