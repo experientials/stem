@@ -432,6 +432,34 @@ menu functions map to unified commands: `s`→`status`/rescan, `r`→`events`, `
 - **Deferred / not now** — recorded so it isn't lost; sequence it after the regmap→cros_ec reorg (Ra–Rd)
   lands, since it builds on the finished `Node`/`ident` surface.
 
+### Help/introspection is GENERATED from the command definitions (REQUIREMENT · Henrik 2026-10-09)
+
+**Verbatim (Henrik 2026-10-09):**
+> *"thepia hwd chat can introspect the stem-probe command structure using `help` and know how to
+> manipulate the hardware. It builds a chat interface on top which allows me to chat with the latest
+> hardware capabilities as they evolve. For this reason it is vital that the command structures are
+> correctly reflected in the help information, so the help text should be generated based on a
+> template/compile step from the command definitions in code."*
+
+**Derived requirement (not verbatim):**
+- **Single source of truth = the command definitions in code** (`stembus::command` — the vocabulary +
+  per-command metadata: name, args, help blurb). The `help` text, the on-device introspection reply, and
+  any catalog are **GENERATED** from those defs via a **template/compile step** (build.rs codegen, a derive
+  macro, or a const table emitted at build) — **never hand-maintained**. Help that can drift from the real
+  commands is a defect, because `thepia hwd chat` *acts on it* to drive hardware.
+- **Why it's vital:** `thepia hwd chat` introspects `help` to manipulate the hardware AND to build a chat
+  UI over *evolving* capabilities. Drift ⇒ the chat lies about what the device can do → wrong hardware
+  actions. So "help matches code" must be a **build-time guarantee**, not discipline.
+- **Ties to the discovery/`--dark` plan above:** the discoverable surface (`help`/introspection) IS this
+  generated artifact; a `--dark` build compiles it out and exposes only build+device ID → an **MCP/dev-docs
+  catalog**, which is itself generated from the *same* command defs (so on-device `help` and off-device
+  catalog can never disagree). Terse 1–2-char verbs are fine precisely because the names are generated +
+  documented, not memorized.
+- **Concrete debt:** today the stem-probe `help` is a **hand-maintained string** (`debug/stem-probe`
+  main.rs) — exactly the drift risk this forbids. The reorg's command work must replace it with codegen
+  from the `stembus::command` defs. (Deferred with the rest of the discovery work, but this is the governing
+  requirement for it.)
+
 **Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
 firmware-patch streaming, per-module execute), but the *wire protocol* is now the cros_ec-framing +
 postcard-payload split decided above (no longer PCA9698). The replacement plan above supersedes their
