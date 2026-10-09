@@ -7,98 +7,33 @@
 //! **What's backed today:** the debug/identity window (0x30–0x3F) is REAL — served by
 //! [`Status::read_reg`], so the SoM reads exactly what the bench UART dump shows (identity, build id,
 //! status, dev-count, fault). The PCA9698 GPIO banks (IP/OP/IOC/PI/MSK) are a coherent **firmware
-//! shadow** — writes persist and read back; on fr2433 OP/IOC/IP also touch real P1/P2 pins (see
-//! [`gpio`]), on the dual node the banks are still shadow (no bank↔port map yet). Voltages (0x2C/0x2D)
+//! shadow** — writes persist and read back; on fr2433 OP/IOC/IP also touch real P1/P2 pins (via the
+//! [`GpioBanks`] impl in `bsp::node_hw`), on the dual node the banks are still shadow (no bank↔port map
+//! yet). Voltages (0x2C/0x2D)
 //! read 0 until the rail ADC lands. This is the wire contract, live, minus the not-yet-defined pins.
 
 use crate::regmap::{self, ShadowState};
 use crate::status::Status;
-use bsp::pac::Peripherals;
-use bsp::stem_i2c::{self, SlaveEvent};
+// The hardware seam is now the host-clean `node-hal` traits (DEEPSLEEP-EXTRACTION.md Phase 6a) — this file
+// names NO concrete PAC. `bsp::StemHw` is the sole MSP430 impl; the bin constructs it and passes `&hw`.
+use node_hal::{GpioBanks, SlaveEvent, StemSlave};
+#[cfg(all(feature = "console", feature = "_dual"))]
+use node_hal::LeafMaster;
 
-// Bring the node's eUSCI_B up as an I²C slave at the role-based `addr` + route its pins — the transport
-// lives in `bsp::stem_i2c`; re-export so callers keep `stem::init(p, addr)`.
-pub use bsp::stem_i2c::init;
+/// Bring the node's slave transport up at the role-based `addr` (+ route its pins), generic over the
+/// hardware seam. Thin wrapper over [`StemSlave::init`] so call sites keep `stem::init(&hw, addr)`.
+pub fn init<H: StemSlave>(hw: &H, addr: u16) {
+    hw.init(addr);
+}
 
 // The I²C-slave address is **ROLE-BASED** — `stembus::role::role_for_model(..).addr()`, threaded into
 // `init`/`loopback_selftest` as `addr` (PCA9698 group 0x20–0x27). See I2C-API.md "Stem address is
 // ROLE-BASED": FR2355/FR2155=0x20 (production supervisor), FR2476/FR2475=0x21 (dev stand-in),
 // FR2433=0x22 (I/O-expander placeholder).
 
-/// Physical GPIO bank backing — the seam that makes the PCA9698 IP/OP/IOC banks touch real MSP430
-/// port registers instead of a pure firmware shadow. Chip-specific (port register names + which bits
-/// are safe to drive), so cfg-split. On the DUAL node the board's bank↔port map isn't defined yet, so
-/// its banks stay shadow — these are no-ops and IP reads 0, exactly as before.
-#[cfg(feature = "_dual")]
-mod gpio {
-    use super::Peripherals;
-    // `RegFile::read_ip` (dual) returns 0 directly — a deliberate size opt (no array/bounds path) — so
-    // this symmetric stub is unused on dual; kept for shape-parity with the fr2433 module. `drive_op`/
-    // `set_dir` below ARE called (no-op stubs wired from `write`).
-    #[allow(dead_code)]
-    #[inline]
-    pub fn read_ip(_p: &Peripherals, _bank: u8, _pol: u8) -> u8 {
-        0 // dual: no physical input backing yet (unchanged shadow contract)
-    }
-    #[inline]
-    pub fn drive_op(_p: &Peripherals, _bank: u8, _val: u8) {}
-    #[inline]
-    pub fn set_dir(_p: &Peripherals, _bank: u8, _ioc: u8) {}
-}
-
-#[cfg(feature = "fr2433")]
-mod gpio {
-    //! FR2433 (24-pin RGE) bank→port backing — datasheet SLASE59F (Fig 4-1; per-pin SEL decode Tables
-    //! 6-17 / 6-18). Bank 0 = P1, bank 1 = P2 (byte-wide ports). Bank 2 = P3 stays shadow: the PAC
-    //! models P3 as per-bit registers and only P3.0–2 are bonded on VQFN-24. The USABLE masks exclude
-    //! every pin with a reserved role so driving a bank NEVER disturbs a bus, the console, or the clock:
-    //!   • P1.2/3 = UCB0 I²C slave (always); P1.4/5 = UCA0 console (Table 6-17). P1.6/7 = UCA0CLK/STE +
-    //!     JTAG TDI/TDO — free as GPIO under the LaunchPad's 2-wire SBW (JTAG 4-wire not used).
-    //!   • P2.0/1 = **XOUT/XIN** (LFXT crystal, Table 6-18) — EXCLUDED: driving a populated crystal's
-    //!     pins is a hazard, and their GPIO use on the product is a BOM decision, not a default.
-    //! PROVISIONAL pending an FR2433 connections.toml/BOM (which of the *remaining* bits are actually
-    //! wired as GPIO on the product PCB); the masks below are the datasheet-safe superset.
-    use super::Peripherals;
-    const P1_GPIO: u8 = 0xC3; // P1.0,1,6,7 — exclude UCB0 SDA/SCL (P1.2/3) + UCA0 TXD/RXD (P1.4/5)
-    const P2_GPIO: u8 = 0xFC; // P2.2–7 — exclude XOUT/XIN (P2.0/1, LFXT crystal pins; Table 6-18)
-
-    /// IP (Input Port): live pin state XOR the polarity shadow, restricted to the backed bits.
-    #[inline]
-    pub fn read_ip(p: &Peripherals, bank: u8, pol: u8) -> u8 {
-        match bank {
-            0 => (p.p1.p1in().read().bits() ^ pol) & P1_GPIO,
-            1 => (p.p2.p2in().read().bits() ^ pol) & P2_GPIO,
-            _ => 0, // bank 2 (P3) + unbacked → 0
-        }
-    }
-    /// OP (Output Port): drive PxOUT, backed bits only — reserved bus/console bits left untouched.
-    #[inline]
-    pub fn drive_op(p: &Peripherals, bank: u8, val: u8) {
-        match bank {
-            0 => {
-                p.p1.p1out().modify(|r, w| unsafe { w.bits((r.bits() & !P1_GPIO) | (val & P1_GPIO)) });
-            }
-            1 => {
-                p.p2.p2out().modify(|r, w| unsafe { w.bits((r.bits() & !P2_GPIO) | (val & P2_GPIO)) });
-            }
-            _ => {}
-        }
-    }
-    /// IOC (I/O Config / direction): PCA9698 uses 1=input, 0=output → PxDIR = !IOC (backed bits only).
-    #[inline]
-    pub fn set_dir(p: &Peripherals, bank: u8, ioc: u8) {
-        let dir = !ioc;
-        match bank {
-            0 => {
-                p.p1.p1dir().modify(|r, w| unsafe { w.bits((r.bits() & !P1_GPIO) | (dir & P1_GPIO)) });
-            }
-            1 => {
-                p.p2.p2dir().modify(|r, w| unsafe { w.bits((r.bits() & !P2_GPIO) | (dir & P2_GPIO)) });
-            }
-            _ => {}
-        }
-    }
-}
+// The physical GPIO bank backing (PCA9698 IP/OP/IOC → real MSP430 port registers) moved DOWN into `bsp`
+// (Phase 6a): it's the chip's port map, so it lives in `bsp::node_hw`'s [`node_hal::GpioBanks`] impl for
+// `StemHw` (fr2433 drives P1/P2; dual stays a no-op/0 shadow). This file reaches it only through the trait.
 
 /// The register file behind the slave: the debug/identity [`Status`] (real) plus the PCA9698 GPIO
 /// shadow (coherent, not yet pin-backed on dual). One `read`/`write` maps a decoded [`regmap::RegSel`].
@@ -145,11 +80,11 @@ impl RegFile {
         self.mode_request.take()
     }
 
-    /// Read the byte a master gets for command index `reg`. `p` drives the physical IP read on fr2433
-    /// (see [`gpio`]); it's unused on the dual node, whose banks are still shadow.
-    fn read(&self, p: &Peripherals, reg: u8) -> u8 {
+    /// Read the byte a master gets for command index `reg`. `hw` drives the physical IP read on fr2433
+    /// (via [`GpioBanks`]); it's unused on the dual node, whose banks are still shadow.
+    fn read<H: GpioBanks>(&self, hw: &H, reg: u8) -> u8 {
         #[cfg(feature = "_dual")]
-        let _ = p;
+        let _ = hw;
         // CRC readout window (ADR-0010): a prior WRITE to 0x3F set the byte cursor; return that CRC byte.
         // Intercept before the generic Extended→status path (0x3F would otherwise read as reserved 0).
         if reg == regmap::DBG_CRC {
@@ -159,7 +94,7 @@ impl RegFile {
             // Debug/identity window — the real state (identical to the bench UART dump).
             regmap::RegSel::Extended(_) => self.status.read_reg(reg),
             // Input Port — physical PxIN (XOR polarity) on fr2433; 0 on the still-shadow dual banks.
-            regmap::RegSel::InputPort(b) => self.read_ip(p, b),
+            regmap::RegSel::InputPort(b) => self.read_ip(hw, b),
             regmap::RegSel::OutputPort(b) => self.op[b as usize],
             regmap::RegSel::IoConfig(b) => self.ioc[b as usize],
             regmap::RegSel::PolarityInv(b) => self.shadow.polarity[b as usize],
@@ -174,21 +109,21 @@ impl RegFile {
     // array access, no bounds-check path); fr2433 applies the polarity shadow to the live PxIN.
     #[cfg(feature = "fr2433")]
     #[inline]
-    fn read_ip(&self, p: &Peripherals, bank: u8) -> u8 {
-        gpio::read_ip(p, bank, self.shadow.polarity[bank as usize])
+    fn read_ip<H: GpioBanks>(&self, hw: &H, bank: u8) -> u8 {
+        hw.read_ip(bank, self.shadow.polarity[bank as usize])
     }
     #[cfg(feature = "_dual")]
     #[inline]
-    fn read_ip(&self, _p: &Peripherals, _bank: u8) -> u8 {
+    fn read_ip<H: GpioBanks>(&self, _hw: &H, _bank: u8) -> u8 {
         0
     }
 
     /// Apply a master write of `val` to command index `reg`. Read-only regions are ignored. On fr2433,
-    /// OP/IOC also drive the physical port (PxOUT / PxDIR) via [`gpio`]; the shadow is still kept so a
+    /// OP/IOC also drive the physical port (PxOUT / PxDIR) via [`GpioBanks`]; the shadow is still kept so a
     /// read-back returns the last written value regardless of pin backing.
-    fn write(&mut self, p: &Peripherals, reg: u8, val: u8) {
+    fn write<H: GpioBanks>(&mut self, hw: &H, reg: u8, val: u8) {
         #[cfg(feature = "_dual")]
-        let _ = p;
+        let _ = hw;
         // Operating-mode control (0x3E): record the request; the main loop applies it after the
         // transaction (decode(0x3E) is Extended, which is otherwise read-only → this must precede it).
         if reg == regmap::MODE_CTRL {
@@ -204,11 +139,11 @@ impl RegFile {
         match regmap::decode(reg) {
             regmap::RegSel::OutputPort(b) => {
                 self.op[b as usize] = val;
-                gpio::drive_op(p, b, val); // no-op on dual
+                hw.drive_op(b, val); // no-op on dual
             }
             regmap::RegSel::IoConfig(b) => {
                 self.ioc[b as usize] = val;
-                gpio::set_dir(p, b, val); // no-op on dual
+                hw.set_dir(b, val); // no-op on dual
             }
             regmap::RegSel::PolarityInv(b) => self.shadow.polarity[b as usize] = val,
             regmap::RegSel::IntMask(b) => self.shadow.int_mask[b as usize] = val,
@@ -239,7 +174,7 @@ impl Slave {
     /// Apply one decoded [`SlaveEvent`] to the register file (PCA9698 command-pointer protocol,
     /// I2C-API.md §7.3). The single source of the dispatch logic — shared by the sync [`poll`] drain
     /// (dual) and the async [`serve`] task (fr2433), so the two can't drift.
-    fn handle(&mut self, p: &Peripherals, rf: &mut RegFile, ev: SlaveEvent) {
+    fn handle<H: StemSlave + GpioBanks>(&mut self, hw: &H, rf: &mut RegFile, ev: SlaveEvent) {
         match ev {
             // START matching our address: the next RX byte is the command; a read keeps the pointer.
             SlaveEvent::Start => self.first_byte = true,
@@ -250,15 +185,15 @@ impl Slave {
                     self.ai = b & regmap::CMD_AI != 0;
                     self.first_byte = false;
                 } else {
-                    rf.write(p, self.reg_ptr, b);
+                    rf.write(hw, self.reg_ptr, b);
                     if self.ai {
                         self.reg_ptr = regmap::next_ai(self.reg_ptr);
                     }
                 }
             }
             SlaveEvent::TxReq => {
-                let v = rf.read(p, self.reg_ptr);
-                stem_i2c::provide_tx(p, v);
+                let v = rf.read(hw, self.reg_ptr);
+                hw.provide_tx(v);
                 if self.ai {
                     self.reg_ptr = regmap::next_ai(self.reg_ptr);
                 }
@@ -275,9 +210,9 @@ impl Slave {
 /// command register — low 6 bits = pointer, [`regmap::CMD_AI`] = auto-increment. Subsequent written
 /// bytes go to the pointed register (stepping the bank under AI); a master read returns the pointed
 /// register (also stepping under AI).
-pub fn poll(p: &Peripherals, s: &mut Slave, rf: &mut RegFile) {
-    while let Some(ev) = stem_i2c::next_event(p) {
-        s.handle(p, rf, ev);
+pub fn poll<H: StemSlave + GpioBanks>(hw: &H, s: &mut Slave, rf: &mut RegFile) {
+    while let Some(ev) = hw.next_event() {
+        s.handle(hw, rf, ev);
     }
 }
 
@@ -287,15 +222,15 @@ pub fn poll(p: &Peripherals, s: &mut Slave, rf: &mut RegFile) {
 /// eUSCI slave ISR wakes the CPU + `Pender::wake()`s, and the next poll drains the event. Functionally
 /// identical to the `poll` drain — it only changes *when* the CPU runs (interrupt-driven sleep, not a
 /// busy loop). Used by the fr2433 Passive node; dual still uses [`poll`] until its async reshape.
-pub async fn serve(p: &Peripherals, s: &mut Slave, rf: &mut RegFile) {
+pub async fn serve<H: StemSlave + GpioBanks>(hw: &H, s: &mut Slave, rf: &mut RegFile) {
     loop {
         // Leaf: resolve to the next slave event, or `Pending` when the bus is idle (→ executor idles).
-        let ev = core::future::poll_fn(|_cx| match stem_i2c::next_event(p) {
+        let ev = core::future::poll_fn(|_cx| match hw.next_event() {
             Some(ev) => core::task::Poll::Ready(ev),
             None => core::task::Poll::Pending,
         })
         .await;
-        s.handle(p, rf, ev);
+        s.handle(hw, rf, ev);
     }
 }
 
@@ -306,13 +241,13 @@ pub async fn serve(p: &Peripherals, s: &mut Slave, rf: &mut RegFile) {
 /// IP←PxIN all work end-to-end. Leaves P1.0 driven low. On the LaunchPad P1.0 is LED1, so a PASS also
 /// blinks it. Console/bench only.
 #[cfg(all(feature = "fr2433", feature = "console"))]
-pub fn gpio_selftest(p: &Peripherals, rf: &mut RegFile) -> bool {
+pub fn gpio_selftest<H: GpioBanks>(hw: &H, rf: &mut RegFile) -> bool {
     // IOC: 1=input, 0=output (PCA9698). 0xFE → bank-0 bit0 output, the rest input.
-    rf.write(p, regmap::IOC_BASE, 0xFE);
-    rf.write(p, regmap::OP_BASE, 0x01); // P1.0 high
-    let hi = rf.read(p, regmap::IP_BASE) & 0x01;
-    rf.write(p, regmap::OP_BASE, 0x00); // P1.0 low
-    let lo = rf.read(p, regmap::IP_BASE) & 0x01;
+    rf.write(hw, regmap::IOC_BASE, 0xFE);
+    rf.write(hw, regmap::OP_BASE, 0x01); // P1.0 high
+    let hi = rf.read(hw, regmap::IP_BASE) & 0x01;
+    rf.write(hw, regmap::OP_BASE, 0x00); // P1.0 low
+    let lo = rf.read(hw, regmap::IP_BASE) & 0x01;
     hi == 0x01 && lo == 0x00
 }
 
@@ -357,13 +292,18 @@ pub const LOOPBACK_JUMPER_HINT: &str = "P4.6->P1.2, P4.7->P1.3";
 /// Requires **Sensing** (B0 must be up as master). With no jumpers the master reads just time out →
 /// `ran == false` (harmless). Console/bench only.
 #[cfg(all(feature = "console", feature = "_dual"))]
-pub fn loopback_selftest(p: &Peripherals, s: &mut Slave, rf: &mut RegFile, addr: u16) -> Loopback {
+pub fn loopback_selftest<H: StemSlave + GpioBanks + LeafMaster>(
+    hw: &H,
+    s: &mut Slave,
+    rf: &mut RegFile,
+    addr: u16,
+) -> Loopback {
     let addr = addr as u8;
     let mut iface = [0u8; 1];
-    let r1 = bsp::i2c::read_reg_pumped(p, addr, regmap::DBG_IFACE, &mut iface, || poll(p, s, rf));
+    let r1 = hw.read_reg_pumped(addr, regmap::DBG_IFACE, &mut iface, &mut || poll(hw, s, rf));
     let mut ver = [0u8; 1];
     let r2 =
-        bsp::i2c::read_reg_pumped(p, addr, regmap::DBG_FW_VER_MAJOR, &mut ver, || poll(p, s, rf));
+        hw.read_reg_pumped(addr, regmap::DBG_FW_VER_MAJOR, &mut ver, &mut || poll(hw, s, rf));
     Loopback {
         ran: r1 && r2,
         iface: iface[0],

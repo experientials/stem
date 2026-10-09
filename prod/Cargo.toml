@@ -55,6 +55,9 @@ panic-msp430 = "0.4"
 # The shared low-level layer: chip-select PAC alias, board semantic map, hal I2c seam, Leaf-I2C
 # driver. prod re-exports bsp::{pac,hal,i2c} (main.rs); the family feature forwards to bsp (above).
 bsp = { path = "../crates/bsp" }
+# Host-clean hardware-seam traits + `ChipId` (DEEPSLEEP-EXTRACTION.md Phase 6). prod builds the `ChipId`
+# once from the detected model and passes it to `deepsleep::{post,status}` (which are now PAC-free).
+node-hal = { path = "../crates/node-hal" }
 sched = { path = "../crates/sched" }
 # The Stem-bus wire contract (regmap constants) + shared codecs (FRAM CRC) — ONE definition this server
 # shares with the masters (stem-probe, M7). prod::regmap re-exports its constants; post.rs uses its CRC.

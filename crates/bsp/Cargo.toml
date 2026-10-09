@@ -15,6 +15,10 @@ msp430fr2155 = { path = "../../pac/msp430fr2155", optional = true }
 msp430fr2433 = { path = "../../pac/msp430fr2433", optional = true }
 # embedded-hal 1.0 — the I2c trait the shared `crates/devices` drivers talk to (see `hal`).
 embedded-hal = "1.0"
+# Host-clean hardware-seam traits (StemSlave/GpioBanks/LeafMaster) + `SlaveEvent`. `bsp::StemHw` wraps the
+# PAC `Peripherals` and impls them so `deepsleep` can be generic over the hardware (DEEPSLEEP-EXTRACTION.md
+# Phase 6a). `bsp::stem_i2c` re-exports `SlaveEvent` from here.
+node-hal = { path = "../node-hal" }
 
 [features]
 # No default: bsp is never built standalone — the consumer selects the chip (compile_error otherwise).

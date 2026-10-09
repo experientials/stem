@@ -1,0 +1,12 @@
+[package]
+name = "node-hal"
+version = "0.1.0"
+edition = "2021"
+description = "Host-clean hardware-seam traits for the deepsleep node: the narrow per-concern seams (StemSlave event transport, GpioBanks bank backing, LeafMaster register read) that de-weld `deepsleep` from any concrete MCU PAC (DEEPSLEEP-EXTRACTION.md Phase 6a). NO PAC / bsp / msp430 dependency — the MSP430 impl lives in `bsp`."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Pure trait crate — depends ONLY on embedded-hal's I²C traits (themselves host-clean, no HAL impl), so
+# `node-hal` stays buildable on the host. `LeafBus::Bus` is bound by `embedded_hal::i2c::I2c`. Version
+# matches `bsp`/`devices` (both `embedded-hal = "1.0"`).
+embedded-hal = "1.0"

@@ -336,6 +336,120 @@ Cargo's crate-scoping dictates one answer:
   the reserved regions. May never happen.
 - **Phase 5 — prod-bin slimming.** Drop the triplicated loop; the harness drives `deepsleep` over `sched`.
 
+- **Phase 6 — de-weld the type (cross-ARCH prep; LOW-RISK, do after Phase 1 settles) · scoped 2026-10-08.**
+  - **6a — ✅ DONE 2026-10-08 (compile+size-verified; HW-proof pending).** Central seam de-welded. NEW
+    host-clean crate `crates/node-hal` (`#![no_std]`, **zero deps** — no PAC/bsp/msp430) holds `SlaveEvent`
+    (moved out of `bsp::stem_i2c`, re-exported there) + the three narrow traits `StemSlave`/`GpioBanks`/
+    `LeafMaster`. `bsp` orphan-rule wrapper `StemHw<'a>(&'a Peripherals)` (`bsp/src/node_hw.rs`) impls all
+    three (fr2433 gpio port map relocated here from `deepsleep::stem`; dual = no-op shadow; `LeafMaster`
+    gated `_leaf`). `deepsleep/src/stem.rs` now names **no** concrete PAC/`bsp` type — `RegFile`/`Slave`/
+    `poll`/`serve`/`gpio_selftest`/`loopback_selftest` are generic over `&H` bounded by exactly the traits
+    each uses. prod `main.rs` builds `bsp::StemHw(p)` in `run_dual`+`run_fr24xx` and passes `&hw`; ISR/LPM
+    code still calls `bsp::stem_i2c::irq_*` directly (unchanged). **Builds green (all exit 0):** fr2433
+    4560/15360 B (29%), fr2476 5628/32768 (17%), fr2355 5588/32768 (17%), fr2476 --diag 23642/32768 (72%);
+    fr2433 independently re-verified. **NOT HW-proven** (no flash) — zero-cost newtype delegation over
+    identical register ops, so no behavioral change expected, but prove via the stem-probe before trusting.
+    Scope held: `enumerate`/`mode`/`post`/`status`/`ec`/`node`/`regmap` untouched (6b/6c); deepsleep keeps
+    its `bsp` dep for those. `--cros-ec` not build-tested.
+  - **6b — ✅ DONE 2026-10-08 (compile+size-verified; HW-proof pending).** `enumerate.rs` + `mode.rs`
+    de-welded behind two new node-hal traits: `Console` (full `bsp::fmt` surface) and `LeafBus`
+    (`type Bus: embedded_hal::i2c::I2c` via the impl-lifetime trick — no GAT; transfers stay on
+    embedded-hal, only `recover`/`bus_levels`/`acquire`/`release` are custom). node-hal gained an
+    `embedded-hal = "1.0"` dep (pure traits, stays host-clean). `bsp::StemHw` impls both (LeafBus gated
+    `_leaf`). Neither file names a `bsp`/`Peripherals` type in code. **Builds green (exit 0):** fr2476
+    5652/32768, fr2355 5612/32768, fr2433 4560/15360 (unchanged — enumerate/mode cfg'd out), fr2476
+    --diag 23642, fr2476 --debug 21128; fr2476 independently re-verified. +24 B on dual images
+    (trait-delegation codegen). **NOT HW-proven.** `--cros-ec` not build-tested.
+  - **6c — ✅ DONE 2026-10-08 (compile+size-verified; HW-proof pending).** post/status/ec de-welded.
+    **Model decision resolved by NOT moving the enum:** post/status only ever extract `device_id()`+
+    `matches_build_family()` from `Model`, so a tiny host-clean `node_hal::ChipId { device_id: u16,
+    family_ok: bool }` (built once in the bin from `bsp::model`) is threaded instead — the `Model` enum
+    stays in `bsp` (it's a chip enumeration; must not pollute node-hal with chip variants). The 2 eUSCI
+    debug pokes → one new `LeafBus::leaf_debug_regs() -> (u16,u16)`. ec.rs generic over `StemSlave`.
+    post/status/ec name no `bsp`/`Peripherals` in code. **Builds green (exit 0):** fr2476 5356, fr2355
+    5340, fr2433 4416, fr2476 --debug 20574, **fr2433 --cros-ec 6380** (compiles ec.rs — independently
+    re-verified), fr2476 --diag 23642. FRAM dropped ~300 B vs 6b (ChipId replaced Model-enum threading).
+    **NOT HW-proven.** deepsleep still deps `bsp` (→ 6d).
+  - **6d — ✅ DONE 2026-10-08 (compile+size-verified; HW-proof pending). deepsleep is now BSP-FREE.**
+    Turned out low-risk: deepsleep/src was already bsp-free in code (6a–6c), and prod/Cargo.toml already
+    enables `bsp/<chip>` DIRECTLY (not only via deepsleep), so 6d was pure Cargo surgery — removed
+    `bsp = {…}` from deepsleep/Cargo.toml and nulled the `fr* = ["bsp/fr*"]` forwards to plain `fr* = []`
+    cfg markers (deepsleep still uses them for its own `#[cfg]`; the bin→bsp edge selects the PAC +
+    `bsp/_leaf`). **Builds green (exit 0):** fr2476 5356, fr2433 4416, fr2433 --cros-ec 6380, fr2476
+    --diag 23642. **NOT HW-proven.**
+  - **6e — PENDING (full host-buildability): retire the last arch dep, `msp430` (the `asm::nop` pacing in
+    `enumerate`'s `--debug` ranging demo).** Replace with `core::hint::spin_loop()` or a seam method. Only
+    then does deepsleep build on the HOST (`cargo test` off-target → the host-mock + host-test that make
+    Phase 6 non-speculative; see Phase 6 intro). Small; deferred.
+
+  **PHASE 6 (6a–6d) COMPLETE 2026-10-08:** `deepsleep` is a **bsp-free capability crate** — the chip/board
+  layer is swappable (a future `ti-m0-bsp` drops in behind the `node-hal` traits without touching deepsleep
+  logic), which is what the MSP430→TI-M0 and PD-controller transition scenarios (STEM-DIRECTION §"Repo
+  layout" pt 3) required. node-hal traits: `StemSlave`/`GpioBanks`/`LeafMaster`/`LeafBus`/`Console` +
+  `SlaveEvent`/`ChipId`. Sole impl: `bsp::StemHw`.
+
+  **✅ HW-PROVEN 2026-10-08 — the cros_ec path (the one that SURVIVES; regmap is being retired per
+  Phase 2).** @fr2433 flashed with `prod-fr24xx-cros_ec` (build-id `0xA817E015`), driven by the @rp2040
+  stem-probe's cros_ec commands:
+  - **HELLO @0x22** → `in=A5A51234 out=A6A71538` PASS (correct cros_ec echo transform).
+  - **GET_PROTOCOL_INFO @0x22** → `versions=0x08 (v3), max_req/resp=40` PASS.
+  - **vendor EC_CMD_STEMBUS `ident` @0x22** → `iface=0xD0 model=0x8240 role=0x22 build=0xA817E015 ver=0.1.0`
+    PASS → the de-welded **ec.rs** (cros_ec EC-slave over `StemSlave`) + **node.rs** Node adapter run on HW.
+  This exercises the 6a `StemSlave` transport seam on the path that ships. **The regmap results below are
+  for the surface being DELETED (Phase 2) — kept only as incidental evidence, not the validation.**
+
+  (Incidental, regmap surface — being retired) bench: @fr2476 + @fr2433 flashed with `prod-fr247x`/
+  `prod-fr24xx`, byte-verified; driven by the @rp2040 stem-probe master:
+  - **Fresh build-ids confirm the NEW code runs** (not stale images): 0x21 (fr2476) build-id
+    `0x7CAA8F65` (old `0x66D9D2CF`); 0x22 (fr2433) `0xB4__AEBE` (old `0xFDA60711`).
+  - **6a — proven:** `vstem 0x21` PASS (iface=0xD0, model=0x832A, fw v0.1.0, status) → de-welded dual
+    `poll` serves the slave surface. fr2433 @0x22 answers `0xD0` on direct reads (scan single-pass misses
+    it; the LPM sleeper NAKs the first wake probe, then reads wake it) → de-welded `serve`/LPM-wake runs.
+  - **6b — proven:** live mode round-trip on fr2476 — `w 0x3e 01`→Sensing gave status `0x07`
+    (BOOTED|ENUMERATED|BUS_OK) + dev_count `0x01` (the `LeafBus` acquire + `enumerate` scan ran), then
+    `w 0x3e 00`→Passive returned mode `0x00`, node still healthy (`LeafBus::release` clean, no wedge).
+  - **6c — proven:** identity/status `read_reg` served correct iface/model/version/build-id/status/mode.
+  - **NOT exercised live (build-verified only):** the `cros_ec` path (ec.rs — flashed images were the
+    plain regmap slave, not `--cros-ec`); the console-only `gpio_selftest`/`loopback_selftest`; @fr2355
+    (0x20) was not flashed (left its old image; it no-ACKed — pre-existing bench state, not a regression).
+
+  **Remaining caveat:** deepsleep still deps `msp430` (6e) so it's not yet HOST-buildable. **Next
+  milestones:** 6e (host-build), the cros_ec HW-proof (flash `--cros-ec`, re-run the §0 HELLO), and/or
+  Phase 7 (cross-arch `LowPower`/sleep trait — still gated on a real `ti-m0-bsp` to co-design against).
+  Makes `deepsleep` generic over its hardware handle so the MSP430 PAC is **one instantiation**, not a
+  hard type dependency — the prerequisite for the MSP430→TI-M0 (and PD-controller) parallel-chip
+  transition in STEM-DIRECTION.md §"Repo layout" (point 3: chip bound by crate composition, not `cfg`).
+  - **Scope (investigation 2026-10-08; a first grep was wrong — see correction):** the coupling is
+    **mostly** a type weld — 18 public signatures name `&bsp::pac::Peripherals` ([stem.rs], [mode.rs],
+    [enumerate.rs], [post.rs], [status.rs], [ec.rs]) and thread it as an opaque handle into `bsp` calls.
+    **CORRECTION:** the initial claim "NO direct PAC register pokes" was based on a flawed grep
+    (`\bp\.[A-Z]` — missed the PAC's *lowercase* field names). The accurate count is **8 real register
+    pokes in 2 files**: [stem.rs] `gpio` module (6 — `p.p1`/`p.p2` fr2433 bank→port backing) and
+    [post.rs] (2 — `p.e_usci_b0`). All 8 are genuinely chip-specific and **relocate into per-chip `bsp`
+    trait impls** (where the fr2433 port map belongs anyway); the other 6 files are pure type-weld. So
+    6a is de-welding a parameter type PLUS moving ~8 lines of real port logic down into `bsp`.
+  - **The trait surface deepsleep actually consumes from `bsp`** (= what the handle/trait must expose):
+    `stem_i2c` (the `SlaveEvent`/`next_event`/`provide_tx` event seam) · `board::{leaf_i2c, route_stem_i2c}`
+    + `i2c` (Leaf master, `_dual` only) · `hal::EusciI2c` · `model::Model` · `fmt` · the gpio-bank backing
+    `read_ip`/`drive_op`/`set_dir` (already cfg-split in stem.rs) · and the one genuinely arch-specific
+    bit → **LPM sleep entry** (inline asm `bis #0x18,r2`), which stays in Phase 7.
+  - **Shape:** replace `&bsp::pac::Peripherals` in signatures with `&HW` (associated type / generic bound
+    by the capabilities above); MSP430 `bsp` provides the sole impl. **Keep the existing event seams as-is**
+    (do NOT invent an embedded-hal slave trait — §A already decided the slave is an event seam).
+  - **Proof it's safe:** the unchanged MSP430 build (prod fr2476/fr2355/fr2433 + diag, all in budget) still
+    passing IS the regression gate — no second arch needed to validate Phase 6.
+
+- **Phase 7 — cross-ARCH `LowPower`/sleep trait (DEFERRED · trigger-gated) · scoped 2026-10-08.**
+  Co-design the arch-portable sleep/wake seam (MSP430 `bis #0x18,r2` + `wake_cpu` trampoline vs. a
+  Cortex-M0 `WFI`/sleep + NVIC wake) across MSP430 **and** TI-M0.
+  - **DO NOT START until a TI-M0 `bsp` skeleton exists.** A portability trait with one implementor is a
+    guess — and sleep-entry/clock-gating/slave-wake are exactly where MSP430 and M0 diverge, so a
+    1-implementor seam would very likely be wrong and get redone. This is the [[purity-seam-trait]] /
+    STEM-DIRECTION §162 "no forced single-implementor commons" discipline applied. **Trigger:** `bsp/ti-m0`
+    (or equivalent) lands → co-design the trait against both, then migrate MSP430's LPM path behind it.
+  - Until then, LPM entry stays MSP430-specific in `bsp` (per `docs/references/msp430-lpm-wake-pattern.md`);
+    Phase 6 already keeps it *out* of `deepsleep` logic, so no M0-readiness is lost by waiting.
+
 **Risks:** Phase 1 is the real cost (the ISR/waker/LPM plumbing + the non-embedded-hal slave seam, and
 revisiting the no-ISR single-threaded assumption — shared state touched by ISRs needs care); diag size
 (measure each move); keep `deepsleep` capabilities individually invocable + feature-gateable so the

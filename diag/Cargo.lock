@@ -11,6 +11,7 @@ dependencies = [
  "msp430fr2155",
  "msp430fr2355",
  "msp430fr2476",
+ "node-hal",
 ]
 
 [[package]]
@@ -96,6 +97,13 @@ name = "msp430fr2476"
 version = "0.1.0"
 dependencies = [
  "vcell",
+]
+
+[[package]]
+name = "node-hal"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal",
 ]
 
 [[package]]

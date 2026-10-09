@@ -12,11 +12,9 @@
 use crate::enumerate::Scan;
 use crate::regmap;
 use crate::{VER_MAJOR, VER_MINOR, VER_PATCH}; // deepsleep's capability version (§B)
-use bsp::model::Model;
+use node_hal::ChipId; // host-clean chip identity (device id + family-match), Phase 6c
 #[cfg(feature = "console")]
-use bsp::fmt as uart; // shared console formatters over the board UART
-#[cfg(feature = "console")]
-use bsp::pac::Peripherals;
+use node_hal::Console; // the host-clean console seam — this file names no concrete PAC (Phase 6c)
 
 // `DBG_STATUS` (0x37) / `DBG_FAULT` (0x3A) flag bits — the shared definitions (one source: the
 // `stembus::flags` codec, so a master decodes exactly what this server sets). Re-exported under the
@@ -52,16 +50,16 @@ impl Status {
     /// rather than 112 phantom devices. DUAL-only: the single-I²C fr24xx (Passive) node never masters
     /// a sensor bus, so it publishes `booted()` instead.
     #[cfg(feature = "_dual")]
-    pub fn from_scan(model: Model, scan: &Scan, build: &str) -> Self {
+    pub fn from_scan(chip: ChipId, scan: &Scan, build: &str) -> Self {
         let mut status = flags::BOOTED | flags::ENUMERATED;
         let mut fault = 0u8;
-        if !model.matches_build_family() {
+        if !chip.family_ok {
             status |= flags::WRONG_FAMILY;
         }
         if scan.faulted {
             fault |= fault::BUS_WEDGED;
             return Self {
-                model_id: model.device_id(),
+                model_id: chip.device_id,
                 build_id: build_id(build),
                 status,
                 dev_count: 0,
@@ -79,7 +77,7 @@ impl Status {
             }
         }
         Self {
-            model_id: model.device_id(),
+            model_id: chip.device_id,
             build_id: build_id(build),
             status,
             dev_count: scan.present.count() as u8,
@@ -92,13 +90,13 @@ impl Status {
     /// Booted, but the sensor bus was NOT scanned — used in **Passive** mode, where the MSP never
     /// masters the sensor bus. BOOTED only (no ENUMERATED / BUS_OK), so the SoM doesn't read a false
     /// enumeration. Identity/build still populated.
-    pub fn booted(model: Model, build: &str) -> Self {
+    pub fn booted(chip: ChipId, build: &str) -> Self {
         let mut status = flags::BOOTED;
-        if !model.matches_build_family() {
+        if !chip.family_ok {
             status |= flags::WRONG_FAMILY;
         }
         Self {
-            model_id: model.device_id(),
+            model_id: chip.device_id,
             build_id: build_id(build),
             status,
             dev_count: 0,
@@ -166,38 +164,38 @@ impl Status {
     /// Bench dump of the debug window over UART — the escape hatch until an I2C master reads it.
     /// Prints the raw 0x30–0x3F bytes (exactly what the SoM would read) plus a decoded one-liner.
     #[cfg(feature = "console")]
-    pub fn dump(&self, p: &Peripherals) {
-        uart::puts(p, "dbg 30-3F:");
+    pub fn dump<H: Console>(&self, hw: &H) {
+        hw.puts("dbg 30-3F:");
         let mut r = regmap::EXT_BASE;
         while r <= regmap::EXT_END {
-            uart::putc(p, b' ');
-            uart::hex8(p, self.read_reg(r));
+            hw.putc(b' ');
+            hw.hex8(self.read_reg(r));
             r += 1;
         }
-        uart::puts(p, "\n  model=");
-        uart::hex8(p, (self.model_id >> 8) as u8);
-        uart::hex8(p, self.model_id as u8);
-        uart::puts(p, " build=");
-        uart::hex8(p, (self.build_id >> 24) as u8);
-        uart::hex8(p, (self.build_id >> 16) as u8);
-        uart::hex8(p, (self.build_id >> 8) as u8);
-        uart::hex8(p, self.build_id as u8);
-        uart::puts(p, " devs=");
-        uart::dec(p, self.dev_count as u16);
-        uart::puts(p, " known=0x");
-        uart::hex8(p, self.known_present);
-        uart::puts(p, " status=0x");
-        uart::hex8(p, self.status);
-        uart::puts(p, " fault=0x");
-        uart::hex8(p, self.fault);
-        uart::puts(p, " ver=");
-        uart::dec(p, VER_MAJOR as u16);
-        uart::putc(p, b'.');
-        uart::dec(p, VER_MINOR as u16);
-        uart::putc(p, b'.');
-        uart::dec(p, VER_PATCH as u16);
-        uart::puts(p, " mode=0x");
-        uart::hex8(p, self.mode);
-        uart::putc(p, b'\n');
+        hw.puts("\n  model=");
+        hw.hex8((self.model_id >> 8) as u8);
+        hw.hex8(self.model_id as u8);
+        hw.puts(" build=");
+        hw.hex8((self.build_id >> 24) as u8);
+        hw.hex8((self.build_id >> 16) as u8);
+        hw.hex8((self.build_id >> 8) as u8);
+        hw.hex8(self.build_id as u8);
+        hw.puts(" devs=");
+        hw.dec(self.dev_count as u16);
+        hw.puts(" known=0x");
+        hw.hex8(self.known_present);
+        hw.puts(" status=0x");
+        hw.hex8(self.status);
+        hw.puts(" fault=0x");
+        hw.hex8(self.fault);
+        hw.puts(" ver=");
+        hw.dec(VER_MAJOR as u16);
+        hw.putc(b'.');
+        hw.dec(VER_MINOR as u16);
+        hw.putc(b'.');
+        hw.dec(VER_PATCH as u16);
+        hw.puts(" mode=0x");
+        hw.hex8(self.mode);
+        hw.putc(b'\n');
     }
 }

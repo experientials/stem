@@ -13,10 +13,11 @@
 #![allow(dead_code)] // some paths are unused depending on which mode features are compiled in.
 
 use crate::regmap;
-use bsp::pac::Peripherals;
+use node_hal::LeafBus;
 
-// Sensor-bus acquire/release is now the `bsp::board::leaf_i2c_{acquire,release}` role — no raw P1/eUSCI
-// pokes here (the pin/instance specifics live in bsp, keeping this module chip-agnostic).
+// Sensor-bus acquire/release is the host-clean `node_hal::LeafBus::{acquire,release}` seam (Phase 6b):
+// no concrete PAC/`bsp` type here, no raw P1/eUSCI pokes. The MSP430 impl (`bsp::StemHw`) delegates to
+// `bsp::board::leaf_i2c_{acquire,release}`; the pin/instance specifics stay in bsp.
 
 /// The MSP's operating posture. A variant exists only for a mode that was compiled in.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -113,9 +114,9 @@ pub struct ModeMachine {
 impl ModeMachine {
     /// Boot into the default mode, performing its entry action (acquire the bus for Sensing; ensure
     /// released for Passive).
-    pub fn boot(p: &Peripherals) -> Self {
+    pub fn boot<H: LeafBus>(hw: &H) -> Self {
         let m = Mode::default_boot();
-        enter(p, m);
+        enter(hw, m);
         Self { current: m }
     }
 
@@ -128,35 +129,35 @@ impl ModeMachine {
 
     /// Switch to `new` (no-op if already there). Sequenced handoff: **exit the old mode's bus role
     /// before entering the new one's**, so the sensor bus never has two masters.
-    pub fn switch(&mut self, p: &Peripherals, new: Mode) {
+    pub fn switch<H: LeafBus>(&mut self, hw: &H, new: Mode) {
         if new == self.current {
             return;
         }
-        exit(p, self.current);
-        enter(p, new);
+        exit(hw, self.current);
+        enter(hw, new);
         self.current = new;
     }
 }
 
 /// Entry action for a mode.
-fn enter(p: &Peripherals, m: Mode) {
+fn enter<H: LeafBus>(hw: &H, m: Mode) {
     match m {
         #[cfg(feature = "mode-passive")]
-        Mode::Passive => release_sensor_bus(p), // make sure we're OFF the bus (SoM owns it)
+        Mode::Passive => release_sensor_bus(hw), // make sure we're OFF the bus (SoM owns it)
         #[cfg(feature = "mode-sensing")]
-        Mode::Sensing => acquire_sensor_bus(p),
+        Mode::Sensing => acquire_sensor_bus(hw),
     }
 }
 
 /// Exit action (symmetric): leaving Sensing releases the bus; leaving Passive does nothing.
-fn exit(p: &Peripherals, m: Mode) {
+fn exit<H: LeafBus>(hw: &H, m: Mode) {
     match m {
         #[cfg(feature = "mode-passive")]
         Mode::Passive => {
-            let _ = p;
+            let _ = hw;
         }
         #[cfg(feature = "mode-sensing")]
-        Mode::Sensing => release_sensor_bus(p),
+        Mode::Sensing => release_sensor_bus(hw),
     }
 }
 
@@ -164,12 +165,12 @@ fn exit(p: &Peripherals, m: Mode) {
 /// recovery in `i2c::init`). "Attempt" (per the canonical statement): if a slave holds SDA the
 /// recovery runs; a persistently wedged bus surfaces as a scan fault, it does not fight a 2nd master.
 #[cfg(feature = "mode-sensing")]
-fn acquire_sensor_bus(p: &Peripherals) {
-    bsp::board::leaf_i2c_acquire(p); // route P1.2/3 → UCB0 + bring up the master (with stuck-bus recovery)
+fn acquire_sensor_bus<H: LeafBus>(hw: &H) {
+    hw.acquire(); // route P1.2/3 → UCB0 + bring up the master (with stuck-bus recovery) via LeafBus
 }
 
 /// RELEASE the sensor bus: hold eUSCI_B0 in reset and return P1.2/P1.3 to GPIO inputs (high-Z), so
 /// the SoM (or nobody) owns the bus. Idempotent — safe to call at boot before B0 was ever brought up.
-fn release_sensor_bus(p: &Peripherals) {
-    bsp::board::leaf_i2c_release(p); // driver reset + tri-state the pins (chip specifics in bsp::board)
+fn release_sensor_bus<H: LeafBus>(hw: &H) {
+    hw.release(); // driver reset + tri-state the pins (chip specifics in bsp::board) via LeafBus
 }

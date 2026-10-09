@@ -12,6 +12,7 @@ dependencies = [
  "msp430fr2355",
  "msp430fr2433",
  "msp430fr2476",
+ "node-hal",
 ]
 
 [[package]]
@@ -33,9 +34,9 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 name = "deepsleep"
 version = "0.1.0"
 dependencies = [
- "bsp",
  "devices",
  "msp430",
+ "node-hal",
  "sched",
  "stembus",
 ]
@@ -118,6 +119,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "node-hal"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal",
+]
+
+[[package]]
 name = "panic-msp430"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -154,6 +162,7 @@ dependencies = [
  "devices",
  "msp430",
  "msp430-rt",
+ "node-hal",
  "panic-msp430",
  "sched",
  "stembus",

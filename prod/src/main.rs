@@ -164,6 +164,10 @@ fn run_dual(p: &Peripherals) -> ! {
     bsp::board::route_console_uart_pins(p);
 
     let model = model::detect();
+    // Host-clean chip identity for the de-welded `deepsleep::{post,status}` (Phase 6c): built ONCE from
+    // the detected model so those files name no `bsp::model::Model`. `model` itself stays for the role/addr
+    // codec below (which is wire-contract, not deepsleep).
+    let chip = node_hal::ChipId { device_id: model.device_id(), family_ok: model.matches_build_family() };
     // Role-based Stem I²C address (I2C-API.md): FR2355=0x20, FR2476=0x21. The model→role→addr codec is
     // the shared wire contract in `stembus::role` (bsp::model stays protocol-free), so compute it here.
     let stem_addr = stembus::role::role_for_model(model.device_id()).addr() as u16;
@@ -173,20 +177,24 @@ fn run_dual(p: &Peripherals) -> ! {
     // AFTER the Leaf enumerate, so a wedged/slow sensor bus — e.g. two masters contending — delayed or
     // could indefinitely block the SoM's only way in. See DESIGN.md "Boot logic".) `stem::init` only
     // configures eUSCI_B1 + its pins; the RegFile it serves is assembled once status is ready, below.
-    stem::init(p, stem_addr); // configures eUSCI_B1 + pins — the transport, shared by both slave faces
+    // MSP430 hardware handle for the de-welded `deepsleep::stem` seams (Phase 6a): the dispatch is generic
+    // over `node-hal` traits, so we wrap the PAC `Peripherals` once and pass `&hw` to every `stem::*` call.
+    // The direct `bsp::stem_i2c::irq_*`/LPM calls below still use `p` (bin-owned, stays as-is).
+    let hw = bsp::StemHw(p);
+    stem::init(&hw, stem_addr); // configures eUSCI_B1 + pins — the transport, shared by both slave faces
     #[cfg(not(feature = "cros_ec"))]
     let mut slave = stem::Slave::new();
 
     // Enter the boot-default operating mode. In Sensing this ACQUIRES the sensor bus (B0 master); in
     // Passive it RELEASES it (the SoM owns it). Default is **Passive** — at boot the SoM/host is active
     // and owns the buses; it commands Sensing only when it suspends (mode::Mode::default_boot).
-    let mut mach = mode::ModeMachine::boot(p);
+    let mut mach = mode::ModeMachine::boot(&hw);
 
     // Sensor scan runs ONLY in Sensing (Passive never masters the sensor bus). It populates the
     // debug registers the SoM reads over the I2C-slave surface. UART reporting below is `console`-gated.
     #[allow(unused_mut)]
     let mut last = if mach.is_sensing() {
-        enumerate::scan(p)
+        enumerate::scan(&hw)
     } else {
         enumerate::Scan::absent()
     };
@@ -200,9 +208,9 @@ fn run_dual(p: &Peripherals) -> ! {
     // Assemble the RegFile the Stem slave serves: live status snapshot (+ PCA9698 shadow). `slave` is
     // the per-transaction state. Polled in the loop below.
     let mut st = if mach.is_sensing() {
-        status::Status::from_scan(model, &last, FW_BUILD)
+        status::Status::from_scan(chip, &last, FW_BUILD)
     } else {
-        status::Status::booted(model, FW_BUILD) // Passive: not enumerated (didn't master the bus)
+        status::Status::booted(chip, FW_BUILD) // Passive: not enumerated (didn't master the bus)
     };
     st.set_mode(mach.current().code()); // publish the boot mode at MODE_CTRL (0x3E)
     let mut rf = stem::RegFile::new(st);
@@ -230,22 +238,22 @@ fn run_dual(p: &Peripherals) -> ! {
     {
         uart::init(p);
         // LEAN default (DESIGN.md console log, Henrik 2026-10-04): version + per-sector FRAM checksums.
-        post::boot_log(p, model, mach.current().name(), &crc, FW_BUILD);
+        post::boot_log(&hw, chip, mach.current().name(), &crc, FW_BUILD);
 
         // --debug: the post-POST "what was found" (enumerate report + debug regs + Leaf/eUSCI diagnostic)
         // + the interactive s/r/d/m/l commands. "Not a full diag, but some basic info."
         #[cfg(feature = "debug")]
         {
             uart::puts(p, "commands: s=scan  r=report  d=debug regs  m=switch mode  l=loopback self-test\n");
-            enumerate::report(p, &last);
-            rf.status.dump(p);
-            post::debug_leaf(p);
+            enumerate::report(&hw, &last);
+            rf.status.dump(&hw);
+            post::debug_leaf(&hw);
             // Boot loopback self-test: eUSCI_B0 MASTER → eUSCI_B1 SLAVE (needs Stem↔Leaf jumpers,
             // stem::LOOPBACK_JUMPER_HINT). Only meaningful in Sensing (B0 up as master). Exercises the
             // REGMAP slave, so it's not built on the cros_ec flip (the slave face is cros_ec there).
             #[cfg(not(feature = "cros_ec"))]
             if mach.is_sensing() {
-                let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
+                let lb = stem::loopback_selftest(&hw, &mut slave, &mut rf, stem_addr);
                 uart::puts(p, "loopback B0->B1 @0x");
                 uart::hex8(p, stem_addr as u8);
                 uart::puts(p, " (boot self-test): ");
@@ -280,7 +288,7 @@ fn run_dual(p: &Peripherals) -> ! {
     let arm = Cell::new(false);
     let cancel = Cell::new(false);
     let out: Cell<Option<enumerate::Scan>> = Cell::new(None);
-    let mut scanner = core::pin::pin!(enumerate::leaf_scanner(p, &arm, &cancel, &out));
+    let mut scanner = core::pin::pin!(enumerate::leaf_scanner(&hw, &arm, &cancel, &out));
     let waker = sched::noop_waker();
     let mut acx = core::task::Context::from_waker(&waker);
 
@@ -289,11 +297,11 @@ fn run_dual(p: &Peripherals) -> ! {
         // Service the SoM/Stem master. Default = regmap slave; cros_ec flip = the EcSlave framer +
         // vendor+postcard dispatch against the live node (refreshed from rf.status this pass).
         #[cfg(not(feature = "cros_ec"))]
-        stem::poll(p, &mut slave, &mut rf);
+        stem::poll(&hw, &mut slave, &mut rf);
         #[cfg(feature = "cros_ec")]
         {
             live.set_status(rf.status.status_data(stembus::command::WakeReason::None));
-            ec::poll(p, &mut ec_slave, &mut live);
+            ec::poll(&hw, &mut ec_slave, &mut live);
         }
         let _ = scanner.as_mut().poll(&mut acx); // advance the Leaf scan (forever task → always Pending)
         // A completed scan deposits its result; publish it into the RegFile — but ONLY while still
@@ -301,13 +309,13 @@ fn run_dual(p: &Peripherals) -> ! {
         if let Some(scan) = out.take() {
             if mach.is_sensing() {
                 last = scan;
-                rf.status = status::Status::from_scan(model, &last, FW_BUILD);
+                rf.status = status::Status::from_scan(chip, &last, FW_BUILD);
                 rf.status.set_mode(mach.current().code());
                 // --debug: auto-print what the completed Sensing scan found (no keystroke needed).
                 #[cfg(feature = "debug")]
                 {
-                    enumerate::report(p, &last);
-                    post::debug_leaf(p);
+                    enumerate::report(&hw, &last);
+                    post::debug_leaf(&hw);
                 }
             }
         }
@@ -320,7 +328,7 @@ fn run_dual(p: &Peripherals) -> ! {
         if let Some(code) = mode_req {
             match mode::Mode::from_code(code) {
                 Some(m) if m != mach.current() => {
-                    begin_mode(p, &mut mach, &mut rf, model, &mut last, m);
+                    begin_mode(&hw, &mut mach, &mut rf, chip, &mut last, m);
                     arm_scan(&arm, &cancel, mach.is_sensing()); // arm/cancel the async scanner
                     #[cfg(feature = "debug")]
                     {
@@ -351,19 +359,19 @@ fn run_dual(p: &Peripherals) -> ! {
                         cancel.set(true);
                         arm.set(false);
                         let _ = out.take();
-                        last = enumerate::scan(p);
-                        enumerate::report(p, &last);
-                        rf.status = status::Status::from_scan(model, &last, FW_BUILD);
+                        last = enumerate::scan(&hw);
+                        enumerate::report(&hw, &last);
+                        rf.status = status::Status::from_scan(chip, &last, FW_BUILD);
                         rf.status.set_mode(mach.current().code());
                     } else {
                         uart::puts(p, "  (passive: not mastering the sensor bus)\n");
                     }
                 }
-                b'r' | b'R' => enumerate::report(p, &last),
-                b'd' | b'D' => rf.status.dump(p),
+                b'r' | b'R' => enumerate::report(&hw, &last),
+                b'd' | b'D' => rf.status.dump(&hw),
                 b'm' | b'M' => {
                     let next = mach.current().toggled();
-                    begin_mode(p, &mut mach, &mut rf, model, &mut last, next);
+                    begin_mode(&hw, &mut mach, &mut rf, chip, &mut last, next);
                     arm_scan(&arm, &cancel, mach.is_sensing());
                     uart::puts(p, "mode -> ");
                     uart::puts(p, mach.current().name());
@@ -376,7 +384,7 @@ fn run_dual(p: &Peripherals) -> ! {
                 #[cfg(not(feature = "cros_ec"))]
                 b'l' | b'L' => {
                     if mach.is_sensing() {
-                        let lb = stem::loopback_selftest(p, &mut slave, &mut rf, stem_addr);
+                        let lb = stem::loopback_selftest(&hw, &mut slave, &mut rf, stem_addr);
                         uart::puts(p, "loopback B0->B1 @0x");
                         uart::hex8(p, stem_addr as u8);
                         uart::puts(p, ": ");
@@ -425,19 +433,19 @@ fn run_dual(p: &Peripherals) -> ! {
 /// Centralises what both triggers do so they can't drift.
 #[cfg(feature = "_dual")]
 fn begin_mode(
-    p: &Peripherals,
+    hw: &bsp::StemHw<'_>,
     mach: &mut mode::ModeMachine,
     rf: &mut stem::RegFile,
-    model: model::Model,
+    chip: node_hal::ChipId,
     last: &mut enumerate::Scan,
     new: mode::Mode,
 ) {
-    mach.switch(p, new); // sequenced bus acquire/release (no-op if already there) — fast, no scan
+    mach.switch(hw, new); // sequenced bus acquire/release (no-op if already there) — fast, no scan
     if !mach.is_sensing() {
         *last = enumerate::Scan::absent(); // leaving Sensing: we hold no sensor data
     }
     // dev_count stays at the booted default until the async scan lands (Sensing) / stays absent (Passive).
-    rf.status = status::Status::booted(model, FW_BUILD);
+    rf.status = status::Status::booted(chip, FW_BUILD);
     rf.status.set_mode(mach.current().code());
 }
 
@@ -560,9 +568,12 @@ extern "msp430-interrupt" fn eusci_b1_inner() {
 #[cfg(feature = "fr24xx")]
 fn run_fr24xx(p: &Peripherals) -> ! {
     let model = model::detect();
+    // Host-clean chip identity for the de-welded `deepsleep::{post,status}` (Phase 6c), built once from
+    // the detected model; `model` stays for the role/addr codec below.
+    let chip = node_hal::ChipId { device_id: model.device_id(), family_ok: model.matches_build_family() };
 
     // Publish identity + booted/Passive status behind the slave surface (no sensor scan on this part).
-    let mut st = status::Status::booted(model, FW_BUILD);
+    let mut st = status::Status::booted(chip, FW_BUILD);
     st.set_mode(regmap::MODE_CODE_PASSIVE);
     let mut rf = stem::RegFile::new(st);
     // POST integrity (ADR-0010): per-sector FRAM CRCs, always — the M7 reads them over I²C at 0x3F.
@@ -572,7 +583,11 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     let mut slave = stem::Slave::new();
     // role-based (I2C-API.md): FR2433 = 0x22 (I/O-expander placeholder). Shared codec in stembus::role.
     let stem_addr = stembus::role::role_for_model(model.device_id()).addr() as u16;
-    stem::init(p, stem_addr); // eUSCI_B0 as I²C slave @ stem_addr on P1.2/P1.3
+    // MSP430 hardware handle for the de-welded `deepsleep::stem` seams (Phase 6a): the dispatch is generic
+    // over `node-hal` traits, so wrap the PAC `Peripherals` once and pass `&hw`. The LPM/ISR path
+    // (`fr24xx_idle` → `bsp::stem_i2c::irq_enable(p)`) still uses `p` directly (bin-owned, stays as-is).
+    let hw = bsp::StemHw(p);
+    stem::init(&hw, stem_addr); // eUSCI_B0 as I²C slave @ stem_addr on P1.2/P1.3
 
     // Dev console (`console` feature): a locked 1 MHz clock (clean UART baud) + the eUSCI_A0 backchannel
     // on P1.4/P1.5 (distinct from UCB0 on P1.2/P1.3 — no pin clash). Print the banner + debug window
@@ -585,15 +600,15 @@ fn run_fr24xx(p: &Peripherals) -> ! {
         uart::init(p);
         // Lean boot log: version + per-sector FRAM checksums (same as the dual node). fr24xx is
         // Passive-only (no mode machine), so the mode name is the constant "passive".
-        post::boot_log(p, model, "passive", &crc, FW_BUILD);
+        post::boot_log(&hw, chip, "passive", &crc, FW_BUILD);
         uart::puts(p, "fr24xx I2C-slave @0x");
         uart::hex8(p, stem_addr as u8);
         uart::putc(p, b'\n');
-        rf.status.dump(p); // the exact 0x30–0x3F bytes a master would read
+        rf.status.dump(&hw); // the exact 0x30–0x3F bytes a master would read
         // Prove the physical GPIO bank backing end-to-end (no I²C master needed): drive P1.0 via the
         // regmap OP/IOC path and sense it back on IP. Auto-runs so hwd's READ-ONLY console captures
         // PASS/FAIL with no keystroke (matches the dual node's boot self-test discipline).
-        let gp = stem::gpio_selftest(p, &mut rf);
+        let gp = stem::gpio_selftest(&hw, &mut rf);
         uart::puts(p, "gpio bank0 self-test (P1.0 drive->sense): ");
         uart::puts(p, if gp { "PASS\n" } else { "FAIL\n" });
     }
@@ -619,7 +634,7 @@ fn run_fr24xx(p: &Peripherals) -> ! {
     // pender + eUSCI_B0 wake ISR, so the low-power path is unchanged.
     #[cfg(not(feature = "cros_ec"))]
     {
-        let mut task = core::pin::pin!(stem::serve(p, &mut slave, &mut rf));
+        let mut task = core::pin::pin!(stem::serve(&hw, &mut slave, &mut rf));
         sched::run_pended(task.as_mut(), &STEM_PENDER, || fr24xx_idle(p));
     }
     #[cfg(feature = "cros_ec")]
@@ -630,7 +645,7 @@ fn run_fr24xx(p: &Peripherals) -> ! {
         let status = rf.status.status_data(stembus::command::WakeReason::None);
         let mut node = node::StaticNode::new(ident, status, crc);
         let mut ec_slave = stembus::cros_ec::EcSlave::new();
-        let mut task = core::pin::pin!(ec::serve_ec(p, &mut ec_slave, &mut node));
+        let mut task = core::pin::pin!(ec::serve_ec(&hw, &mut ec_slave, &mut node));
         sched::run_pended(task.as_mut(), &STEM_PENDER, || fr24xx_idle(p));
     }
     // `serve*` never completes, so `run_pended` never returns; satisfy the `-> !` signature.

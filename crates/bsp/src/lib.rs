@@ -49,3 +49,8 @@ pub mod i2c;
 // (the slave control surface is every chip's job): dual families run it on eUSCI_B1, FR2433 on its one
 // eUSCI_B0. The protocol/register-file dispatch lives above this, in `deepsleep` (DEEPSLEEP-EXTRACTION.md §A).
 pub mod stem_i2c;
+// The MSP430 newtype wrapper (`StemHw`) that impls the host-clean `node-hal` hardware-seam traits
+// (StemSlave/GpioBanks/LeafMaster) so `deepsleep` can be generic over the hardware instead of naming the
+// PAC `Peripherals` (DEEPSLEEP-EXTRACTION.md Phase 6a). Holds the fr2433 PCA9698 bank→port backing.
+pub mod node_hw;
+pub use node_hw::StemHw;

@@ -7,8 +7,7 @@
 //! All framing + buffers live in the framer (host-tested in `stembus`); this file is the MSP430 binding +
 //! the async [`serve_ec`] task (structurally identical to [`crate::stem::serve`]).
 
-use bsp::pac::Peripherals;
-use bsp::stem_i2c::{self, SlaveEvent};
+use node_hal::{SlaveEvent, StemSlave}; // host-clean slave seam — this file names no concrete PAC (6c)
 use stembus::command::{self, Event, Node, Operate, EVENT_RING_LEN};
 use stembus::cros_ec::{self, EcSlave};
 
@@ -37,7 +36,7 @@ fn serve_vendor<N: Node + Operate>(s: &mut EcSlave, node: &mut N) {
 /// Apply one slave-bus event to the framer; answer a read (`TxReq`) with the next staged byte. After a
 /// write byte, if the framer surfaced a vendor request, dispatch it immediately (same event context, well
 /// before the read phase — the eUSCI clock-stretches meanwhile).
-fn handle<N: Node + Operate>(p: &Peripherals, s: &mut EcSlave, node: &mut N, ev: SlaveEvent) {
+fn handle<N: Node + Operate, H: StemSlave>(hw: &H, s: &mut EcSlave, node: &mut N, ev: SlaveEvent) {
     match ev {
         SlaveEvent::Start => s.start(),
         SlaveEvent::Rx(b) => {
@@ -46,7 +45,7 @@ fn handle<N: Node + Operate>(p: &Peripherals, s: &mut EcSlave, node: &mut N, ev:
                 serve_vendor(s, node);
             }
         }
-        SlaveEvent::TxReq => stem_i2c::provide_tx(p, s.next_tx()),
+        SlaveEvent::TxReq => hw.provide_tx(s.next_tx()),
         SlaveEvent::Stop => s.stop(),
         SlaveEvent::Nack => {}
     }
@@ -55,14 +54,14 @@ fn handle<N: Node + Operate>(p: &Peripherals, s: &mut EcSlave, node: &mut N, ev:
 /// Async cros_ec EC-slave dispatch — mirrors [`crate::stem::serve`] (Phase 1c LPM pender): `.await` one
 /// [`SlaveEvent`] at a time, returning `Pending` when the bus is idle so `sched::run_pended` runs the
 /// caller's LPM `idle` closure; the eUSCI_B slave ISR wakes the CPU. Never completes. Used by fr24xx.
-pub async fn serve_ec<N: Node + Operate>(p: &Peripherals, s: &mut EcSlave, node: &mut N) {
+pub async fn serve_ec<N: Node + Operate, H: StemSlave>(hw: &H, s: &mut EcSlave, node: &mut N) {
     loop {
-        let ev = core::future::poll_fn(|_cx| match stem_i2c::next_event(p) {
+        let ev = core::future::poll_fn(|_cx| match hw.next_event() {
             Some(ev) => core::task::Poll::Ready(ev),
             None => core::task::Poll::Pending,
         })
         .await;
-        handle(p, s, node, ev);
+        handle(hw, s, node, ev);
     }
 }
 
@@ -70,8 +69,8 @@ pub async fn serve_ec<N: Node + Operate>(p: &Peripherals, s: &mut EcSlave, node:
 /// dual node's hand cooperative loop (`run_dual`), which services the slave alongside the Leaf scanner,
 /// mode machine, and console each pass. Drains every pending [`SlaveEvent`]; vendor commands dispatch
 /// against `node` (which the caller refreshes from live status + drains mode requests from).
-pub fn poll<N: Node + Operate>(p: &Peripherals, s: &mut EcSlave, node: &mut N) {
-    while let Some(ev) = stem_i2c::next_event(p) {
-        handle(p, s, node, ev);
+pub fn poll<N: Node + Operate, H: StemSlave>(hw: &H, s: &mut EcSlave, node: &mut N) {
+    while let Some(ev) = hw.next_event() {
+        handle(hw, s, node, ev);
     }
 }

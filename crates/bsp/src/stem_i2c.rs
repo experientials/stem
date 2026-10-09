@@ -129,22 +129,12 @@ mod hw {
     }
 }
 
-/// One decoded slave-bus event — the seam between this transport and the `deepsleep` register/command
-/// dispatch above it. `slau445i` §24.3.11: one shared eUSCI_B I²C vector; the flags below are the states
-/// it multiplexes. See [`next_event`].
-pub enum SlaveEvent {
-    /// START matched our own address — the next `Rx` is the command byte (`UCSTTIFG`).
-    Start,
-    /// STOP — transaction over (`UCSTPIFG`).
-    Stop,
-    /// A byte the master WROTE to us, already read out of RXBUF (`UCRXIFG0`, cleared).
-    Rx(u8),
-    /// The master is READING and the eUSCI wants the next byte (`UCTXIFG0`, NOT yet cleared). The caller
-    /// MUST answer with [`provide_tx`] before the next [`next_event`] call, or it re-reports `TxReq`.
-    TxReq,
-    /// The master NACKed (end of a read, typically) (`UCNACKIFG`, cleared).
-    Nack,
-}
+// The decoded slave-bus event enum — the seam between this transport and the `deepsleep` register/command
+// dispatch above it — now lives in the host-clean `node-hal` crate (Phase 6a), re-exported here so every
+// existing `bsp::stem_i2c::SlaveEvent` call site is unchanged. `slau445i` §24.3.11: one shared eUSCI_B I²C
+// vector; the variants are the states it multiplexes (START=`UCSTTIFG`, Stop=`UCSTPIFG`, Rx=`UCRXIFG0`,
+// TxReq=`UCTXIFG0` (left set; cleared by [`provide_tx`]), Nack=`UCNACKIFG`). See [`next_event`].
+pub use node_hal::SlaveEvent;
 
 /// Configure the node's eUSCI_B as an I²C slave at the **role-based** `addr`
 /// (`stembus::role::role_for_model(..).addr()`; see I2C-API.md) and route its pins
