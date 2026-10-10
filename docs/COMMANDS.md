@@ -364,10 +364,16 @@ menu functions map to unified commands: `s`→`status`/rescan, `r`→`events`, `
    stays regmap). `run_dual` swaps the regmap slave for `EcSlave` + `deepsleep::node::LiveNode` (status
    refreshed each pass; `SetMode` records a request the loop applies via the real mode machine). *HW-proven
    on @fr2476 @0x21:* `ident` → model 0x832A; `mode sensing`→`status` mode=0x01 devs=1 (mode machine
-   acquired Leaf + enumerated), `mode passive`→ mode=0x00. Dual image 7654/32768 B. **Still open:** remove
-   the gate (make cros_ec the default for all families) once the regmap path's remaining consumers are
-   migrated; migrate stem-probe's `vstem`/`pass`/`sens` (now that the dual answers cros_ec) or just drop
-   them in favor of `ident`/`status`/`mode`.
+   acquired Leaf + enumerated), `mode passive`→ mode=0x00. Dual image 7654/32768 B.
+   - ✅ **Stem-probe verb convergence DONE (2026-10-10).** Removed the regmap-era verbs `pass`/`sens`
+     (superseded by `mode <addr> p|s`); **rewrote `vstem` and `vleaf` onto cros_ec** — role discovery via
+     `Identify`, identity/fw/status via `Identify`+`Status`, the mode round-trip + the Leaf Sensing/Passive
+     handoff via `SetMode`+`Status` (no more `DBG_*`/`MODE_CTRL` register pokes; those regmap imports are
+     gone). `r`/`w` kept as an explicit **raw-I²C escape hatch** (D1 — relabelled: raw bus bytes, not a
+     cros_ec/regmap command). Help text updated to match. *HW-proven on the bench:* `vstem` all-PASS across
+     0x20/0x21/0x22; `selftest` **RESULT pass=8 fail=0** (incl. the cros_ec Leaf handoff, `dev_count=0x01`).
+   - **Still open:** remove the `cros_ec` gate (make it the default for all families) once the regmap path's
+     remaining consumers are migrated — then drop the regmap slave from the dual image entirely.
 4. **Retire the MSP `prod` keystroke menu** (A) → read-only logging; functions now reachable as bus
    commands. (Does not touch (B) diag's test menu.)
 5. **Converge diag (B)** onto the same verbs where it overlaps the operator set; keep diag-specific test

@@ -40,10 +40,10 @@ const FW_VERSION: &str = env!("CARGO_PKG_VERSION");
 //   Leaf-I²C = I2C0 on GP4(SDA)/GP5(SCL)    — sensors; on a Pico4ML this is the camera SCCB.
 // Conformance target = the FR2433 regmap on the Stem bus.
 // Stem-bus contract from the SHARED `stembus::regmap` (one definition with prod + the M7; crates/stembus).
-use stembus::regmap::{
-    DBG_IFACE, DBG_IFACE_MAGIC, DBG_MODEL_H, DBG_MODEL_L, MODEL_FR2355 as FR2355_MODEL,
-    MODEL_FR2433 as FR2433_MODEL,
-};
+// The iface magic (identity sentinel, carried in the cros_ec `Identity.iface` field) + model ids. The
+// register ADDRESSES (DBG_IFACE/DBG_MODEL_*) are gone — identity now comes from the cros_ec `Identify`
+// command, not a regmap register poke.
+use stembus::regmap::{DBG_IFACE_MAGIC, MODEL_FR2355 as FR2355_MODEL, MODEL_FR2433 as FR2433_MODEL};
 
 // Role-based Stem addresses (I2C-API.md "Stem address is ROLE-BASED") — the node's address tells the
 // master WHAT it is. `vstem` scans this window and labels each responder by role.
@@ -73,11 +73,9 @@ const SNIFF_ARM_SLICE: u32 = 60_000; // samples per arm-watch slice (between USB
 const SNIFF_ARM_EDGES: u16 = 24; // edges within one slice to count as a real burst (rejects init glitches)
 const SNIFF_CAP_BURST: u32 = 100_000; // gap-free samples per capture burst (~25 ms ≫ one 100 µs probe)
 
-// Debug/identity window + mode control (mirrors prod/src/regmap.rs — the shared contract).
-use stembus::regmap::{
-    DBG_DEV_COUNT, DBG_FW_VER_MAJOR, DBG_FW_VER_MINOR, DBG_FW_VER_PATCH, DBG_STATUS, MODE_CTRL,
-    MODE_CODE_PASSIVE as MODE_PASSIVE, MODE_CODE_SENSING as MODE_SENSING,
-};
+// (The regmap debug/identity window + MODE_CTRL register imports were removed with the cros_ec
+// convergence: identity/status/mode now ride the cros_ec `Identify`/`Status`/`SetMode` commands, not
+// register pokes. `DBG_CRC_BYTES` is still used fully-qualified by the `crc` handler.)
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -272,7 +270,9 @@ async fn main(_spawner: Spawner) {
                             // bare `h`/`?` is unambiguous and never collides with other commands.
                             let _ = help(&mut class).await;
                         } else if eq_ci(cmd0, b"r") {
-                            // r <addr> <reg> — read one Stem register (hex, 0x optional).
+                            // r <addr> <reg> — RAW I²C read (low-level escape hatch, hex): write one byte
+                            // then repeated-START read one byte. NOT a cros_ec/regmap command — raw bus
+                            // bytes for poking any device (against a cros_ec node you'll see 0xEC filler).
                             if nt >= 3 {
                                 if let (Some(addr), Some(reg)) = (parse_hex(toks[1]), parse_hex(toks[2])) {
                                     match rd(&mut i2c, addr, reg) {
@@ -294,7 +294,8 @@ async fn main(_spawner: Spawner) {
                                 let _ = write_str(&mut class, "\r\nusage: r <addr> <reg>  (hex)\r\n> ").await;
                             }
                         } else if eq_ci(cmd0, b"w") {
-                            // w <addr> <reg> <val> — write one Stem register (hex, 0x optional).
+                            // w <addr> <reg> <val> — RAW I²C write (low-level escape hatch, hex): two bytes
+                            // on the bus. NOT a cros_ec/regmap command — raw bytes for poking any device.
                             if nt >= 4 {
                                 if let (Some(addr), Some(reg), Some(val)) =
                                     (parse_hex(toks[1]), parse_hex(toks[2]), parse_hex(toks[3]))
@@ -455,14 +456,6 @@ async fn main(_spawner: Spawner) {
                             verify_stem(&mut class, &mut i2c, &mut sound, &mut por, &pmic_in, &stem_in, &mut Tally::new()).await;
                         } else if contains_ci(line, b"vleaf") {
                             verify_leaf(&mut class, &mut i2c, &mut leaf_sda, &mut leaf_scl, &mut Tally::new()).await;
-                        } else if contains_ci(line, b"sens") {
-                            let ok = wr(&mut i2c, ADDR_SUPERVISOR, MODE_CTRL, MODE_SENSING);
-                            report(&mut class, "mode -> Sensing", ok, &mut Tally::new()).await;
-                            let _ = write_str(&mut class, "> ").await;
-                        } else if contains_ci(line, b"pass") {
-                            let ok = wr(&mut i2c, ADDR_SUPERVISOR, MODE_CTRL, MODE_PASSIVE);
-                            report(&mut class, "mode -> Passive", ok, &mut Tally::new()).await;
-                            let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"sound1") {
                             sound.set_high();
                             let _ = write_str(&mut class, "\r\nSOUND_INT=H (SoM suspended)\r\n> ").await;
@@ -735,12 +728,15 @@ async fn help<'d, T: embassy_rp::usb::Instance + 'd>(
 
     write_str(
         class,
-        "\r\nSTEM bus (RP2040 is master):\r\n\
+        "\r\nSTEM bus (RP2040 is master; device verbs speak cros_ec):\r\n\
          \x20 scan                   probe 0x08..0x77, list addresses that ACK\r\n\
-         \x20 r <addr> <reg>         read 1 register (write reg ptr, repeated-start read); '0x.. = 0x..' or 'no ACK'\r\n\
-         \x20 w <addr> <reg> <val>   write 1 register; '[PASS] wrote' / '[FAIL] no ACK'\r\n\
-         \x20 vstem                  full verify: role discovery, DBG_IFACE magic, model id, fw version, status, MODE_CTRL Passive<->Sensing, sideband readout\r\n\
-         \x20 pass | sens            set node @0x20 MODE_CTRL Passive(0x00) / Sensing(0x01)\r\n",
+         \x20 ident [addr]           cros_ec Identify: iface/model/role/build/ver (default 0x22)\r\n\
+         \x20 status [addr]          cros_ec Status: flags/fault/devs/mode/wake\r\n\
+         \x20 mode [addr] [p|s]      cros_ec SetMode Passive/Sensing (applied async; confirm with status)\r\n\
+         \x20 crc [addr]             cros_ec FramCrc: per-sector CRC16 window\r\n\
+         \x20 vstem                  full cros_ec verify: role discovery, identity, fw ver, status, mode round-trip, sideband\r\n\
+         \x20 r <addr> <reg>         RAW I2C read (escape hatch; raw bus bytes, not cros_ec) — '0x.. = 0x..' or 'no ACK'\r\n\
+         \x20 w <addr> <reg> <val>   RAW I2C write (escape hatch; raw bus bytes, not cros_ec)\r\n",
     )
     .await?;
 
@@ -870,6 +866,16 @@ fn vendor_cmd(
         return Err("EC result != SUCCESS");
     }
     command::wire::decode_response(pr.data).map_err(|_| "response decode")
+}
+
+/// One cros_ec `Status` round-trip → the live `StatusData` (flags/fault/dev_count/mode/wake), or `None`
+/// on any framing/transport error. The converged verify paths read mode + dev_count through this instead
+/// of poking the old regmap MODE_CTRL / DBG_DEV_COUNT registers.
+fn status_of(i2c: &mut I2c<'_, I2C1, i2c::Blocking>, addr: u8) -> Option<command::StatusData> {
+    match vendor_cmd(i2c, addr, command::Command::Status) {
+        Ok(command::Response::Status(st)) => Some(st),
+        _ => None,
+    }
 }
 
 /// Role name for a Stem address (I2C-API.md role-based addressing).
@@ -1114,87 +1120,88 @@ async fn verify_stem<'d>(
 ) {
     let _ = write_str(class, "\r\n== VERIFY STEM ==").await;
 
-    // 1) Role discovery — scan the role window; for EACH responder show role + identity magic + silicon
-    // model id (so the address-is-role claim is proven per node, not just by which address ACKed).
+    // 1) Role discovery — cros_ec `Identify` to each role address; a valid Identity reply (not an I²C NAK
+    // / 0xEC filler) proves a LIVE cros_ec node there. Replaces the old regmap DBG_IFACE register scan.
     let mut node = 0u8;
     for &a in &[ADDR_SUPERVISOR, ADDR_DEV_STANDIN, ADDR_EXPANDER] {
-        if let Some(iface) = rd(i2c, a, DBG_IFACE) {
+        if let Ok(command::Response::Identity(id)) = vendor_cmd(i2c, a, command::Command::Identify) {
             let _ = write_str(class, "\r\n  role @0x").await;
             let _ = write_hex8(class, a).await;
             let _ = write_str(class, " = ").await;
             let _ = write_str(class, role_name(a)).await;
-            let _ = write_str(class, "  iface=0x").await;
-            let _ = write_hex8(class, iface).await;
-            if let (Some(l), Some(h)) = (rd(i2c, a, DBG_MODEL_L), rd(i2c, a, DBG_MODEL_H)) {
-                let _ = write_str(class, " model=0x").await;
-                let _ = write_hex8(class, h).await;
-                let _ = write_hex8(class, l).await;
-            }
+            let _ = write_str(class, "  model=0x").await;
+            let _ = write_hex8(class, (id.model >> 8) as u8).await;
+            let _ = write_hex8(class, id.model as u8).await;
             if node == 0 {
                 node = a;
             }
         }
     }
-    report(class, "a Stem node answered (0x20/0x21/0x22)", node != 0, t).await;
+    report(class, "a cros_ec Stem node answered (0x20/0x21/0x22)", node != 0, t).await;
     if node == 0 {
         let _ = write_str(class, "\r\n  (no node — check Stem wiring: GP18/19 <-> P4.6/P4.7 + GND)\r\n> ").await;
         return;
     }
 
-    // 2) Identity magic
-    report(class, "DBG_IFACE == 0xD0", rd(i2c, node, DBG_IFACE) == Some(DBG_IFACE_MAGIC), t).await;
-
-    // 3) Detected model (captured — drives the role-aware mode check below)
-    let model = match (rd(i2c, node, DBG_MODEL_L), rd(i2c, node, DBG_MODEL_H)) {
-        (Some(l), Some(h)) => {
-            let m = ((h as u16) << 8) | l as u16;
-            let _ = write_str(class, "\r\n  model=0x").await;
-            let _ = write_hex8(class, h).await;
-            let _ = write_hex8(class, l).await;
-            let _ = write_str(class,
-                if m == FR2355_MODEL { " (FR2355)" } else if m == FR2433_MODEL { " (FR2433)" } else { " (?)" }).await;
-            Some(m)
+    // 2) Identity — magic + model + fw version from ONE cros_ec `Identify` reply.
+    let id = match vendor_cmd(i2c, node, command::Command::Identify) {
+        Ok(command::Response::Identity(id)) => id,
+        _ => {
+            report(class, "Identify on the chosen node", false, t).await;
+            let _ = write_str(class, "> ").await;
+            return;
         }
-        _ => None,
     };
+    report(class, "iface magic == 0xD0", id.iface == DBG_IFACE_MAGIC, t).await;
+
+    // model (drives the role-aware mode check below)
+    let _ = write_str(class, "\r\n  model=0x").await;
+    let _ = write_hex8(class, (id.model >> 8) as u8).await;
+    let _ = write_hex8(class, id.model as u8).await;
+    let _ = write_str(class,
+        if id.model == FR2355_MODEL { " (FR2355)" } else if id.model == FR2433_MODEL { " (FR2433)" } else { " (?)" }).await;
     // FR2433 is single-I²C → Passive-only (no sensor-master bus), so it MUST refuse Sensing.
-    let single_i2c = model == Some(FR2433_MODEL);
+    let single_i2c = id.model == FR2433_MODEL;
 
-    // 4) Firmware version — require it's PRESENT (not 0.0.0). v0.x is valid, so don't demand major != 0.
-    let maj = rd(i2c, node, DBG_FW_VER_MAJOR);
-    let min = rd(i2c, node, DBG_FW_VER_MINOR);
-    let pat = rd(i2c, node, DBG_FW_VER_PATCH);
-    if let (Some(mj), Some(mn), Some(pt)) = (maj, min, pat) {
-        let _ = write_str(class, "\r\n  fw v").await;
-        let _ = write_hex8(class, mj).await;
-        let _ = write_str(class, ".").await;
-        let _ = write_hex8(class, mn).await;
-        let _ = write_str(class, ".").await;
-        let _ = write_hex8(class, pt).await;
+    // fw version — present (not 0.0.0); v0.x is valid.
+    let _ = write_str(class, "\r\n  fw v").await;
+    let _ = write_dec(class, id.ver[0] as u16).await;
+    let _ = write_str(class, ".").await;
+    let _ = write_dec(class, id.ver[1] as u16).await;
+    let _ = write_str(class, ".").await;
+    let _ = write_dec(class, id.ver[2] as u16).await;
+    report(class, "fw version present (not 0.0.0)", (id.ver[0] | id.ver[1] | id.ver[2]) != 0, t).await;
+
+    // 3) Status — flags + dev_count + current mode (cros_ec `Status`).
+    match status_of(i2c, node) {
+        Some(st) => {
+            let _ = write_str(class, "\r\n  status flags=0x").await;
+            let _ = write_hex8(class, st.flags).await;
+            let _ = write_str(class, " devs=").await;
+            let _ = write_dec(class, st.dev_count as u16).await;
+            let _ = write_str(class, " mode=0x").await;
+            let _ = write_hex8(class, st.mode).await;
+            report(class, "Status replied", true, t).await;
+        }
+        None => report(class, "Status replied", false, t).await,
     }
-    let ver_present = (maj.unwrap_or(0) | min.unwrap_or(0) | pat.unwrap_or(0)) != 0;
-    report(class, "fw version present (not 0.0.0)", ver_present, t).await;
 
-    // 5) Status byte
-    if let Some(s) = rd(i2c, node, DBG_STATUS) {
-        let _ = write_str(class, "\r\n  status=0x").await;
-        let _ = write_hex8(class, s).await;
-    }
-
-    // 6) Mode control (I²C MODE_CTRL override). Sensing needs a 2nd I²C → dual parts only; a single-I²C
-    // node (FR2433) is Passive-only and MUST reject Sensing — so test for the *refusal* instead.
-    let _ = wr(i2c, node, MODE_CTRL, MODE_PASSIVE);
+    // 4) Mode round-trip (cros_ec `SetMode`, applied ASYNC by the node's mode machine → confirm via
+    // `Status` after a short settle). A single-I²C node (FR2433) is Passive-only and MUST refuse Sensing.
+    let passive = stembus::mode::Mode::Passive.code();
+    let sensing = stembus::mode::Mode::Sensing.code();
+    let _ = vendor_cmd(i2c, node, command::Command::SetMode { mode: stembus::mode::Mode::Passive });
     Timer::after(Duration::from_millis(120)).await;
-    report(class, "mode -> Passive (0x3E reads 0x00)", rd(i2c, node, MODE_CTRL) == Some(MODE_PASSIVE), t).await;
-    let _ = wr(i2c, node, MODE_CTRL, MODE_SENSING);
+    report(class, "mode -> Passive (status mode=0x00)", status_of(i2c, node).map(|s| s.mode) == Some(passive), t).await;
+    let _ = vendor_cmd(i2c, node, command::Command::SetMode { mode: stembus::mode::Mode::Sensing });
     Timer::after(Duration::from_millis(200)).await;
-    let m = rd(i2c, node, MODE_CTRL);
+    let m = status_of(i2c, node).map(|s| s.mode);
     if single_i2c {
-        report(class, "Passive-only: Sensing correctly REFUSED (stays 0x00)", m == Some(MODE_PASSIVE), t).await;
+        report(class, "Passive-only: Sensing correctly REFUSED (stays 0x00)", m == Some(passive), t).await;
     } else {
-        report(class, "mode -> Sensing (0x3E reads 0x01)", m == Some(MODE_SENSING), t).await;
+        report(class, "mode -> Sensing (status mode=0x01)", m == Some(sensing), t).await;
     }
-    let _ = wr(i2c, node, MODE_CTRL, MODE_PASSIVE); // leave the node Passive (off the Leaf bus)
+    let _ = vendor_cmd(i2c, node, command::Command::SetMode { mode: stembus::mode::Mode::Passive }); // leave Passive
 
     // 7) Sideband electrical readout (raw — node-side reaction needs the FR2355 sideband firmware).
     sound.set_low(); // SoM 'active'
@@ -1390,16 +1397,16 @@ async fn verify_leaf<'d>(
 ) {
     let _ = write_str(class, "\r\n== VERIFY LEAF ==").await;
     let node = ADDR_SUPERVISOR; // Leaf mastering is a supervisor (Sensing) capability
-    if rd(i2c_stem, node, DBG_IFACE).is_none() {
-        let _ = write_str(class, "\r\n  no supervisor @0x20 — run vstem first\r\n> ").await;
+    if !matches!(vendor_cmd(i2c_stem, node, command::Command::Identify), Ok(command::Response::Identity(_))) {
+        let _ = write_str(class, "\r\n  no cros_ec supervisor @0x20 — run vstem first\r\n> ").await;
         return;
     }
 
-    // 1) Sensing: node masters Leaf + enumerates → read its device count over Stem. The Pico stays PARKED
-    // (Hi-Z + pull-up) — it is NOT a bus driver here, so the MSP owns Leaf alone.
-    let _ = wr(i2c_stem, node, MODE_CTRL, MODE_SENSING);
+    // 1) Sensing: node masters Leaf + enumerates → read its device count via cros_ec `Status`. The Pico
+    // stays PARKED (Hi-Z + pull-up) — it is NOT a bus driver here, so the MSP owns Leaf alone.
+    let _ = vendor_cmd(i2c_stem, node, command::Command::SetMode { mode: stembus::mode::Mode::Sensing });
     Timer::after(Duration::from_millis(400)).await; // allow the incremental enumerate to complete
-    let dev = rd(i2c_stem, node, DBG_DEV_COUNT);
+    let dev = status_of(i2c_stem, node).map(|s| s.dev_count);
     if let Some(d) = dev {
         let _ = write_str(class, "\r\n  Sensing dev_count=0x").await;
         let _ = write_hex8(class, d).await;
@@ -1408,7 +1415,7 @@ async fn verify_leaf<'d>(
 
     // 2) Passive: node releases Leaf → NOW the Pico bit-bang-masters it (one-master invariant respected;
     // `leaf_scan` re-parks on exit so Sensing can own it again).
-    let _ = wr(i2c_stem, node, MODE_CTRL, MODE_PASSIVE);
+    let _ = vendor_cmd(i2c_stem, node, command::Command::SetMode { mode: stembus::mode::Mode::Passive });
     Timer::after(Duration::from_millis(150)).await;
     let found = leaf_scan(leaf_sda, leaf_scl);
     let _ = write_str(class, "\r\n  Passive: Pico-mastered Leaf scan found 0x").await;
