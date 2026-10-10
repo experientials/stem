@@ -44,6 +44,10 @@ console = ["stem-node/console", "leaf-scan?/console"]
 debug = ["console", "stem-node/debug", "leaf-scan?/debug"]
 # (The `cros_ec` feature was removed — cros_ec is the SOLE command interface now; the PCA9698-regmap slave
 # is gone, COMMANDS.md §0. `stem-node`'s ec/node are always compiled; nothing to gate.)
+# `diag` — the extended-POST extension (DESIGN.md "diag — per-device POST extension"): a boot window that,
+# unless a master sends `SkipDiag` (or S1 later), runs per-device diag tasks. Implies `console` (diag
+# output over UART). Dual-only (the extension uses the Leaf sensor bus); targets the 32 KB parts.
+diag = ["console"]
 
 # OPERATING MODES (see DESIGN.md "Operating modes"). A build compiles in the modes it supports; the
 # active mode is a RUNTIME switch among them. At least ONE mode is required (compile_error guard).

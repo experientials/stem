@@ -188,6 +188,10 @@ pub enum Command {
     SetMode { mode: Mode },
     /// Operation: set a sensor/trigger threshold — `id` is the node's threshold-catalog index.
     SetThreshold { id: u8, value: u16 },
+    /// Operation/boot-control: **skip the diag extension** (DESIGN.md "diag — per-device POST extension").
+    /// A master monitoring boot sends this within the ~2 s diag window to tell the node to omit the extended
+    /// POST and go straight to normal operation. Harmless on a non-`--diag` build (nothing to skip → Ack).
+    SkipDiag,
     // TODO (other sections, COMMANDS.md): Scan/Dump/SelfTest (debugging, feature-gated);
     // FwUpdate row-stream (flashing, §3).
 }
@@ -258,6 +262,10 @@ pub trait Operate {
     fn set_mode(&mut self, mode: Mode) -> u8;
     /// Set threshold `id` → `value`; `false` if `id` isn't in this node's catalog.
     fn set_threshold(&mut self, id: u8, value: u16) -> bool;
+    /// Record a **skip-diag** request (a master sent `SkipDiag` within the boot window; DESIGN.md "diag").
+    /// Default no-op — only a node that runs the diag extension (deepsleep) overrides it to set a flag its
+    /// boot drains. Never applied inside dispatch (same deferral as `set_mode`).
+    fn skip_diag(&mut self) {}
 }
 
 /// Dispatch the **universal introspection** arms of a [`Command`] against a [`Node`]. Returns `None` for
@@ -279,7 +287,7 @@ pub fn execute_core<N: Node>(node: &mut N, cmd: Command, events_out: &mut [Event
         // `Capabilities` before delegating here), so this core mask is correct for the Node-only case.
         Command::Capabilities => Some(Response::Capabilities(CAPS_NODE)),
         // operation/debug/flash — not the universal core's job
-        Command::SetMode { .. } | Command::SetThreshold { .. } => None,
+        Command::SetMode { .. } | Command::SetThreshold { .. } | Command::SkipDiag => None,
     }
 }
 
@@ -298,6 +306,10 @@ pub fn execute<N: Node + Operate>(node: &mut N, cmd: Command, events_out: &mut [
     }
     match cmd {
         Command::SetMode { mode } => Response::ModeNow(node.set_mode(mode)),
+        Command::SkipDiag => {
+            node.skip_diag();
+            Response::Ack
+        }
         Command::SetThreshold { id, value } => {
             if node.set_threshold(id, value) {
                 Response::Ack
@@ -368,6 +380,7 @@ impl Command {
             Command::Capabilities => "caps",
             Command::SetMode { .. } => "mode",
             Command::SetThreshold { .. } => "thresh",
+            Command::SkipDiag => "skipdiag",
         }
     }
 }
@@ -383,6 +396,7 @@ pub const CATALOG: &[CommandSpec] = &[
     CommandSpec { verb: "caps", args: "[addr]", help: "list the commands this node supports (capability bitmap)", category: Category::Introspection },
     CommandSpec { verb: "mode", args: "[addr] [p|s]", help: "set operating mode Passive/Sensing", category: Category::Operation },
     CommandSpec { verb: "thresh", args: "<addr> <id> <v>", help: "set a sensor/trigger threshold", category: Category::Operation },
+    CommandSpec { verb: "skipdiag", args: "[addr]", help: "skip the diag extension (within the ~2 s boot window)", category: Category::Operation },
 ];
 
 /// The catalog spec for a CLI `verb`, or `None`. Consumers render device-verb help from this so the
@@ -658,6 +672,7 @@ mod tests {
             Command::Capabilities,
             Command::SetMode { mode: Mode::Passive },
             Command::SetThreshold { id: 0, value: 0 },
+            Command::SkipDiag,
         ];
         for cmd in all {
             let verb = cmd.cli_verb();

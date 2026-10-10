@@ -68,11 +68,12 @@ pub struct LiveNode {
     status: StatusData,
     crc: [u8; DBG_CRC_BYTES],
     mode_request: Option<u8>,
+    skip_diag: bool,
 }
 
 impl LiveNode {
     pub fn new(identity: Identity, status: StatusData, crc: [u8; DBG_CRC_BYTES]) -> Self {
-        Self { identity, status, crc, mode_request: None }
+        Self { identity, status, crc, mode_request: None, skip_diag: false }
     }
     /// Refresh the status served by `Status`/introspection (call each loop pass, or on change).
     pub fn set_status(&mut self, status: StatusData) {
@@ -82,6 +83,11 @@ impl LiveNode {
     /// it via `mode::Mode::from_code` and applies the switch through the mode machine.
     pub fn take_mode_request(&mut self) -> Option<u8> {
         self.mode_request.take()
+    }
+    /// Take the pending **skip-diag** request (a master sent `SkipDiag`), clearing it. The boot-time diag
+    /// window polls this each pass to decide whether to omit the extended POST (DESIGN.md "diag").
+    pub fn take_skip_request(&mut self) -> bool {
+        core::mem::take(&mut self.skip_diag)
     }
 }
 
@@ -114,5 +120,9 @@ impl Operate for LiveNode {
     }
     fn set_threshold(&mut self, _id: u8, _value: u16) -> bool {
         false
+    }
+    /// Record the skip-diag request; the boot diag window drains it via [`LiveNode::take_skip_request`].
+    fn skip_diag(&mut self) {
+        self.skip_diag = true;
     }
 }

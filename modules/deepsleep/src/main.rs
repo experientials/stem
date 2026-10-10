@@ -84,6 +84,10 @@ pub use stem_node::node; // the Node/Operate adapter the cros_ec vendor+postcard
 // eUSCI_A0 field-name difference (e_usci_a0 vs usci_a0_uart_mode) via a macro.
 #[cfg(feature = "console")]
 mod uart;
+// diag extension — the `--diag` build's extended-POST boot window (DESIGN.md "diag"). Dual-only + needs
+// the cros_ec `ec`/`node` glue + console; compiled ONLY in a `--diag` build.
+#[cfg(feature = "diag")]
+mod diag_ext;
 // Boot POST: `post::fram_crcs` (per-sector FRAM CRC16) runs on EVERY build incl. silent (ADR-0010 —
 // the M7 reads the raw CRCs over I²C and judges). The UART echo (`boot_log`/`debug_leaf`) inside is
 // `console`/`debug`-gated. So the module is ALWAYS compiled.
@@ -231,6 +235,13 @@ fn run_dual(p: &Peripherals) -> ! {
             // RegFile slave via a B0→B1 jumper; the cros_ec surface is proven over the real Stem bus.)
         }
     }
+
+    // diag EXTENSION (--diag build only): the extended-POST boot window. Runs the per-device diag tasks
+    // UNLESS a master sends `SkipDiag` within the window — then returns here and proceeds to normal
+    // operation (diag is ADDITIVE; DESIGN.md "diag — per-device POST extension"). WDT is still held here
+    // (armed below), so the multi-second window is safe.
+    #[cfg(feature = "diag")]
+    diag_ext::run(&hw, &mut ec_slave, &mut live, p);
 
     // Arm the hang backstop now that the deterministic bring-up — incl. the ~5 s OLED splash and any
     // console boot prints — is done. From here a hang past ~16 s resets the node instead of wedging it.

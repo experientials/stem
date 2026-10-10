@@ -68,7 +68,7 @@ build target *flags:
             # The COMBINED image (fr2xxx) is DARK by default: console-ON needs a runtime per-chip loopback
             # hint that isn't built yet, so a console/debug combined build won't compile (S2b.2b TODO).
             prod)  con=console; [ "$fam" = fr2xxx ] && con=""; just deepsleep build "$fam" auto "$con" "" ;;
-            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;
+            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just deepsleep build "$fam" auto diag "" ;;  # diag = the module's extended-POST build (DESIGN.md); the separate diag/ crate is being retired
             debug) [ "$fam" = fr2xxx ] && { echo "no console/debug build for the combined fr2xxx image yet (dark only — S2b.2b)" >&2; exit 1; }; just deepsleep build "$fam" auto debug "" ;;
         esac
     elif [ "$kind" = expander ]; then
