@@ -241,7 +241,7 @@ fn run_dual(p: &Peripherals) -> ! {
     // operation (diag is ADDITIVE; DESIGN.md "diag — per-device POST extension"). WDT is still held here
     // (armed below), so the multi-second window is safe.
     #[cfg(feature = "diag")]
-    diag_ext::run(&hw, &mut ec_slave, &mut live, p);
+    diag_ext::run(&hw, &mut ec_slave, &mut live, p, &mut mach);
 
     // Arm the hang backstop now that the deterministic bring-up — incl. the ~5 s OLED splash and any
     // console boot prints — is done. From here a hang past ~16 s resets the node instead of wedging it.

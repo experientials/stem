@@ -14,7 +14,7 @@
 //! `diag/` is deleted); the window is also the future entry for command/condition-triggered diag.
 
 use crate::pac::Peripherals;
-use crate::{ec, node, uart};
+use crate::{ec, enumerate, mode, node, uart};
 
 // Boot window ≈ a few seconds at 1 MHz SMCLK. The DESIGN target is ~2 s; this first slice uses a generous
 // span so the skip is testable by hand on the bench. Each pass services the slave + checks for a
@@ -30,6 +30,7 @@ pub fn run(
     ec_slave: &mut stembus::cros_ec::EcSlave,
     live: &mut node::LiveNode,
     p: &Peripherals,
+    mach: &mut mode::ModeMachine,
 ) {
     uart::puts(p, "diag: boot window — send 'skipdiag' (or S1, later) to skip extended POST\n");
     for _ in 0..WINDOW_PASSES {
@@ -43,9 +44,18 @@ pub fn run(
             msp430::asm::nop();
         }
     }
-    // Window elapsed without a skip → run the extended POST (per-device diag tasks).
+    // Window elapsed without a skip → run the extended POST.
     uart::puts(p, "diag: extended POST\n");
-    // TODO(slice 2+): acquire the Leaf bus (Sensing) → per-device exercise tasks (I2C devices, radar,
-    // ADC rail/temp health) as sched tasks interleaved with `ec::poll` → release; re-homed from `diag/`.
+
+    // I2C device tests (re-homed from diag/'s t_scan + t_devices, over the shared `leaf-scan`): acquire the
+    // Leaf sensor bus (a temporary Sensing switch — the node boots Passive), scan + report the connected
+    // devices' presence/inventory, then RELEASE back to Passive so normal operation starts off the bus.
+    mach.switch(hw, mode::Mode::Sensing);
+    let scan = enumerate::scan(hw);
+    enumerate::report(hw, &scan);
+    // TODO(slice 2b): per-device value exercises (MC6470 gravity, Si7021 T/RH, …) over `devices` on the
+    // acquired bus; TODO(slice 3): radar (GPIO) + ADC rail/temp health + stress/soak/signature tasks.
+    mach.switch(hw, mode::Mode::Passive);
+
     uart::puts(p, "diag: done\n");
 }
