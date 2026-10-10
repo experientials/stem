@@ -39,7 +39,7 @@ use bsp::model; // Runtime MSP430 model detection + pin mapping (shared in bsp).
 // The deepsleep capability modules this node uses (all cros_ec, PAC-free — driven through node-hal seams):
 //   status — identity/status snapshot    post   — boot POST (FRAM CRC) + console boot log
 //   stem   — StemSlave transport init    ec     — cros_ec v3 EC-slave glue    node — StaticNode adapter
-use deepsleep::{ec, node, post, status, stem};
+use stem_node::{ec, node, post, status, stem};
 
 // UART logging is the `console` feature (dev only). Off = silent production image. `uart.rs` delegates to
 // `bsp::board::console_uart_*` (FR2433 backchannel on UCA0/P1.4-5).

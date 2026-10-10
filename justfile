@@ -26,9 +26,9 @@ libdir   := env_var_or_default("MSP430_LIBDIR", "/usr/local/lib")
 mod check
 mod example
 mod pac
-mod memory     # per-chip linker memory maps (prod/memory-<chip>.x) — generate from TI .ld + lint
+mod memory     # per-chip linker memory maps (modules/deepsleep/memory-<chip>.x) — generate from TI .ld + lint
 mod diag       # MSP430 POST/diagnostic firmware (Docker toolchain)
-mod prod       # MSP430 product Stembus node firmware (Docker toolchain; DUAL-I²C family axis)
+mod deepsleep  # MSP430 deepsleep-supervisor product (modules/deepsleep; Docker toolchain; DUAL-I²C + combined fr2xxx)
 mod expander   # FR2433 single-I²C I/O-expander firmware (modules/expander; cros_ec-only)
 mod probe      # RP2040 bench-host firmware (modules/pico-probe) — host cargo, Linux+macOS
 mod usb
@@ -60,8 +60,9 @@ build target *flags:
         fr2476|fr247x) fam=fr247x; diagt=fr2476; kind=msp ;;
         fr2433|fr24xx) kind=expander ;;  # FR2433 I/O expander — its OWN binary crate (modules/expander), cros_ec-only; no diag image
         fr2155|fr215x) fam=fr215x; diagt=fr2155; kind=msp ;;
+        fr2xxx)        fam=fr2xxx; diagt="";     kind=msp ;;  # COMBINED single image (FR2476+FR2355/FR2155) — dark prod, no diag
         rp2040)        kind=cortex ;;
-        *) echo "unknown chip '{{target}}' — fr2355|fr2476|fr2433|fr2155|rp2040" >&2; exit 1 ;;
+        *) echo "unknown chip '{{target}}' — fr2355|fr2476|fr2433|fr2155|fr2xxx|rp2040" >&2; exit 1 ;;
     esac
     # cros_ec is an MSP430 EC-slave path (the default command interface on the nodes). It does not apply to
     # the RP2040 (it's the bus MASTER / stem-probe, not a node) — so clear the default crosec for non-MSP.
@@ -69,9 +70,11 @@ build target *flags:
     if [ "$kind" = msp ]; then
         [ "$cls" = default ] && cls=prod
         case "$cls" in
-            prod)  just prod build "$fam" auto console "" "$crosec" ;;
+            # The COMBINED image (fr2xxx) is DARK by default: console-ON needs a runtime per-chip loopback
+            # hint that isn't built yet, so a console/debug combined build won't compile (S2b.2b TODO).
+            prod)  con=console; [ "$fam" = fr2xxx ] && con=""; just deepsleep build "$fam" auto "$con" "" "$crosec" ;;
             diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;  # diag ignores crosec for now (converges onto the unified vocabulary in Rd)
-            debug) just prod build "$fam" auto debug "" "$crosec" ;;  # prod + `debug` feature (post-POST "what was found")
+            debug) [ "$fam" = fr2xxx ] && { echo "no console/debug build for the combined fr2xxx image yet (dark only — S2b.2b)" >&2; exit 1; }; just deepsleep build "$fam" auto debug "" "$crosec" ;;  # prod + `debug` feature (post-POST "what was found")
         esac
     elif [ "$kind" = expander ]; then
         # FR2433 I/O expander (modules/expander): cros_ec is UNCONDITIONAL in that crate, so there is no

@@ -17,8 +17,8 @@ members = [
 ]
 exclude = [
     "crates/bsp",       # MSP430 PACs/board/hal — target-only
-    "crates/deepsleep", # still deps msp430 (until 6e) — target-only
-    "prod",             # MSP430 product binary (Docker build)
+    "crates/stem-node", # shared Stembus-node control surface — target-only (built as a dep of the modules)
+    "crates/leaf-scan", # Leaf-bus enumeration — deps msp430 → target-only
     "diag",             # MSP430 diag binary (Docker build)
     "pac",              # generated svd2rust PACs — target-only
     "pac/msp430fr2xxx-dual", # combined FR2476/FR2355/FR2155 PAC (dual-slot __INTERRUPTS, B1X/B1Y) — target-only

@@ -8,8 +8,10 @@
 
 #![allow(dead_code)] // some fields/paths serve the SoM's I2C-slave reads (stem::RegFile) not the bench dump.
 
+// The Leaf scan result is reported here on dual nodes; its type now lives in the `leaf-scan` capability
+// crate (optional dep, pulled in only under `_dual`).
 #[cfg(feature = "_dual")]
-use crate::enumerate::Scan;
+use leaf_scan::Scan;
 use crate::regmap;
 use crate::{VER_MAJOR, VER_MINOR, VER_PATCH}; // deepsleep's capability version (§B)
 use node_hal::ChipId; // host-clean chip identity (device id + family-match), Phase 6c

@@ -1,8 +1,8 @@
 [package]
-name = "prod"
+name = "deepsleep"
 version = "0.1.0"
 edition = "2021"
-description = "bob-929 Stembus node firmware (Rust) — DUAL-I²C family axis: FR247x (default) / FR215x / FR235x"
+description = "bob-929 deepsleep sleep-supervisor PRODUCT (modules/deepsleep): the dual-I²C Stembus node that sleeps in LPM, serves its Stem control surface (stem-node), and in Sensing acquires the Leaf sensor bus (leaf-scan). Family axis: FR247x/FR215x/FR235x + the combined fr2xxx single image. (`deepsleep` names a MODULE/product, not a capability crate — the shared runtime is `stem-node`.)"
 
 # COMPILE-TIME FAMILY AXIS (one image per register/memory-compatible DUAL-I²C family — see DESIGN.md).
 # Exactly one family feature is active; it selects the PAC + memory map (build.rs) + gate budget
@@ -18,9 +18,9 @@ default = ["fr247x", "console", "mode-passive", "mode-sensing"]
 # The family feature forwards to bsp's PAC feature (bsp owns the PAC alias + the shared board/hal/i2c).
 # Each family enables `bsp/rt` + `msp430-rt/device` → the device vector table for the eUSCI_B slave wake
 # ISR (deepsleep LPM). diag does NOT (no ISRs), so bsp's chip features stay rt-free for the shared build.
-fr247x = ["bsp/fr2476", "deepsleep/fr2476", "_dual", "bsp/rt", "msp430-rt/device"] # FR2476/FR2475 — primary dev target
-fr215x = ["bsp/fr2155", "deepsleep/fr2155", "_dual", "bsp/rt", "msp430-rt/device"] # FR2155 — production dual-I²C baseline
-fr235x = ["bsp/fr2355", "deepsleep/fr2355", "_dual", "bsp/rt", "msp430-rt/device"] # FR2355 — dev LaunchPad, superset of FR2155
+fr247x = ["bsp/fr2476", "stem-node/fr2476", "_dual", "bsp/rt", "msp430-rt/device"] # FR2476/FR2475 — primary dev target
+fr215x = ["bsp/fr2155", "stem-node/fr2155", "_dual", "bsp/rt", "msp430-rt/device"] # FR2155 — production dual-I²C baseline
+fr235x = ["bsp/fr2355", "stem-node/fr2355", "_dual", "bsp/rt", "msp430-rt/device"] # FR2355 — dev LaunchPad, superset of FR2155
 # fr2xxx = the COMBINED single image: ONE binary for FR2476 + FR2355/FR2155 (S2b). Selects the combined
 # `bsp/fr2xxx` PAC (runtime eUSCI_B1 base/pins + runtime clock/console dispatch); NO `deepsleep/<chip>`
 # marker (the per-chip console hints are runtime, deferred to the console follow-on) — just `_dual`. The
@@ -30,29 +30,31 @@ fr2xxx = ["bsp/fr2xxx", "_dual", "bsp/rt", "msp430-rt/device"]
 # (FR2433 single-I²C slave-only node REMOVED in S2a — it is now `modules/expander/`, a separate binary.)
 # Internal marker: "this is a dual-I²C family" — gates the shared dual-I²C code; forwards to deepsleep's
 # `_dual` so its `enumerate` module compiles. Not selected directly.
-_dual = ["deepsleep/_dual"]
+_dual = ["stem-node/_dual", "dep:leaf-scan"]
 # The Stem (eUSCI_B1) slave pins are routed by `bsp::board::route_stem_i2c_pins`, keyed on the chip
 # feature the board layer already carries (P3.2/3.6 FR2476, P4.6/4.7 FR2355/FR2155, P1.2/3 FR2433) —
 # so no prod-level pin-group marker is needed (dropped in Phase 1a; was `_stem_p3`/`_stem_p4`).
 # `console` — dev-only UART logging. Default (non-debug) = LEAN per DESIGN.md: version + per-sector FRAM
 # checksums only. OFF = silent production image; state lives only in the debug registers / I2C-slave
 # surface (smaller FRAM, no UART clocking). Orthogonal to the family axis. On by default for dev.
-console = ["deepsleep/console"]
+console = ["stem-node/console", "leaf-scan?/console"]
 # `debug` — verbose build (implies console): adds the post-POST "what was found" (enumerate report +
 # status dump + a Leaf/eUSCI diagnostic) and the interactive s/r/d/m/l commands. Built via
 # `just build <chip> --debug`. "Not a full diag, but some basic info" (DESIGN.md, Henrik 2026-10-04).
-debug = ["console", "deepsleep/debug"]
+debug = ["console", "stem-node/debug", "leaf-scan?/debug"]
 # `cros_ec` — the cros_ec v3 EC-slave framing path (COMMANDS.md §0). On the dual node it runs the cros_ec
 # framer INSTEAD of the PCA9698-regmap slave. Opt-in via `--features cros_ec`; the regmap removal on the
 # dual path is a later slice (S2b). (The FR2433 cros_ec node now lives in `modules/expander/`, S2a.)
-cros_ec = ["deepsleep/cros_ec"]
+cros_ec = ["stem-node/cros_ec"]
 
 # OPERATING MODES (see DESIGN.md "Operating modes"). A build compiles in the modes it supports; the
 # active mode is a RUNTIME switch among them. At least ONE mode is required (compile_error guard).
 # `mode-passive` — SoM masters; MSP is a pure I/O-extender on the B1 slave, never touches the sensor bus.
-mode-passive = ["deepsleep/mode-passive"]
+mode-passive = []
 # `mode-sensing` — SoM suspended; MSP acquires the sensor bus (B0 master), monitors, wakes the PMIC.
-mode-sensing = ["deepsleep/mode-sensing"]
+# mode-passive/mode-sensing are now PRODUCT-LOCAL (the Passive↔Sensing machine `src/mode.rs` lives here,
+# not in the shared runtime) — they gate `mode.rs`'s variants/actions, forwarded to nothing.
+mode-sensing = []
 
 [dependencies]
 msp430 = "0.4"
@@ -60,21 +62,21 @@ msp430-rt = "0.4"
 panic-msp430 = "0.4"
 # The shared low-level layer: chip-select PAC alias, board semantic map, hal I2c seam, Leaf-I2C
 # driver. prod re-exports bsp::{pac,hal,i2c} (main.rs); the family feature forwards to bsp (above).
-bsp = { path = "../crates/bsp" }
-# Host-clean hardware-seam traits + `ChipId` (DEEPSLEEP-EXTRACTION.md Phase 6). prod builds the `ChipId`
-# once from the detected model and passes it to `deepsleep::{post,status}` (which are now PAC-free).
-node-hal = { path = "../crates/node-hal" }
-sched = { path = "../crates/sched" }
-# The Stem-bus wire contract (regmap constants) + shared codecs (FRAM CRC) — ONE definition this server
-# shares with the masters (stem-probe, M7). prod::regmap re-exports its constants; post.rs uses its CRC.
-stembus = { path = "../crates/stembus" }
-# Shared per-device drivers (one module per sensor, standard Device convention) — used by both diag
-# and prod via the embedded-hal I2c seam (bsp::hal).
-devices = { path = "../crates/devices" }
-# The MSP430 deepsleep-supervisor module capability crate (DEEPSLEEP-EXTRACTION.md). prod drives it as
-# the API/event loop; diag will drive it as a test harness. Extracted from prod incrementally — Phase 0a
-# is the register-map decode (`deepsleep::regmap`), which prod re-exports as `crate::regmap`.
-deepsleep = { path = "../crates/deepsleep" }
+bsp = { path = "../../crates/bsp" }
+# Host-clean hardware-seam traits + `ChipId` (DEEPSLEEP-EXTRACTION.md Phase 6). The bin builds the `ChipId`
+# once from the detected model and passes it to `stem_node::{post,status}` (which are PAC-free).
+node-hal = { path = "../../crates/node-hal" }
+sched = { path = "../../crates/sched" }
+# The Stem-bus wire contract (regmap constants, cros_ec framing, mode codes) + shared codecs (FRAM CRC).
+stembus = { path = "../../crates/stembus" }
+# Shared per-device drivers (one module per sensor, standard Device convention) via the embedded-hal seam.
+devices = { path = "../../crates/devices" }
+# The shared Stembus-node control surface (cros_ec serve + dispatch, POST, status). This product drives it
+# as the API/event loop. (Renamed from the product-named `deepsleep` capability crate — see git history.)
+stem-node = { path = "../../crates/stem-node" }
+# Leaf-I²C sensor enumeration — a dual-only capability (optional, pulled in by the `_dual` feature). Used
+# by the Sensing-mode scan path; a slave-only node wouldn't link it.
+leaf-scan = { path = "../../crates/leaf-scan", optional = true }
 
 # opt-level "s" + LTO: size wins over speed (the FRAM budget is the point). The gate
 # (`just prod build`) fails the build if the footprint exceeds the active family's budget.

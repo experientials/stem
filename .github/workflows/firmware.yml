@@ -26,11 +26,15 @@ jobs:
       - name: Build diag (FR2476) — gated at 32 KB FRAM / 8 KB SRAM
         run: just diag build     # size-check.sh fails the job on overflow
 
-      # prod is the DUAL-I²C family axis — build and gate the dev default. `just prod build` emits a
-      # variant-unique artifact `prod-<family>` (cargo's shared `prod` path is still clobbered per
-      # build, but the suffixed copy is stable), so no hand-copy is needed here.
-      - name: Build prod fr247x (FR2476/FR2475 dual-I²C) — gated 32 KB / 8 KB
-        run: just prod build fr247x
+      # The deepsleep product (modules/deepsleep) is the DUAL-I²C family axis — build and gate the dev
+      # default. `just deepsleep build` emits a variant-unique artifact `deepsleep-<family>` (cargo's
+      # shared `deepsleep` path is still clobbered per build, but the suffixed copy is stable).
+      - name: Build deepsleep fr247x (FR2476/FR2475 dual-I²C) — gated 32 KB / 8 KB
+        run: just deepsleep build fr247x
+
+      # The COMBINED single image (FR2476 + FR2355/FR2155 in one binary, S2b) — dark prod, gated 32 KB / 4 KB.
+      - name: Build deepsleep fr2xxx (combined single image) — gated 32 KB / 4 KB
+        run: just build fr2xxx
 
       # FR2433 single-I²C node is its own binary crate now (modules/expander, cros_ec-only). Route via
       # the chip-first frontend so it builds modules/expander and gates at 15 KB / 4 KB.
@@ -45,6 +49,7 @@ jobs:
             examples/hello-c/build/*.elf
             examples/hello-rust/target/msp430-none-elf/release/hello-rust
             diag/target/msp430-none-elf/release/diag
-            prod/target/msp430-none-elf/release/prod-fr247x
+            modules/deepsleep/target/msp430-none-elf/release/deepsleep-fr247x
+            modules/deepsleep/target/msp430-none-elf/release/deepsleep-fr2xxx-silent-cros_ec
             modules/expander/target/msp430-none-elf/release/expander-cros_ec
           if-no-files-found: error

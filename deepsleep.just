@@ -1,7 +1,7 @@
-# `just prod <verb>` — build/flash the PRODUCT Stembus node firmware (prod/, Rust; DUAL-I²C family axis).
+# `just deepsleep <verb>` — build/flash the deepsleep PRODUCT firmware (modules/deepsleep/, Rust; DUAL-I²C family axis).
 #
-#   just prod build [family]   build for a dual family + GATE against its part budget (default fr247x)
-#   just prod flash            program the connected board (host; needs msp430-macos-dev setup)
+#   just deepsleep build [family]   build for a dual family + GATE against its part budget (default fr247x)
+#   just deepsleep flash            program the connected board (host; needs msp430-macos-dev setup)
 #
 # The DUAL-I²C families are first-class (see DESIGN.md / MCU_SELECTION.md): fr247x (FR2476/FR2475 — the
 # on-hand dev boards, DEFAULT), fr215x (FR2155 — production baseline), fr235x (FR2355 — dev superset).
@@ -30,7 +30,7 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
         *) echo "unknown family '{{family}}' — use fr247x|fr215x|fr235x|fr2xxx (FR2433 → just build fr2433)" >&2; exit 1;;
     esac
     # Operating modes to compile in (DESIGN.md). Dual-I²C families get both (runtime-switchable).
-    # Override with the `modes` arg, e.g. `just prod build fr247x auto console mode-sensing`.
+    # Override with the `modes` arg, e.g. `just deepsleep build fr247x auto console mode-sensing`.
     if [ -n "{{modes}}" ]; then MODES="{{modes}}"; else MODES="mode-passive,mode-sensing"; fi
     # `console` arg: "console" (lean UART log) | "" (silent) | "debug" (verbose: post-POST found-info).
     # The feature name IS the arg value (`debug` implies `console` in Cargo.toml), so it flows into FEATS.
@@ -41,7 +41,7 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
     # VARIANT = the family (+ '-silent' when console is off). cargo always writes the same binary name
     # (`prod`) regardless of features, so both families — and console/silent — clobber one path. We copy
     # the built ELF to a variant-unique name `prod-<variant>` so a pinned artifact (hwd.toml image, CI
-    # upload, `just prod flash`) CANNOT be silently overwritten by a later build of the other family.
+    # upload, `just deepsleep flash`) CANNOT be silently overwritten by a later build of the other family.
     # This is what makes thepia's declaration-based cross-family guard reliable in practice (the guard
     # trusts a declared family; a stable per-family artifact keeps declaration and bytes from drifting).
     # VARIANT suffix per console arg: ''→'-silent', 'console'→'' (prod-<fam>), 'debug'→'-debug'. Keeps
@@ -51,11 +51,11 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
         console) variant="{{family}}" ;;
         *)       variant="{{family}}-{{console}}" ;;  # e.g. debug → prod-<fam>-debug
     esac
-    if [ -n "{{extra}}" ]; then variant="$variant-{{extra}}"; fi  # distinct artifact, e.g. prod-fr247x-cros_ec
+    if [ -n "{{extra}}" ]; then variant="$variant-{{extra}}"; fi  # distinct artifact, e.g. deepsleep-fr247x-cros_ec
     finish() {  # $1 = cargo profile dir; copies to the variant artifact and gates THAT file
         local prof="$1" built art
-        built="prod/target/msp430-none-elf/$prof/prod"
-        art="prod/target/msp430-none-elf/$prof/prod-$variant"
+        built="modules/deepsleep/target/msp430-none-elf/$prof/deepsleep"
+        art="modules/deepsleep/target/msp430-none-elf/$prof/deepsleep-$variant"
         cp "$built" "$art"
         scripts/size-check.sh "$art" "$FRAM_BUDGET" "$RAM_BUDGET" "prod ($prof, $label) → $(basename "$art")" "$FLOOR"
         # BENCHMARK the fr247x image against the PRODUCTION dual-I²C parts (FR2155/FR2355): 32 KB FRAM /
@@ -69,19 +69,19 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
     }
     if [ -f /.dockerenv ]; then
         case "{{mode}}" in *fast) prof=fast; flag="--profile fast";; *) prof=release; flag="--release";; esac
-        ( cd prod && cargo build $flag $feats )
+        ( cd modules/deepsleep && cargo build $flag $feats )
         finish "$prof"
         exit 0
     fi
-    run_docker() { docker run --rm --platform linux/amd64 -e PROD_BUILD {{cargo_cache}} -v "$PWD":/work -w /work {{image}} just prod build {{family}} "$1" "{{console}}" "{{modes}}" "{{extra}}"; }
+    run_docker() { docker run --rm --platform linux/amd64 -e PROD_BUILD {{cargo_cache}} -v "$PWD":/work -w /work {{image}} just deepsleep build {{family}} "$1" "{{console}}" "{{modes}}" "{{extra}}"; }
     mode="{{mode}}"
     if [ "$mode" = auto ]; then
         if scripts/native-available.sh; then mode=native
         else mode=docker; echo "· native toolchain not found → Docker (set it up: scripts/setup-native-macos.sh)"; fi
     fi
     case "$mode" in
-        native)      scripts/native-build.sh release prod "$feats"; finish release ;;
-        fast)        scripts/native-build.sh fast prod "$feats";    finish fast ;;
+        native)      scripts/native-build.sh release modules/deepsleep "$feats"; finish release ;;
+        fast)        scripts/native-build.sh fast modules/deepsleep "$feats";    finish fast ;;
         docker)      run_docker docker ;;
         docker-fast) run_docker docker-fast ;;
         *) echo "unknown mode '$mode' — use auto|native|fast|docker|docker-fast" >&2; exit 1 ;;
@@ -99,8 +99,8 @@ flash family="fr247x" profile="release" console="console":
     #!/usr/bin/env bash
     set -euo pipefail
     variant="{{family}}$([ -z "{{console}}" ] && echo '-silent' || true)"  # `|| true`: keep set -e happy when the test is false
-    elf="prod/target/msp430-none-elf/{{profile}}/prod-$variant"
-    [ -f "$elf" ] || { echo "no built ELF at $elf — run 'just prod build {{family}} {{profile}} {{console}}' first" >&2; exit 1; }
+    elf="modules/deepsleep/target/msp430-none-elf/{{profile}}/deepsleep-$variant"
+    [ -f "$elf" ] || { echo "no built ELF at $elf — run 'just deepsleep build {{family}} {{profile}} {{console}}' first" >&2; exit 1; }
     echo "flashing $elf"
     if pgrep -x mspdebug >/dev/null 2>&1; then echo "  freeing stale mspdebug"; pkill -x mspdebug || true; sleep 1; fi
     DYLD_FALLBACK_LIBRARY_PATH={{libdir}} {{mspdebug}} tilib "prog $elf" exit

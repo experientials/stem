@@ -21,7 +21,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PROD_BUILD");
     println!("cargo:rerun-if-env-changed=PROD_RELEASE");
     println!("cargo:rerun-if-env-changed=PROD_TARGET");
-    println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
     // Re-derive the stamp when the sources change, so a rebuilt image gets a fresh stamp (the earlier
     // staleness: editing src/ did NOT re-run build.rs, so PROD_BUILD's secs froze across rebuilds).
     println!("cargo:rerun-if-changed=src");

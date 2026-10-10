@@ -12,6 +12,7 @@ dependencies = [
  "msp430fr2355",
  "msp430fr2433",
  "msp430fr2476",
+ "msp430fr2xxx-dual",
  "node-hal",
 ]
 
@@ -31,17 +32,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
-name = "deepsleep"
-version = "0.1.0"
-dependencies = [
- "devices",
- "msp430",
- "node-hal",
- "sched",
- "stembus",
-]
-
-[[package]]
 name = "devices"
 version = "0.1.0"
 dependencies = [
@@ -59,13 +49,13 @@ name = "expander"
 version = "0.1.0"
 dependencies = [
  "bsp",
- "deepsleep",
  "devices",
  "msp430",
  "msp430-rt",
  "node-hal",
  "panic-msp430",
  "sched",
+ "stem-node",
  "stembus",
 ]
 
@@ -127,6 +117,14 @@ dependencies = [
 
 [[package]]
 name = "msp430fr2476"
+version = "0.1.0"
+dependencies = [
+ "msp430-rt",
+ "vcell",
+]
+
+[[package]]
+name = "msp430fr2xxx-dual"
 version = "0.1.0"
 dependencies = [
  "msp430-rt",
@@ -233,6 +231,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "stem-node"
+version = "0.1.0"
+dependencies = [
+ "devices",
+ "node-hal",
+ "sched",
+ "stembus",
 ]
 
 [[package]]

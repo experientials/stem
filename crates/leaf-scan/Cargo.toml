@@ -1,0 +1,23 @@
+[package]
+name = "leaf-scan"
+version = "0.1.0"
+edition = "2021"
+description = "Leaf-I²C (sensor bus) enumeration — probe/identify devices on a node's local sensor bus through the shared `devices` drivers, with bus-health detection, plus the async scan task. A reusable capability for any _dual node that masters a Leaf bus (deepsleep today; vision/bluetooth later). Generic over the `node-hal::LeafBus` seam — PAC-free."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Shared per-sensor drivers (the `devices` convention) — probe/identify goes through them.
+devices = { path = "../devices" }
+# Host-clean hardware-seam trait: the scan is generic over `node_hal::LeafBus` (+ `Console` for the
+# `console`/`debug` report paths), so this names no concrete PAC.
+node-hal = { path = "../node-hal" }
+# The cooperative/async executor (ADR-0013): the async scan task `.await`s `sched::yield_now`.
+sched = { path = "../sched" }
+# `msp430::asm::nop()` in the (--debug) VL53L0X ranging pacing loop.
+msp430 = "0.4"
+
+[features]
+# `console` = the UART scan-report paths; `debug` = the extra wake-on-approach ranging demo (implies
+# console). Forwarded by the consuming module (e.g. modules/deepsleep).
+console = []
+debug = ["console"]

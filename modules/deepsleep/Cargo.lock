@@ -35,10 +35,15 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 name = "deepsleep"
 version = "0.1.0"
 dependencies = [
+ "bsp",
  "devices",
+ "leaf-scan",
  "msp430",
+ "msp430-rt",
  "node-hal",
+ "panic-msp430",
  "sched",
+ "stem-node",
  "stembus",
 ]
 
@@ -54,6 +59,16 @@ name = "embedded-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+
+[[package]]
+name = "leaf-scan"
+version = "0.1.0"
+dependencies = [
+ "devices",
+ "msp430",
+ "node-hal",
+ "sched",
+]
 
 [[package]]
 name = "msp430"
@@ -163,21 +178,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prod"
-version = "0.1.0"
-dependencies = [
- "bsp",
- "deepsleep",
- "devices",
- "msp430",
- "msp430-rt",
- "node-hal",
- "panic-msp430",
- "sched",
- "stembus",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -242,6 +242,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "stem-node"
+version = "0.1.0"
+dependencies = [
+ "devices",
+ "leaf-scan",
+ "node-hal",
+ "sched",
+ "stembus",
 ]
 
 [[package]]

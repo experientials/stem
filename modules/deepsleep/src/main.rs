@@ -54,7 +54,7 @@ use core::future::Future; // for `.poll()` on the pinned scanner future in the s
 
 pub use bsp::model; // Runtime MSP430 model detection + pin mapping — now shared in bsp (STEM-DIRECTION.md
                     // "model-detect + pinmap → bsp"); both prod boot and diag POST read one detector.
-pub use deepsleep::regmap; // I²C-slave register-map contract (PCA9698 emulation + Thepia extensions) —
+pub use stem_node::regmap; // I²C-slave register-map contract (PCA9698 emulation + Thepia extensions) —
                            // now in the `deepsleep` crate (DEEPSLEEP-EXTRACTION.md Phase 0a). Re-export
                            // keeps `crate::regmap::*` resolving for prod's modules unchanged.
 
@@ -65,23 +65,23 @@ pub use deepsleep::regmap; // I²C-slave register-map contract (PCA9698 emulatio
 // Clock init (locked 1 MHz SMCLK for a clean UART) now lives in `bsp::board::clock_init_1mhz`, per
 // family — including an fr2433 module (ADR-0014 / CONV-1). prod no longer carries its own copy.
 #[cfg(feature = "_dual")]
-pub use deepsleep::enumerate; // Leaf sensor-bus enumeration — now in `deepsleep` (Phase 0a); re-export
+pub use leaf_scan::enumerate; // Leaf sensor-bus enumeration — now in `deepsleep` (Phase 0a); re-export
                              // keeps `crate::enumerate::*` resolving for main.rs/status.rs unchanged.
 // The I²C-slave surface (status + stem transport + regmap) serves the dual node (eUSCI_B1).
 // `enumerate`/`mode` are also dual (sensor bus + mode machine).
 #[cfg(feature = "_dual")]
-pub use deepsleep::status; // identity/status model (regmap 0x30–0x3F) — now in deepsleep (Phase 0b)
+pub use stem_node::status; // identity/status model (regmap 0x30–0x3F) — now in deepsleep (Phase 0b)
 #[cfg(feature = "_dual")]
-pub use deepsleep::mode; // operating-mode machine (Passive↔Sensing) — now in deepsleep (Phase 0c)
+pub mod mode; // operating-mode machine (Passive↔Sensing) — now in deepsleep (Phase 0c)
 #[cfg(feature = "_dual")]
-pub use deepsleep::stem; // I²C-slave dispatch (RegFile/Slave/poll) — now in `deepsleep` (Phase 1a);
+pub use stem_node::stem; // I²C-slave dispatch (RegFile/Slave/poll) — now in `deepsleep` (Phase 1a);
                          // its transport (eUSCI programming + pins) is `bsp::stem_i2c`. Re-export keeps
                          // `crate::stem::*` resolving for main.rs unchanged.
 #[cfg(feature = "cros_ec")]
-pub use deepsleep::ec; // cros_ec EC-slave glue (COMMANDS.md §0) — replaces the regmap slave on the
+pub use stem_node::ec; // cros_ec EC-slave glue (COMMANDS.md §0) — replaces the regmap slave on the
                        // cros_ec build (dual via ec::poll in run_dual).
 #[cfg(feature = "cros_ec")]
-pub use deepsleep::node; // the Node/Operate adapter the vendor+postcard path dispatches against
+pub use stem_node::node; // the Node/Operate adapter the vendor+postcard path dispatches against
                          // (LiveNode on dual).
 // UART logging is the `console` feature (dev only). Off = silent production image; state then lives
 // only in the debug registers (served by the I2C-slave surface). See status.rs / the console question.
@@ -92,7 +92,7 @@ mod uart;
 // Boot POST: `post::fram_crcs` (per-sector FRAM CRC16) runs on EVERY build incl. silent (ADR-0010 —
 // the M7 reads the raw CRCs over I²C and judges). The UART echo (`boot_log`/`debug_leaf`) inside is
 // `console`/`debug`-gated. So the module is ALWAYS compiled.
-pub use deepsleep::post; // boot POST integrity (FRAM CRC) + console boot log — now in deepsleep (Phase 0b)
+pub use stem_node::post; // boot POST integrity (FRAM CRC) + console boot log — now in deepsleep (Phase 0b)
 
 /// Compiled-in identity stamp (see build.rs). Printed at boot once the UART stub lands.
 const FW_BUILD: &str = env!("PROD_BUILD");
