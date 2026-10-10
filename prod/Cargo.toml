@@ -21,6 +21,12 @@ default = ["fr247x", "console", "mode-passive", "mode-sensing"]
 fr247x = ["bsp/fr2476", "deepsleep/fr2476", "_dual", "bsp/rt", "msp430-rt/device"] # FR2476/FR2475 — primary dev target
 fr215x = ["bsp/fr2155", "deepsleep/fr2155", "_dual", "bsp/rt", "msp430-rt/device"] # FR2155 — production dual-I²C baseline
 fr235x = ["bsp/fr2355", "deepsleep/fr2355", "_dual", "bsp/rt", "msp430-rt/device"] # FR2355 — dev LaunchPad, superset of FR2155
+# fr2xxx = the COMBINED single image: ONE binary for FR2476 + FR2355/FR2155 (S2b). Selects the combined
+# `bsp/fr2xxx` PAC (runtime eUSCI_B1 base/pins + runtime clock/console dispatch); NO `deepsleep/<chip>`
+# marker (the per-chip console hints are runtime, deferred to the console follow-on) — just `_dual`. The
+# combined PAC's rt table maps EUSCI_B1 at BOTH 0xFFDA and 0xFFDE, so the one image's wake ISR fires on
+# either part. Build: `just build fr2xxx` (dark prod by default). HW-proven on @fr2476 AND @fr2355 (S2b.4).
+fr2xxx = ["bsp/fr2xxx", "_dual", "bsp/rt", "msp430-rt/device"]
 # (FR2433 single-I²C slave-only node REMOVED in S2a — it is now `modules/expander/`, a separate binary.)
 # Internal marker: "this is a dual-I²C family" — gates the shared dual-I²C code; forwards to deepsleep's
 # `_dual` so its `enumerate` module compiles. Not selected directly.

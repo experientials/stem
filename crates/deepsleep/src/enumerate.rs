@@ -9,7 +9,10 @@ use core::cell::Cell;
 // the host-clean `node_hal::LeafBus` seam and the console report through `node_hal::Console`. `bsp::StemHw`
 // is the sole MSP430 impl; the bin constructs it and passes `&hw`. No `bsp::` type is named here.
 use node_hal::LeafBus;
-#[cfg(feature = "console")]
+// `Console` is imported UNCONDITIONALLY: `leaf_scanner`'s bound references it in every build (a `#[cfg]`
+// can't gate a single `where` predicate — see its doc comment), so a console-OFF build (e.g. the silent
+// production image / the combined `fr2xxx` dark build) must still have the trait in scope. `bsp::StemHw`
+// impls it for every build, so the bound is always satisfiable; non-console builds just never call it.
 use node_hal::Console;
 #[cfg(feature = "console")]
 use devices::{

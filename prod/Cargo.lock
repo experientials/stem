@@ -12,6 +12,7 @@ dependencies = [
  "msp430fr2355",
  "msp430fr2433",
  "msp430fr2476",
+ "msp430fr2xxx-dual",
  "node-hal",
 ]
 
@@ -112,6 +113,14 @@ dependencies = [
 
 [[package]]
 name = "msp430fr2476"
+version = "0.1.0"
+dependencies = [
+ "msp430-rt",
+ "vcell",
+]
+
+[[package]]
+name = "msp430fr2xxx-dual"
 version = "0.1.0"
 dependencies = [
  "msp430-rt",

@@ -82,13 +82,32 @@ impl Model {
     /// family feature forwards to exactly one. FR2476/FR2475 share the `fr2476` PAC/family. (FR2155 is
     /// validated on FR2355 silicon, which reports FR2355's TLV → a `fr2155` build on that bench reads
     /// `Fr2355` and flags a "mismatch"; expected until a real FR2155 board exists.)
+    ///
+    /// The COMBINED image (`fr2xxx`) is in-family for EVERY dual member it covers (FR2476/FR2475 **and**
+    /// FR2355/FR2155) — that is the whole point of the single image — so each of those arms also accepts
+    /// `fr2xxx`. A combined image on an FR2433 or unknown part still correctly flags a mismatch.
     pub fn matches_build_family(self) -> bool {
         match self {
-            Model::Fr2476 | Model::Fr2475 => cfg!(feature = "fr2476"),
-            Model::Fr2155 => cfg!(feature = "fr2155"),
-            Model::Fr2355 => cfg!(feature = "fr2355"),
+            Model::Fr2476 | Model::Fr2475 => cfg!(any(feature = "fr2476", feature = "fr2xxx")),
+            Model::Fr2155 => cfg!(any(feature = "fr2155", feature = "fr2xxx")),
+            Model::Fr2355 => cfg!(any(feature = "fr2355", feature = "fr2xxx")),
             Model::Fr2433 => cfg!(feature = "fr2433"),
             Model::Unknown(_) => false,
+        }
+    }
+
+    /// The eUSCI_B1 (Stem-slave) peripheral **base address** for this model — the ONE register-level
+    /// divergence that makes the combined `fr2xxx` image need runtime dispatch. The register-block
+    /// *layout* is identical across the family (verified per-datasheet: eUSCI_B is one IP block); only
+    /// the base moved. FR247x: 0x0580 (confirmed, pac/msp430fr2476). FR2355/FR2155: 0x05C0 (confirmed,
+    /// pac/msp430fr2355 + pac/msp430fr2155). `Fr2433`/`Unknown` fall back to 0x0580 — they are never the
+    /// combined target (FR2433 is the single-I²C `modules/expander`, built per-family), so the value is
+    /// inert there; it exists only so the match is total.
+    pub const fn stem_i2c_base(self) -> usize {
+        match self {
+            Model::Fr2476 | Model::Fr2475 => 0x0580,
+            Model::Fr2355 | Model::Fr2155 => 0x05C0,
+            Model::Fr2433 | Model::Unknown(_) => 0x0580,
         }
     }
 

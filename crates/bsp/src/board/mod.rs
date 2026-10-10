@@ -36,6 +36,15 @@ mod fr2433_launchpad;
 #[cfg(feature = "fr2433")]
 pub use fr2433_launchpad::*;
 
+// COMBINED target (`fr2xxx`): the runtime-dispatching union of the two dual LaunchPad modules — ONE
+// image for FR2476 + FR2355/FR2155. Divergent peripherals (CSCTL1 trim, console eUSCI_A, Stem pins) are
+// selected by `model::detect()`; everything else uses the shared `leaf`/`wdt` sections below. See
+// `fr2xxx_combined.rs`.
+#[cfg(feature = "fr2xxx")]
+mod fr2xxx_combined;
+#[cfg(feature = "fr2xxx")]
+pub use fr2xxx_combined::*;
+
 // ── Leaf I²C (semantic role: sensors / LCD / non-MCU nodes; the MCU is master) ─────────────────
 // Bus-type + role in the call (`leaf_i2c`), per the agreed board seam. On BOTH current LaunchPad
 // modules Leaf = UCB0 on P1.2/P1.3, so the binding + pin route are chip-common and live here rather

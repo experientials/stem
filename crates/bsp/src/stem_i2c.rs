@@ -45,7 +45,10 @@ const IE_SLAVE: u16 = UCRXIFG0 | UCTXIFG0 | UCSTTIFG | UCSTPIFG;
 /// for-register identical apart from the peripheral accessor (ucb1 vs ucb0) + the mode-split IFG field
 /// name, so the shared protocol above never mentions a concrete peripheral. Pin routing is NOT here — it
 /// lives in `board::route_stem_i2c_pins` (per-module), called from [`init`].
-#[cfg(feature = "_leaf")]
+// Per-family FIXED-base eUSCI_B1 path: the chip feature selected a single PAC, so `p.e_usci_b1` is at
+// that part's compile-time base. Excluded on the combined `fr2xxx` build (`_dynb1`), which overlays the
+// register block on a RUNTIME base instead (next module).
+#[cfg(all(feature = "_leaf", not(feature = "_dynb1")))]
 mod hw {
     use super::{Peripherals, UCMODE_3, UCOAEN, UCSWRST, UCSYNC};
 
@@ -83,6 +86,64 @@ mod hw {
     #[inline]
     pub fn irq_disable(p: &Peripherals) {
         p.e_usci_b1.ucb1ie().modify(|r, w| unsafe { w.bits(r.bits() & !super::IE_SLAVE) });
+    }
+}
+
+// COMBINED-image RUNTIME-base eUSCI_B1 path (`fr2xxx` → `_dynb1`). The combined PAC is FR2476-shaped, so
+// its typed `p.e_usci_b1` is pinned to 0x0580 — WRONG on an FR2355 (eUSCI_B1 @ 0x05C0). Instead we overlay
+// the (layout-identical) `e_usci_b1::RegisterBlock` on the base `model::detect()` chooses, exactly the
+// mechanism HW-proven in spike/combined-mech (S2b.1). The base is resolved per call from the TLV device-id
+// (a single volatile read of 0x1A04) — no `static`/init-ordering to get wrong, and it is valid inside the
+// wake ISR too (the ISR calls `irq_disable`). Register programming below is byte-for-byte the `_leaf` path;
+// only the accessor target (runtime overlay vs typed peripheral) differs.
+#[cfg(feature = "_dynb1")]
+mod hw {
+    use super::{Peripherals, UCMODE_3, UCOAEN, UCSWRST, UCSYNC};
+    use crate::pac::e_usci_b1::RegisterBlock;
+
+    /// Overlay the typed eUSCI_B1 register block on the model-selected runtime base (0x0580 FR247x /
+    /// 0x05C0 FR2355·FR2155). Layout is identical across the family, so the same accessors serve both.
+    #[inline(always)]
+    fn b1() -> &'static RegisterBlock {
+        let base = crate::model::detect().stem_i2c_base();
+        // SAFETY: `base` is a valid eUSCI_B1 peripheral base for the detected silicon; the register-block
+        // layout matches the PAC type (verified per-datasheet); single-core, no aliasing hazard.
+        unsafe { &*(base as *const RegisterBlock) }
+    }
+
+    /// Configure eUSCI_B1 as an I²C slave at `addr` (own-address) at the RUNTIME base. Pins are routed by
+    /// the caller via `board::route_stem_i2c_pins` (runtime P3/P4) BEFORE this.
+    pub fn init(_p: &Peripherals, addr: u16) {
+        let b = b1();
+        b.ucb1ctlw0().write(|w| unsafe { w.bits(UCSWRST) }); // hold in reset
+        b.ucb1ctlw0().modify(|r, w| unsafe { w.bits(r.bits() | UCMODE_3 | UCSYNC) }); // I2C SLAVE (no UCMST)
+        b.ucb1i2coa0().write(|w| unsafe { w.bits(addr | UCOAEN) }); // role-based own-address
+        b.ucb1ctlw0().modify(|r, w| unsafe { w.bits(r.bits() & !UCSWRST) }); // release
+        b.ucb1ifg().write(|w| unsafe { w.bits(0) }); // clear stale flags
+    }
+    #[inline]
+    pub fn ifg(_p: &Peripherals) -> u16 {
+        b1().ucb1ifg().read().bits()
+    }
+    #[inline]
+    pub fn clear(_p: &Peripherals, bit: u16) {
+        b1().ucb1ifg().modify(|r, w| unsafe { w.bits(r.bits() & !bit) });
+    }
+    #[inline]
+    pub fn rx(_p: &Peripherals) -> u8 {
+        b1().ucb1rxbuf().read().bits() as u8 // read clears UCRXIFG
+    }
+    #[inline]
+    pub fn tx(_p: &Peripherals, v: u8) {
+        b1().ucb1txbuf().write(|w| unsafe { w.bits(v as u16) }); // write clears UCTXIFG
+    }
+    #[inline]
+    pub fn irq_enable(_p: &Peripherals) {
+        b1().ucb1ie().modify(|r, w| unsafe { w.bits(r.bits() | super::IE_SLAVE) });
+    }
+    #[inline]
+    pub fn irq_disable(_p: &Peripherals) {
+        b1().ucb1ie().modify(|r, w| unsafe { w.bits(r.bits() & !super::IE_SLAVE) });
     }
 }
 

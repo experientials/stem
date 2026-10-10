@@ -21,6 +21,12 @@ pub use msp430fr2355 as pac;
 pub use msp430fr2155 as pac;
 #[cfg(feature = "fr2433")]
 pub use msp430fr2433 as pac;
+// The COMBINED image (`fr2xxx`): `pac` is the dual PAC (FR2476 register-block shape; the FR2355/FR2155
+// delta is handled at RUNTIME, not by a distinct PAC). Its typed peripherals are correct for FR2476 and
+// for every FR2355-family peripheral that shares FR2476's address; the three divergent peripherals
+// (eUSCI_B1, console eUSCI_A, CSCTL1 trim) are reached via the runtime `_dynb1` / combined-board paths.
+#[cfg(feature = "fr2xxx")]
+pub use msp430fr2xxx_dual as pac;
 
 // Exactly one chip feature must be on. "None" is caught here; selecting two makes `pac` a duplicate
 // import (a clear "defined multiple times" error), so no verbose pairwise guard is needed.
@@ -28,9 +34,12 @@ pub use msp430fr2433 as pac;
     feature = "fr2476",
     feature = "fr2355",
     feature = "fr2155",
-    feature = "fr2433"
+    feature = "fr2433",
+    feature = "fr2xxx"
 )))]
-compile_error!("bsp: select ONE chip feature (fr2476|fr2355|fr2155|fr2433) via the consumer (diag/prod)");
+compile_error!(
+    "bsp: select ONE chip feature (fr2476|fr2355|fr2155|fr2433|fr2xxx) via the consumer (diag/prod)"
+);
 
 pub mod board;
 // Shared console text formatting (puts/hex/dec/fixed2) over `board::console_uart_tx` — one copy for

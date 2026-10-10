@@ -13,6 +13,12 @@ msp430fr2476 = { path = "../../pac/msp430fr2476", optional = true }
 msp430fr2355 = { path = "../../pac/msp430fr2355", optional = true }
 msp430fr2155 = { path = "../../pac/msp430fr2155", optional = true }
 msp430fr2433 = { path = "../../pac/msp430fr2433", optional = true }
+# The COMBINED "dynamic" PAC (FR2476 register-block copy + a 2nd eUSCI_B1 overlay EUsciB1Y@0x05C0 and a
+# dual-slot __INTERRUPTS mapping EUSCI_B1 at BOTH 0xFFDA and 0xFFDE). Selected by the `fr2xxx` feature →
+# ONE image covering FR2476 *and* FR2355/FR2155 via runtime base/pin selection (HW-proven, S2b.1). Only
+# the three family-divergent peripherals (eUSCI_B1, console eUSCI_A, CSCTL1 trim) are picked at runtime;
+# everything prod touches otherwise (CS/PMM/ports/eUSCI_B0/WDT) is at identical addresses on both parts.
+msp430fr2xxx-dual = { path = "../../pac/msp430fr2xxx-dual", optional = true }
 # embedded-hal 1.0 — the I2c trait the shared `crates/devices` drivers talk to (see `hal`).
 embedded-hal = "1.0"
 # Host-clean hardware-seam traits (StemSlave/GpioBanks/LeafMaster) + `SlaveEvent`. `bsp::StemHw` wraps the
@@ -31,10 +37,24 @@ fr2476 = ["dep:msp430fr2476", "_leaf"]
 fr2355 = ["dep:msp430fr2355", "_leaf"]
 fr2155 = ["dep:msp430fr2155", "_leaf"]
 fr2433 = ["dep:msp430fr2433"]
+# `fr2xxx` = the COMBINED single image (FR2476 + FR2355/FR2155 in one binary). It is a dual-I²C family
+# (`_leaf`) and additionally turns on `_dynb1` — the RUNTIME eUSCI_B1 base/pin path in `stem_i2c` + the
+# combined board's runtime clock/console dispatch — instead of the per-family fixed-base path.
+fr2xxx = ["dep:msp430fr2xxx-dual", "_leaf", "_dynb1"]
 _leaf = []
+# `_dynb1` (internal, set only by `fr2xxx`): select the runtime-base eUSCI_B1 slave transport (overlay
+# the register block on the model-selected base 0x0580/0x05C0) over the per-family fixed-base `_leaf`
+# path. Never selected directly.
+_dynb1 = []
 # `rt` emits the DEVICE interrupt vector table (the PAC `__INTERRUPTS`) so a firmware can install real
 # ISRs (the eUSCI_B slave wake ISR — deepsleep LPM). It's a BINARY concern, not a chip one: **prod**
 # enables `bsp/rt`, **diag** does NOT (it defines no ISRs and keeps msp430-rt's default table). The
 # `dep?/rt` form turns on the rt feature of whichever PAC the chip feature already selected, so one
 # feature serves every chip. (Device mode also needs `msp430-rt/device` in the consuming bin.)
-rt = ["msp430fr2476?/rt", "msp430fr2355?/rt", "msp430fr2155?/rt", "msp430fr2433?/rt"]
+rt = [
+    "msp430fr2476?/rt",
+    "msp430fr2355?/rt",
+    "msp430fr2155?/rt",
+    "msp430fr2433?/rt",
+    "msp430fr2xxx-dual?/rt",
+]

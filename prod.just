@@ -26,7 +26,8 @@ build family="fr247x" mode="auto" console="console" modes="" extra="":
     case "{{family}}" in
         fr247x)        FRAM_BUDGET=32768; RAM_BUDGET=8192; FLOOR=1024;;  # FR2476 dev (8 KB SRAM)
         fr215x|fr235x) FRAM_BUDGET=32768; RAM_BUDGET=4096; FLOOR=1024;;  # FR2155/FR2355 (4 KB SRAM)
-        *) echo "unknown family '{{family}}' — use fr247x|fr215x|fr235x (FR2433 → just build fr2433)" >&2; exit 1;;
+        fr2xxx)        FRAM_BUDGET=32768; RAM_BUDGET=4096; FLOOR=1024;;  # COMBINED image — gate on the 4 KB FR2355 floor (the intersection it must fit)
+        *) echo "unknown family '{{family}}' — use fr247x|fr215x|fr235x|fr2xxx (FR2433 → just build fr2433)" >&2; exit 1;;
     esac
     # Operating modes to compile in (DESIGN.md). Dual-I²C families get both (runtime-switchable).
     # Override with the `modes` arg, e.g. `just prod build fr247x auto console mode-sensing`.

@@ -50,6 +50,8 @@ fn target() -> String {
         "fr2155".into()
     } else if std::env::var_os("CARGO_FEATURE_FR235X").is_some() {
         "fr2355".into()
+    } else if std::env::var_os("CARGO_FEATURE_FR2XXX").is_some() {
+        "fr2xxx".into() // combined single image (FR2476 + FR2355/FR2155)
     } else {
         "unknown".into()
     }
@@ -98,8 +100,12 @@ fn emit_memory_x() {
         "memory-fr2155.x"
     } else if has("CARGO_FEATURE_FR235X") {
         "memory-fr2355.x"
+    } else if has("CARGO_FEATURE_FR2XXX") {
+        // Combined image: the FR2476∩FR2355 intersection — 4 KB RAM (the smaller), identical ROM window,
+        // and the 0xFF80 SUPERSET vector region covering BOTH chips' EUSCI_B1 slots (0xFFDA + 0xFFDE).
+        "memory-fr2xxx.x"
     } else {
-        panic!("prod: no family feature — build with --features fr247x|fr215x|fr235x");
+        panic!("prod: no family feature — build with --features fr247x|fr215x|fr235x|fr2xxx");
     };
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     std::fs::copy(src, out.join("memory.x")).unwrap_or_else(|e| panic!("prod: copy {src} → OUT_DIR: {e}"));

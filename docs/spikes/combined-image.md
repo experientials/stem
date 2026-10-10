@@ -40,9 +40,40 @@ scan: 0x20 0x21                 # both chips up, at their runtime-selected role 
 (Console note: FR2355 wakes slightly slower; a short `console interact --expect` clipped the read →
 false-negative. `console send`+`tail`+generous wait gave a clean `0x5A`. See [[prove-firmware-on-hardware]].)
 
-## Limits / next
-- Spike proves the **mechanism** (dual-slot vectors + runtime base/pins/addr + LPM-wake), NOT the full
-  cros_ec stack. The real combined target wires this into `bsp` (runtime eUSCI_B1 base) + a **combined PAC
-  that emits the dual-slot `__INTERRUPTS` + a real `device.x`** + the cros_ec serve loop.
-- So `modules/deepsleep` can be a **single FR2355+FR2476+FR2155 image** (the "3rd target"), not only
-  per-family builds. This supersedes the "cross-family ⇒ separate build" reading for this specific pair.
+## Productized — the combined image is now a REAL prod target (S2b, HW-PROVEN 2026-10-10)
+The spike's mechanism is now the shipped path, not a side experiment:
+- **S2b.1** — combined PAC `pac/msp430fr2xxx-dual` (FR2476 register copy + `EUsciB1Y`@0x05C0 overlay) emits
+  its OWN dual-slot `__INTERRUPTS` (EUSCI_B1 at idx 45 **and** 47) + a real `device.x` (feature `rt`).
+  Committed `b544fc0`; re-pointed spike flashed unchanged on both parts.
+- **S2b.2** — `bsp` gained the `fr2xxx` chip feature: `pac = msp430fr2xxx_dual`, plus a `_dynb1`
+  runtime-base `stem_i2c` path (overlay `e_usci_b1::RegisterBlock` on `model::stem_i2c_base()` →
+  0x0580/0x05C0) and a combined board (`board/fr2xxx_combined.rs`) that runtime-dispatches the **three**
+  real divergences prod touches: eUSCI_B1 base/pins, **CSCTL1 clock trim** (manual vs factory), and the
+  console eUSCI_A (A0@0x0500 / A1@0x0580) — dev builds only. µs/ms timers are prod-unused → the TA/TB
+  instance divergence never arises. Per-family builds unchanged.
+- **S2b.3 (partial)** — `prod` gained a `fr2xxx` family feature + `memory-fr2xxx.x` (4 KB RAM intersection,
+  0xFF80 superset vectors). Builds a real artifact `prod-fr2xxx-silent-cros_ec` (FRAM 6836 B / 20 %, fits
+  the 4 KB floor). Latent bug fixed en route: `deepsleep::enumerate` gated the `Console` import but not its
+  (unconditional) bound → every console-OFF build was broken; import is now unconditional.
+- **S2b.4 — HW proof (bench, 2026-10-10).** The SAME byte-verified `prod-fr2xxx-silent-cros_ec` flashed to
+  @fr2476 and @fr2355; both serve their Stem slave at the chip-correct role addr:
+  ```
+  scan: 0x20 0x21 0x22            # 0x21=combined on FR2476, 0x20=combined on FR2355, 0x22=fr2433 control
+  0x21[0x00] = 0xEC   FR2476 — base 0x0580, pins P3, addr 0x21, manual trim
+  0x20[0x00] = 0xEC   FR2355 — base 0x05C0, pins P4, addr 0x20, factory trim
+  ```
+  Each node ACKing + servicing a read at its chip-correct address proves every runtime selection fired
+  (clock trim → eUSCI clock; base; pin mux; own-addr). objdump of the real artifact confirms EUSCI_B1 ISR
+  @0x8030 at **both** 0xFFDA and 0xFFDE; DefaultHandler elsewhere; reset @0x8000.
+
+## Limits / not yet
+- The proof exercises the **slave bring-up + read servicing** on both chips (the thing S2b adds). A full
+  **cros_ec framed HELLO** exchange was NOT driven — the RP2040 probe's `r`/`w` are single-register, not a
+  cros_ec frame; `0xEC` is the slave's byte to a raw read, not a decoded cros_ec response. The cros_ec
+  framer itself is the same `deepsleep` path the per-family cros_ec images already run.
+- **Console on the combined image** is implemented (runtime eUSCI_A overlay + P1/P4 pins) and compiles, but
+  is NOT yet HW-exercised on both chips; the dark prod artifact builds console-OFF. `deepsleep`'s per-chip
+  `LOOPBACK_JUMPER_HINT` is still compile-time (console+chip-marker) — a console-combined build would need a
+  runtime hint. Deferred (S2b.2b) — dark prod doesn't need it.
+- Remaining S2b.3: fold `prod` → `modules/deepsleep` and make the combined image a first-class `just build
+  fr2xxx` route (the budget/feature plumbing exists; the top-level `build` recipe case is still TODO).
