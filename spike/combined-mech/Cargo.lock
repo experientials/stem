@@ -8,7 +8,7 @@ version = "0.0.0"
 dependencies = [
  "msp430",
  "msp430-rt",
- "msp430fr2476",
+ "msp430fr2xxx-dual",
  "panic-msp430",
 ]
 
@@ -51,9 +51,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "msp430fr2476"
+name = "msp430fr2xxx-dual"
 version = "0.1.0"
 dependencies = [
+ "msp430-rt",
  "vcell",
 ]
 

@@ -21,6 +21,7 @@ exclude = [
     "prod",             # MSP430 product binary (Docker build)
     "diag",             # MSP430 diag binary (Docker build)
     "pac",              # generated svd2rust PACs — target-only
+    "pac/msp430fr2xxx-dual", # combined FR2476/FR2355/FR2155 PAC (dual-slot __INTERRUPTS, B1X/B1Y) — target-only
     "modules",          # pico-probe (thumbv6m, own toolchain) + future product modules
     "examples",         # MSP430 examples
     "spike/combined-mech", # SPIKE: dual-slot __INTERRUPTS + runtime eUSCI_B1 base/pins (MSP430, Docker build)

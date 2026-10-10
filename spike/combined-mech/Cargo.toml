@@ -30,10 +30,11 @@ msp430 = "0.4"
 # OUR table standing in for the PAC's — which is exactly what the 3rd target must do.
 msp430-rt = { version = "0.4", features = ["device"] }
 panic-msp430 = "0.4"
-# The fr2476 PAC with DEFAULT features (rt OFF): gives us `Peripherals` (typed PMM/ports/WDT at shared
-# addresses) + the `e_usci_b1::RegisterBlock` type we overlay on a RUNTIME base pointer. rt OFF ⇒ the PAC
-# does NOT emit its own __INTERRUPTS / device.x — we supply the table ourselves (the whole point of the spike).
-msp430fr2476 = { path = "../../pac/msp430fr2476" }
+# The COMBINED PAC with `rt` ON: it emits the dual-slot `__INTERRUPTS` (EUSCI_B1 at idx 45 AND 47) +
+# `device.x` (weak DefaultHandler aliases). Gives `Peripherals`, `EUsciB1X`/`EUsciB1Y`, and the
+# `e_usci_b1::RegisterBlock` type we overlay on a runtime base. This re-point tests the REAL PAC's table
+# (replacing the spike's former hand-rolled one — the mechanism it proved, now productized in the PAC).
+msp430fr2xxx-dual = { path = "../../pac/msp430fr2xxx-dual", features = ["rt"] }
 
 # Match prod's profile (size-opt + LTO + keep DWARF). Spike has no size gate; this just mirrors the real build.
 [profile.release]

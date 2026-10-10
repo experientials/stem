@@ -19,7 +19,7 @@
 extern crate panic_msp430; // infinite-loop panic handler (a hang trips the WDT → reset)
 
 use msp430_rt::entry;
-use msp430fr2476 as pac; // fr2476 PAC, rt OFF — used for `Peripherals` + the e_usci_b1 register-block TYPE.
+use msp430fr2xxx_dual as pac; // COMBINED PAC, rt ON — emits the dual-slot __INTERRUPTS + device.x; also gives Peripherals + the e_usci_b1 register-block TYPE (overlaid on a runtime base).
 
 // ── eUSCI_B1 base addresses (VERIFIED per the task; register-block LAYOUT is identical, only base differs) ──
 const B1_BASE_FR2476: usize = 0x0580;
@@ -59,44 +59,13 @@ const WDT_HOLD: u16 = 0x5A80;
 /// the right instance. Single-core, written once before any interrupt can fire — plain static is sound here.
 static mut B1_BASE: usize = 0;
 
-// ─────────────────────────── CUSTOM VECTOR TABLE (the de-risk) ───────────────────────────
+// ─── VECTOR TABLE: now emitted by the COMBINED PAC (msp430fr2xxx-dual, rt) ───
 //
-// Replicates how the svd2rust PAC defines `#[used] pub static __INTERRUPTS: [Vector; 63]` in
-// `.vector_table.interrupts`, EXCEPT the PAC's `Vector` union has PRIVATE fields (`_handler`/`_reserved`),
-// so it cannot be CONSTRUCTED from another crate. We therefore define our own identical `Vector` union —
-// which is exactly "replicate how the PAC defines the table". Layout: 63 words at 0xFF80..0xFFFC; the
-// msp430-rt `.__RESET_VECTOR` word fills 0xFFFE. Every slot is a trap handler except idx 45 and idx 47,
-// both the EUSCI_B1 wake ISR — so FR2476 (vector 0xFFDA = idx 45) and FR2355 (vector 0xFFDE = idx 47)
-// each dispatch to it from the SAME flashed table.
-
-#[repr(C)]
-union Vector {
-    handler: unsafe extern "msp430-interrupt" fn(),
-    _reserved: u16,
-}
-
-const TRAP: Vector = Vector { handler: TrapHandler };
-const EB1: Vector = Vector { handler: EUSCI_B1 };
-
-#[link_section = ".vector_table.interrupts"]
-#[no_mangle]
-#[used]
-static __INTERRUPTS: [Vector; 63] = {
-    let mut t: [Vector; 63] = [TRAP; 63]; // every unused slot → a trap loop (not 0x0000)
-    t[45] = EB1; // FR2476 EUSCI_B1 @ 0xFFDA  (0xFF80 + 45*2)
-    t[47] = EB1; // FR2355 EUSCI_B1 @ 0xFFDE  (0xFF80 + 47*2)
-    t
-};
-
-/// Default/trap handler for every vector except EUSCI_B1 and reset. Only EUSCI_B1 IE is ever enabled, so
-/// this should never run; if a spurious source somehow vectors here it halts (→ WDT would reset on a real
-/// build) rather than jumping to 0x0000. Mirrors svd2rust+msp430-rt's DefaultHandler role.
-#[allow(non_snake_case)] // interrupt-handler naming convention (matches svd2rust/msp430-rt handlers)
-extern "msp430-interrupt" fn TrapHandler() {
-    loop {
-        msp430::asm::barrier();
-    }
-}
+// The combined PAC's `__INTERRUPTS` places the EUSCI_B1 handler at BOTH idx 45 (0xFFDA, FR2476) and idx 47
+// (0xFFDE, FR2355) — idx 47 repointed A1→B1 in the PAC. Reset fills 0xFFFE; every other slot weak-aliases
+// to msp430-rt's `DefaultHandler` via the PAC's `device.x` (26 PROVIDEs). So this bin defines ONLY the
+// EUSCI_B1 handler below — no hand-rolled table. This is the mechanism the spike proved, now productized
+// in the real PAC (the point of the S2b.1 re-point).
 
 // ─────────────────────────────── the EUSCI_B1 wake ISR ───────────────────────────────
 //
