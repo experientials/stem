@@ -23,4 +23,5 @@ exclude = [
     "pac",              # generated svd2rust PACs — target-only
     "modules",          # pico-probe (thumbv6m, own toolchain) + future product modules
     "examples",         # MSP430 examples
+    "spike/combined-mech", # SPIKE: dual-slot __INTERRUPTS + runtime eUSCI_B1 base/pins (MSP430, Docker build)
 ]

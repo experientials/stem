@@ -550,6 +550,10 @@ top-level `prod/` or `diag/` tree**. prod/diag is a build-axis FLAG per product 
    Transition siblings group by role with chip as the leaf, so they read as obvious pairs:
    ```
    modules/deepsleep/{fr247x, fr235x, fr215x, ti-m0}/ → capabilities/deepsleep-core  (dual SUPERVISOR: FR2476/FR2355/FR2155; ti-m0 = the migration)
+     # ↑ OR a SINGLE combined image for FR2476+FR2355+FR2155 — HW-PROVEN feasible 2026-10-10 (one binary
+     #   woke+answered on both @fr2476 and @fr2355) via a combined "dynamic" PAC: B1X/B1Y runtime base +
+     #   custom dual-slot vector table + runtime pins. Supersedes the "cross-family ⇒ separate build"
+     #   reading for this pair. Spike: docs/spikes/combined-image.md. Technique: stem-dev skill.
    modules/expander/{fr24xx}/           → capabilities/expander-core   (FR2433 programmable I/O EXPANDER: generic pin IDs)
    modules/pd/{cypm1111, <next>}/       → capabilities/pd-core           (PD-controller swap)
    modules/pico-probe/                  → stembus-client  (host/master; a product in its own right)

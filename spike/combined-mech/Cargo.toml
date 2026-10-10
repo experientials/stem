@@ -1,0 +1,42 @@
+# SPIKE: combined-mech — de-risk the "combined dynamic PAC 3rd target" (STEM-DIRECTION.md "Repo layout").
+#
+# GOAL: prove ONE MSP430 image, flashed unchanged, runs an eUSCI_B1 I²C slave that wakes from LPM and
+# answers on BOTH FR2476 and FR2355, via (a) a CUSTOM dual-slot __INTERRUPTS vector table and (b) runtime
+# eUSCI_B1 base + pin selection keyed on the device-id. Minimal: the slave returns a fixed byte 0x5A on
+# every master read. NOT the full cros_ec stack. Build-only here — the dual-chip HW-proof is the parent's.
+#
+# This is a STANDALONE binary crate (in the root Cargo.toml `exclude`), built via the MSP430 Docker
+# toolchain exactly like prod/ (same .cargo/config.toml + rust-toolchain.toml + build-std).
+#
+# KEY MECHANISM (the de-risk): PAC `rt` is OFF, so the PAC emits NO __INTERRUPTS and NO device.x. We
+# depend on the fr2476 PAC only for the register-block TYPE + Peripherals, and supply our OWN custom
+# __INTERRUPTS (63 Vector words) in `.vector_table.interrupts`. msp430-rt is used WITHOUT its `device`
+# feature (generic-application mode) so its link.x does NOT `INCLUDE device.x`; it still provides the
+# reset vector (.__RESET_VECTOR) + Reset trampoline. 63 interrupt words + 1 reset word = 64 = 0x80.
+[package]
+name = "combined-mech-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "SPIKE: one image, dual-slot __INTERRUPTS + runtime eUSCI_B1 base/pins, FR2476+FR2355 I²C slave"
+
+[dependencies]
+msp430 = "0.4"
+# msp430-rt WITH `device` → it SUPPRESSES its own fallback 15-entry `__INTERRUPTS` (that is
+# `#[cfg(not(feature="device"))]`) so OUR 63-entry table is the only one, and its link.x does `INCLUDE
+# device.x`. The PAC's rt is OFF, so the PAC supplies no device.x — build.rs emits an EMPTY one (our table
+# references only concrete fn items, so no weak aliases are needed). msp430-rt still provides Reset +
+# __RESET_VECTOR (reset @ 0xFFFE). This mirrors the eventual "combined PAC emits the table" design, with
+# OUR table standing in for the PAC's — which is exactly what the 3rd target must do.
+msp430-rt = { version = "0.4", features = ["device"] }
+panic-msp430 = "0.4"
+# The fr2476 PAC with DEFAULT features (rt OFF): gives us `Peripherals` (typed PMM/ports/WDT at shared
+# addresses) + the `e_usci_b1::RegisterBlock` type we overlay on a RUNTIME base pointer. rt OFF ⇒ the PAC
+# does NOT emit its own __INTERRUPTS / device.x — we supply the table ourselves (the whole point of the spike).
+msp430fr2476 = { path = "../../pac/msp430fr2476" }
+
+# Match prod's profile (size-opt + LTO + keep DWARF). Spike has no size gate; this just mirrors the real build.
+[profile.release]
+opt-level = "s"
+lto = true
+debug = true

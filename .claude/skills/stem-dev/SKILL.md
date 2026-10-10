@@ -128,6 +128,35 @@ The pipeline (prebuilt `svd2rust` binary — do **not** `cargo install` it — +
 toolchain) and the reasons are in [pac/README.md](../../../pac/README.md) and the msp430-macos-dev
 skill's `references/rust-pac.md`.
 
+## Multi-model single image (combined / "dynamic" PAC) — HW-PROVEN 2026-10-10
+
+ONE firmware binary CAN run on register-*incompatible* MSP430 models (e.g. FR2476 **and**
+FR2355/FR2155) when the differences are few. **Proven on the bench:** one image woke from LPM and
+answered the eUSCI_B1 I²C slave on BOTH @fr2476 and @fr2355 (spike `spike/combined-mech/`,
+[docs/spikes/command-defs-mechanism.md] sibling `combined-image.md`). The method:
+
+- **Same-block / two-base peripherals.** If a peripheral's `RegisterBlock` layout is identical but its
+  base differs (verified: eUSCI_B1 @ `0x0580` FR2476 vs `0x05C0` FR2355, same block), expose BOTH bases
+  (`B1X`/`B1Y`) in the combined PAC and pick the base pointer **at runtime** by device-id
+  (`bsp::model::detect()`). Typed access preserved. Check compat by diffing the generated PACs'
+  `pub type … = crate::Periph<…::RegisterBlock, 0xBASE>` lines **and** the register-field list.
+- **Custom dual-slot vector table.** When the IRQ vector address differs (EUSCI_B1 @ `0xFFDA` FR2476 vs
+  `0xFFDE` FR2355), turn the PAC **`rt` OFF** and supply your OWN `#[used] static __INTERRUPTS` (VECTORS =
+  the superset, e.g. `0xFF80/0x80`) with the SAME handler at BOTH slots. Safe **only if no other
+  firmware-used IRQ** maps to those slots on either chip (we use only eUSCI_B1 → no conflict).
+- **Runtime pins + RAM floor.** Route per-model pins at runtime (ports share addresses); size `memory.x`
+  RAM to the smallest model (the intersection, e.g. 4 KB).
+
+**Gotchas (found building the spike):**
+- The generated PAC's `Vector` union has **private fields** → you cannot construct a table from another
+  crate. The real combined PAC must **emit its own `__INTERRUPTS`** (or expose a constructible Vector);
+  the spike defines its own identical `#[repr(C)] union Vector`.
+- `msp430-rt` with `device` **OFF** emits a fallback `__INTERRUPTS` that **collides** with yours → use
+  `device` **ON** + an **empty `device.x`** from `build.rs` (the combined PAC later supplies the real one).
+
+This is the "combined dynamic PAC = a **3rd build target**" idea: `modules/deepsleep` can emit ONE
+FR2355+FR2476+FR2155 image. Dual-chip proof method: [[prove-firmware-on-hardware]].
+
 ## Working on `diag` (the POST firmware)
 
 `diag` boots, inits once, then loops a self-contained POST forever. **Read
