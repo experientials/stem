@@ -293,6 +293,85 @@ pub fn execute<N: Node + Operate>(node: &mut N, cmd: Command, events_out: &mut [
     }
 }
 
+// ───────────────────────────── command CATALOG (generated help / introspection) ─────────────────────
+//
+// COMMANDS.md §"Help/introspection is GENERATED from the command definitions (REQUIREMENT)": the `help`
+// text, the on-device introspection reply, and any off-device (MCP) catalog must all be GENERATED from
+// ONE source co-located with the command defs — never hand-maintained — because `thepia hwd chat`
+// introspects `help` to drive hardware, so drift is a defect, not cosmetics. This catalog IS that source
+// for the wire vocabulary; every consumer (the stem-probe `help`, a future node introspection reply, the
+// MCP catalog) renders from it, so none can disagree. Decoration (ANSI/emoji) is a RENDER concern — these
+// strings stay clean structured data (verb/args/help/**category**); a host renderer maps category → icon.
+
+/// Command category — the structured field a renderer maps to an icon/color (🔎 introspection, ⚙️ operation,
+/// … — COMMANDS.md). `BenchRig` is for consumer-local verbs (e.g. the stem-probe's own rig commands) that
+/// are NOT node wire commands but share the same spec/rendering.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Category {
+    Introspection,
+    Operation,
+    Debug,
+    Flashing,
+    BenchRig,
+}
+
+impl Category {
+    /// Machine label (NO icon/color — that's the renderer's job).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Category::Introspection => "introspection",
+            Category::Operation => "operation",
+            Category::Debug => "debug",
+            Category::Flashing => "flashing",
+            Category::BenchRig => "bench-rig",
+        }
+    }
+}
+
+/// One command's generated-help/introspection metadata. Clean structured data — the renderer adds any
+/// decoration. `verb` = the canonical CLI token; `args` = an arg hint (`""` if none); `help` = one line.
+#[derive(Clone, Copy)]
+pub struct CommandSpec {
+    pub verb: &'static str,
+    pub args: &'static str,
+    pub help: &'static str,
+    pub category: Category,
+}
+
+impl Command {
+    /// The canonical CLI verb for this command. EXHAUSTIVE match → adding a `Command` variant forces a verb
+    /// here (compile error otherwise), and the `catalog_covers_every_command` test then forces a [`CATALOG`]
+    /// entry — so the vocabulary, the verbs, and the generated help can never silently drift apart.
+    pub const fn cli_verb(&self) -> &'static str {
+        match self {
+            Command::Identify => "ident",
+            Command::Status => "status",
+            Command::FramCrc { .. } => "crc",
+            Command::EventHistory => "events",
+            Command::SetMode { .. } => "mode",
+            Command::SetThreshold { .. } => "thresh",
+        }
+    }
+}
+
+/// The WIRE command catalog — the single source of truth for the node command vocabulary's generated help.
+/// Verbs match [`Command::cli_verb`] (test-enforced). A node/consumer exposes a SUBSET (what it implements)
+/// via [`spec_for`]; it does not have to list all of these.
+pub const CATALOG: &[CommandSpec] = &[
+    CommandSpec { verb: "ident", args: "[addr]", help: "identity: iface/model/role/build/version", category: Category::Introspection },
+    CommandSpec { verb: "status", args: "[addr]", help: "status: flags/fault/dev-count/mode/wake", category: Category::Introspection },
+    CommandSpec { verb: "crc", args: "[addr]", help: "per-sector FRAM CRC16 window (integrity)", category: Category::Introspection },
+    CommandSpec { verb: "events", args: "[addr]", help: "drain the recent-event ring", category: Category::Introspection },
+    CommandSpec { verb: "mode", args: "[addr] [p|s]", help: "set operating mode Passive/Sensing", category: Category::Operation },
+    CommandSpec { verb: "thresh", args: "<addr> <id> <v>", help: "set a sensor/trigger threshold", category: Category::Operation },
+];
+
+/// The catalog spec for a CLI `verb`, or `None`. Consumers render device-verb help from this so the
+/// metadata is single-sourced (never re-typed in a consumer's own help string).
+pub fn spec_for(verb: &str) -> Option<&'static CommandSpec> {
+    CATALOG.iter().find(|s| s.verb == verb)
+}
+
 /// postcard payload codec for the command vocabulary (COMMANDS.md §0 decision): the bytes carried inside
 /// a cros_ec vendor command (`EC_CMD_BOARD_SPECIFIC_BASE + n`). Gated on the `postcard` feature so
 /// size-sensitive builds (diag) opt out entirely; the FR2433 cros_ec build enables it. The SAME codec
@@ -515,6 +594,31 @@ mod tests {
                 assert_eq!(scratch[0].id, 1);
             }
             other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    /// Drift guard (COMMANDS.md §"Help/introspection is GENERATED"): EVERY `Command` variant must have a
+    /// CATALOG entry whose verb == its `cli_verb()`, so the generated help can never omit or misname a
+    /// command. The sample list below is exhaustive by construction — add a variant and this test (plus the
+    /// exhaustive `cli_verb` match) forces you to catalog it.
+    #[test]
+    fn catalog_covers_every_command() {
+        let all = [
+            Command::Identify,
+            Command::Status,
+            Command::FramCrc { sector: 0 },
+            Command::EventHistory,
+            Command::SetMode { mode: Mode::Passive },
+            Command::SetThreshold { id: 0, value: 0 },
+        ];
+        for cmd in all {
+            let verb = cmd.cli_verb();
+            let spec = spec_for(verb)
+                .unwrap_or_else(|| panic!("Command {cmd:?} (verb {verb:?}) has no CATALOG entry"));
+            assert_eq!(spec.verb, verb);
+            assert!(!spec.help.is_empty(), "verb {verb:?} has empty help");
+            // Clean structured data — no ANSI/emoji baked into source (that's the renderer's job).
+            assert!(!spec.help.contains('\x1b'), "verb {verb:?} help has an ANSI escape");
         }
     }
 }

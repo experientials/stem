@@ -468,10 +468,17 @@ menu functions map to unified commands: `s`→`status`/rescan, `r`→`events`, `
   codes/emoji into help strings. For *semantic* color/emoji, map the structured `category` → icon/color in
   the renderer (🔎 introspection, ⚙️ operation, red destructive). In-firmware color only if a node's *direct*
   console needs it, gated behind a `color` feature, OFF on prod/FR2433 (budget).
-- **Concrete debt:** today the stem-probe `help` is a **hand-maintained string** (`debug/stem-probe`
-  main.rs) — exactly the drift risk this forbids. The reorg's command work must replace it with codegen
-  from the `stembus::command` defs. (Deferred with the rest of the discovery work, but this is the governing
-  requirement for it.)
+- **Concrete debt — ✅ RESOLVED (2026-10-10).** The stem-probe `help` is now **GENERATED**, not a
+  hand-maintained string: `stembus::command` gained a `CommandSpec{verb,args,help,category}` + `CATALOG`
+  (the single source for the WIRE vocabulary, shared with future on-device introspection + the MCP catalog),
+  plus `Command::cli_verb()` (exhaustive match) and a host test `catalog_covers_every_command` that forces a
+  catalog entry per `Command` variant — the build-time-ish drift guard. The probe renders `help` from the
+  stembus `CATALOG` (device verbs it exposes, via `spec_for` → single-sourced) + a probe-local `PROBE_LOCAL`
+  table (its rig/aggregate/cros_ec verbs), grouped by `category`. Catalog strings carry **no ANSI/emoji**
+  (the test asserts it) — decoration is the host renderer's job, keyed on `category`. *HW-verified:* `help`
+  on @rp2040 emits the generated listing (introspection/operation/debug/flashing sections). Still deferred:
+  the on-device (MSP node) introspection reply + the off-device MCP catalog, both to render from this SAME
+  `CATALOG`; and `--dark` compiling the introspection out.
 
 **Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
 firmware-patch streaming, per-module execute), but the *wire protocol* is now the cros_ec-framing +

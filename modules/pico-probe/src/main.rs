@@ -54,6 +54,10 @@ use stembus::cros_ec;
 // The command vocabulary + its postcard codec — the vendor+postcard path (ident/status/…). Same wire
 // format the FR2433 node decodes/encodes; a vendor cros_ec command (EC_CMD_STEMBUS) carries it.
 use stembus::command;
+// The generated-help catalog types (COMMANDS.md §"Help/introspection is GENERATED"): device-verb specs
+// come from `stembus::command::CATALOG` (single source, shared with on-device introspection + hwd chat);
+// the probe adds its own rig verbs in `PROBE_LOCAL`. `help` RENDERS from these — never a hand-kept string.
+use stembus::command::{Category, CommandSpec};
 
 // ── Passive I²C sniffer (`sniff <sda> <scl> [ms]`) ────────────────────────────
 // Tap any TWO of these otherwise-free GPIOs and watch a live I²C bus WITHOUT driving it — pure inputs,
@@ -695,11 +699,63 @@ async fn banner<'d, T: embassy_rp::usb::Instance + 'd>(
     Ok(())
 }
 
-/// Full CLI reference (`help`/`h`/`?`/`/h`). This is the DISCOVERABLE CONTRACT: a consumer scrapes
-/// this output to author a usage skill, so it must state the full semantics of every command — bus,
-/// args + number base, side effects, and output format — not just a name list. Keep it in sync with
-/// the dispatch chain in `main`. Structured as labelled sections; each command line is
-/// `  <invocation>   <semantics>`. Written in chunks (`write_str` splits to 64-byte CDC packets).
+/// Device verbs this probe exposes — a SUBSET of the stembus wire vocabulary. Their metadata (args/help/
+/// category) is sourced from `stembus::command::CATALOG` via `spec_for`, so it is SINGLE-SOURCED with the
+/// node defs + on-device introspection + hwd chat and cannot drift. (The probe omits wire verbs it doesn't
+/// implement yet, e.g. `events`/`thresh`.)
+const PROBE_WIRE_VERBS: &[&str] = &["ident", "status", "crc", "mode"];
+
+/// Probe-LOCAL verbs — bench-rig / aggregate / cros_ec-standard commands that are NOT node wire commands,
+/// so they live here (not in stembus). Same `CommandSpec` shape → rendered by the same generated path as
+/// the wire verbs. Clean structured data: NO ANSI/emoji (a host renderer maps `category` → icon/color).
+const PROBE_LOCAL: &[CommandSpec] = &[
+    CommandSpec { verb: "scan", args: "", help: "scan the Stem bus 0x08..0x77 for ACKs", category: Category::Introspection },
+    CommandSpec { verb: "hello", args: "[addr]", help: "cros_ec HELLO liveness echo", category: Category::Introspection },
+    CommandSpec { verb: "proto", args: "[addr]", help: "cros_ec GET_PROTOCOL_INFO (version/sizes)", category: Category::Introspection },
+    CommandSpec { verb: "vstem", args: "", help: "full cros_ec verify of a Stem node (ident/status/mode)", category: Category::Introspection },
+    CommandSpec { verb: "vleaf", args: "", help: "verify the Sensing/Passive Leaf handoff", category: Category::Introspection },
+    CommandSpec { verb: "lscan", args: "", help: "Leaf-bus scan (Pico bit-bang master)", category: Category::Introspection },
+    CommandSpec { verb: "lr", args: "<addr> <reg>", help: "read 1 register from a Leaf device", category: Category::Introspection },
+    CommandSpec { verb: "pins", args: "", help: "read PMIC_ON_REQ + STEM_INT levels", category: Category::Introspection },
+    CommandSpec { verb: "id", args: "", help: "print board identity (flash uid = USB serial)", category: Category::Introspection },
+    CommandSpec { verb: "help", args: "| h | ? | /h", help: "this reference (generated from the command catalog)", category: Category::Introspection },
+    CommandSpec { verb: "sound0", args: "", help: "drive SOUND_INT L (SoM active)", category: Category::Operation },
+    CommandSpec { verb: "sound1", args: "", help: "drive SOUND_INT H (SoM suspended)", category: Category::Operation },
+    CommandSpec { verb: "por0", args: "", help: "drive POR_B L (reset)", category: Category::Operation },
+    CommandSpec { verb: "por1", args: "", help: "drive POR_B H (power good)", category: Category::Operation },
+    CommandSpec { verb: "r", args: "<addr> <reg>", help: "RAW I2C read (escape hatch; raw bytes, not cros_ec)", category: Category::Debug },
+    CommandSpec { verb: "w", args: "<addr> <reg> <val>", help: "RAW I2C write (escape hatch; raw bytes, not cros_ec)", category: Category::Debug },
+    CommandSpec { verb: "sniff", args: "<sda> <scl> [ms]", help: "decode a live I2C bus (passive; never drives)", category: Category::Debug },
+    CommandSpec { verb: "taps", args: "", help: "pull-down probe of free GPIOs (wiring map)", category: Category::Debug },
+    CommandSpec { verb: "selftest", args: "", help: "vstem+vleaf; emits 'RESULT pass=N fail=M'", category: Category::Debug },
+    CommandSpec { verb: "boot", args: "", help: "reset to USB BOOTSEL (reflash path)", category: Category::Flashing },
+];
+
+/// Render ONE command spec as a help line — the single rendering path for BOTH the shared wire catalog and
+/// the probe-local verbs. Clean text (`  verb args  — help`); a host may re-render with icons keyed on
+/// `spec.category`. The on-device `help` carries no decoration itself (COMMANDS.md render-concern split).
+async fn render_spec<'d, T: embassy_rp::usb::Instance + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T>>,
+    s: &CommandSpec,
+) -> Result<(), EndpointError> {
+    write_str(class, "  ").await?;
+    write_str(class, s.verb).await?;
+    if !s.args.is_empty() {
+        write_str(class, " ").await?;
+        write_str(class, s.args).await?;
+    }
+    write_str(class, "  \u{2014} ").await?;
+    write_str(class, s.help).await?;
+    write_str(class, "\r\n").await?;
+    Ok(())
+}
+
+/// Full CLI reference (`help`/`h`/`?`/`/h`). This is the DISCOVERABLE CONTRACT `thepia hwd chat` scrapes to
+/// drive the hardware — so it is GENERATED from the command catalogs (the stembus wire `CATALOG` + the
+/// probe-local `PROBE_LOCAL`), NEVER hand-maintained (COMMANDS.md §"Help/introspection is GENERATED"):
+/// add/retire a verb in the spec tables and this output follows, so it can never misname what the probe
+/// dispatches. Only the preamble (bus pins / role addresses / number base) is static context. Written in
+/// chunks (`write_str` splits to 64-byte CDC packets).
 async fn help<'d, T: embassy_rp::usb::Instance + 'd>(
     class: &mut CdcAcmClass<'d, Driver<'d, T>>,
 ) -> Result<(), EndpointError> {
@@ -726,57 +782,42 @@ async fn help<'d, T: embassy_rp::usb::Instance + 'd>(
     )
     .await?;
 
-    write_str(
-        class,
-        "\r\nSTEM bus (RP2040 is master; device verbs speak cros_ec):\r\n\
-         \x20 scan                   probe 0x08..0x77, list addresses that ACK\r\n\
-         \x20 ident [addr]           cros_ec Identify: iface/model/role/build/ver (default 0x22)\r\n\
-         \x20 status [addr]          cros_ec Status: flags/fault/devs/mode/wake\r\n\
-         \x20 mode [addr] [p|s]      cros_ec SetMode Passive/Sensing (applied async; confirm with status)\r\n\
-         \x20 crc [addr]             cros_ec FramCrc: per-sector CRC16 window\r\n\
-         \x20 vstem                  full cros_ec verify: role discovery, identity, fw ver, status, mode round-trip, sideband\r\n\
-         \x20 r <addr> <reg>         RAW I2C read (escape hatch; raw bus bytes, not cros_ec) — '0x.. = 0x..' or 'no ACK'\r\n\
-         \x20 w <addr> <reg> <val>   RAW I2C write (escape hatch; raw bus bytes, not cros_ec)\r\n",
-    )
-    .await?;
-
-    write_str(
-        class,
-        "\r\nLEAF bus (RP2040 bit-bang master; one-master, re-parks on exit):\r\n\
-         \x20 lscan                  scan 0x08..0x77 on GP4/GP5, list devices that ACK\r\n\
-         \x20 lr <addr> <reg>        read 1 register from a Leaf device\r\n\
-         \x20 vleaf                  prove the handoff: node enumerates Leaf in Sensing, Pico masters it in Passive\r\n",
-    )
-    .await?;
-
-    write_str(
-        class,
-        "\r\nPASSIVE sniff / wiring (never drives the bus):\r\n\
-         \x20 sniff <sda> <scl> [ms] decode a live I2C bus. pins: 4 5 (Leaf, default) OR any two distinct taps\r\n\
-         \x20                        0 1 2 3 6 7 8 9 14 15 16 17 20 21 22 26 27 28. ms default 3500.\r\n\
-         \x20                        frame out: 'S <aa>W+A <dd>+a ... P' (A/N=addr ACK/NAK, a/n=data ACK/NAK)\r\n\
-         \x20 taps                   pull-down probe of all free GPIOs; H = wired to an idle (pulled-up) bus + shared GND\r\n",
-    )
-    .await?;
-
-    write_str(
-        class,
-        "\r\nSIDEBAND (SoM/PMIC stand-in; raw electrical, node reaction needs node sideband fw):\r\n\
-         \x20 sound0 | sound1        drive SOUND_INT L(SoM active) / H(SoM suspended)\r\n\
-         \x20 por0 | por1            drive POR_B L(reset) / H(power good)\r\n\
-         \x20 pins                   read PMIC_ON_REQ and STEM_INT levels\r\n",
-    )
-    .await?;
-
-    write_str(
-        class,
-        "\r\nSYSTEM:\r\n\
-         \x20 id                     print board identity (QSPI flash uid = USB iSerial)\r\n\
-         \x20 selftest               run vstem+vleaf; ends with one grep-able line 'RESULT pass=N fail=M'\r\n\
-         \x20 boot                   reset to USB BOOTSEL (reflash path)\r\n\
-         \x20 help | h | ? | /h      this reference\r\n> ",
-    )
-    .await?;
+    // ── GENERATED command listing — rendered from the stembus wire CATALOG (device verbs, via `spec_for`)
+    // + PROBE_LOCAL (rig verbs), grouped by category. NOT hand-maintained: the spec tables are the single
+    // source, so this output can't misname/omit what `main`'s dispatch handles, and `thepia hwd chat` can
+    // trust it (COMMANDS.md §"Help/introspection is GENERATED"). Bus/role context is in the preamble above.
+    for cat in [
+        Category::Introspection,
+        Category::Operation,
+        Category::Debug,
+        Category::Flashing,
+        Category::BenchRig,
+    ] {
+        let wire_hit = PROBE_WIRE_VERBS
+            .iter()
+            .filter_map(|v| command::spec_for(v))
+            .any(|s| s.category == cat);
+        let local_hit = PROBE_LOCAL.iter().any(|s| s.category == cat);
+        if !wire_hit && !local_hit {
+            continue; // no verbs in this category → no section
+        }
+        write_str(class, "\r\n").await?;
+        write_str(class, cat.label()).await?;
+        write_str(class, ":\r\n").await?;
+        for v in PROBE_WIRE_VERBS {
+            if let Some(s) = command::spec_for(v) {
+                if s.category == cat {
+                    render_spec(class, s).await?;
+                }
+            }
+        }
+        for s in PROBE_LOCAL {
+            if s.category == cat {
+                render_spec(class, s).await?;
+            }
+        }
+    }
+    write_str(class, "> ").await?;
     Ok(())
 }
 
