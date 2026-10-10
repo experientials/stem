@@ -476,9 +476,17 @@ menu functions map to unified commands: `s`→`status`/rescan, `r`→`events`, `
   stembus `CATALOG` (device verbs it exposes, via `spec_for` → single-sourced) + a probe-local `PROBE_LOCAL`
   table (its rig/aggregate/cros_ec verbs), grouped by `category`. Catalog strings carry **no ANSI/emoji**
   (the test asserts it) — decoration is the host renderer's job, keyed on `category`. *HW-verified:* `help`
-  on @rp2040 emits the generated listing (introspection/operation/debug/flashing sections). Still deferred:
-  the on-device (MSP node) introspection reply + the off-device MCP catalog, both to render from this SAME
-  `CATALOG`; and `--dark` compiling the introspection out.
+  on @rp2040 emits the generated listing (introspection/operation/debug/flashing sections).
+- **On-device introspection reply — ✅ DONE (2026-10-10).** `Command::Capabilities` → `Response::Capabilities(u32)`:
+  the node advertises a **bitmask over `CATALOG`** (bit `i` ⇔ it implements `CATALOG[i]`), computed by the
+  const `CAPS_NODE`/`CAPS_NODE_OPERATE` = `caps_for(..)` (generated from the catalog categories; a `Node`
+  reports introspection, a `Node`+`Operate` adds operation). It is CONST-folded, so a node that only answers
+  `Capabilities` links NO catalog strings — it ships the 32-bit mask, the **master** owns the strings and
+  renders verbs from its OWN shared `CATALOG` (zero drift). *HW-proven:* `caps 0x22` → `mask=0x7F supports:
+  ident status crc events caps mode thresh` on the FR2433 node (expander 6368/15360 B). A stembus-aware master
+  (stem-probe/hwd/M7) needs nothing more; a non-stembus agent (MCP) still uses build-id+device-id → off-device
+  catalog. Still deferred: the off-device **MCP catalog** (from this SAME `CATALOG`) + `--dark` compiling the
+  introspection out.
 
 **Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
 firmware-patch streaming, per-module execute), but the *wire protocol* is now the cros_ec-framing +

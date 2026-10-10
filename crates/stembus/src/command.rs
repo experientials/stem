@@ -179,6 +179,11 @@ pub enum Command {
     FramCrc { sector: u8 },
     /// Introspection/operation: drain the recent-event ring (`EventHistory`).
     EventHistory,
+    /// Introspection: enumerate the node's command interface — returns a [`Response::Capabilities`] bitmask
+    /// over [`CATALOG`] (bit `i` ⇔ this node implements `CATALOG[i]`). The on-device discovery surface: a
+    /// stembus-aware master renders the supported verbs from its OWN shared `CATALOG` (COMMANDS.md
+    /// §"Help/introspection is GENERATED" / §discovery). A `--dark` build would compile this out (future).
+    Capabilities,
     /// Operation: request an operating-mode switch (Passive/Sensing).
     SetMode { mode: Mode },
     /// Operation: set a sensor/trigger threshold — `id` is the node's threshold-catalog index.
@@ -219,6 +224,9 @@ pub enum Response {
     Crc(u8),
     Events { n: usize, overflowed: bool },
     ModeNow(u8),
+    /// Capability bitmask over [`CATALOG`] (bit `i` ⇔ the node implements `CATALOG[i]`). The `Capabilities`
+    /// reply — on-device command-interface discovery. `u32` ⇒ up to 32 commands (widen if `CATALOG` grows).
+    Capabilities(u32),
     Ack,
     Unsupported, // command not implemented by this node / invalid param
 }
@@ -266,6 +274,10 @@ pub fn execute_core<N: Node>(node: &mut N, cmd: Command, events_out: &mut [Event
             let (n, overflowed) = node.drain_events(events_out);
             Some(Response::Events { n, overflowed })
         }
+        // Discovery: a Node-only node reports just the introspection commands it supports. A node that is
+        // ALSO `Operate` reports the operation bits too — handled in `execute` (which short-circuits
+        // `Capabilities` before delegating here), so this core mask is correct for the Node-only case.
+        Command::Capabilities => Some(Response::Capabilities(CAPS_NODE)),
         // operation/debug/flash — not the universal core's job
         Command::SetMode { .. } | Command::SetThreshold { .. } => None,
     }
@@ -276,6 +288,11 @@ pub fn execute_core<N: Node>(node: &mut N, cmd: Command, events_out: &mut [Event
 /// with a *different* operation surface does not use this — it calls [`execute_core`] and then dispatches
 /// its own commands. (COMMANDS.md §5.7.)
 pub fn execute<N: Node + Operate>(node: &mut N, cmd: Command, events_out: &mut [Event]) -> Response {
+    // A Node+Operate node reports BOTH introspection and operation capabilities — short-circuit before
+    // `execute_core` (which, for a Node-only caller, reports only the introspection subset).
+    if matches!(cmd, Command::Capabilities) {
+        return Response::Capabilities(CAPS_NODE_OPERATE);
+    }
     if let Some(r) = execute_core(node, cmd, events_out) {
         return r;
     }
@@ -348,6 +365,7 @@ impl Command {
             Command::Status => "status",
             Command::FramCrc { .. } => "crc",
             Command::EventHistory => "events",
+            Command::Capabilities => "caps",
             Command::SetMode { .. } => "mode",
             Command::SetThreshold { .. } => "thresh",
         }
@@ -362,6 +380,7 @@ pub const CATALOG: &[CommandSpec] = &[
     CommandSpec { verb: "status", args: "[addr]", help: "status: flags/fault/dev-count/mode/wake", category: Category::Introspection },
     CommandSpec { verb: "crc", args: "[addr]", help: "per-sector FRAM CRC16 window (integrity)", category: Category::Introspection },
     CommandSpec { verb: "events", args: "[addr]", help: "drain the recent-event ring", category: Category::Introspection },
+    CommandSpec { verb: "caps", args: "[addr]", help: "list the commands this node supports (capability bitmap)", category: Category::Introspection },
     CommandSpec { verb: "mode", args: "[addr] [p|s]", help: "set operating mode Passive/Sensing", category: Category::Operation },
     CommandSpec { verb: "thresh", args: "<addr> <id> <v>", help: "set a sensor/trigger threshold", category: Category::Operation },
 ];
@@ -371,6 +390,34 @@ pub const CATALOG: &[CommandSpec] = &[
 pub fn spec_for(verb: &str) -> Option<&'static CommandSpec> {
     CATALOG.iter().find(|s| s.verb == verb)
 }
+
+/// The capability bitmask a node reports via [`Response::Capabilities`], GENERATED from [`CATALOG`]: bit `i`
+/// is set when `CATALOG[i]`'s category is enabled — `introspection` for a [`Node`], `operation` additionally
+/// for a node that is also [`Operate`]. Bit positions are the `CATALOG` index (the wire-stable command id),
+/// so a master decodes the mask against its own shared `CATALOG`. No hand-kept bit constants → can't drift.
+pub const fn caps_for(introspection: bool, operation: bool) -> u32 {
+    let mut mask = 0u32;
+    let mut i = 0;
+    while i < CATALOG.len() {
+        let include = match CATALOG[i].category {
+            Category::Introspection => introspection,
+            Category::Operation => operation,
+            Category::Debug | Category::Flashing | Category::BenchRig => false,
+        };
+        if include {
+            mask |= 1u32 << i;
+        }
+        i += 1;
+    }
+    mask
+}
+
+/// Precomputed capability masks — a [`Node`]'s (introspection only) and a [`Node`]+[`Operate`]'s
+/// (introspection+operation). CONST so they are evaluated at compile time: a node image that only answers
+/// `Capabilities` then carries NO runtime reference to [`CATALOG`], so its help strings are stripped — the
+/// node ships the 32-bit mask, not the catalog (matters on the FR2433 budget; the master owns the strings).
+pub const CAPS_NODE: u32 = caps_for(true, false);
+pub const CAPS_NODE_OPERATE: u32 = caps_for(true, true);
 
 /// postcard payload codec for the command vocabulary (COMMANDS.md §0 decision): the bytes carried inside
 /// a cros_ec vendor command (`EC_CMD_BOARD_SPECIFIC_BASE + n`). Gated on the `postcard` feature so
@@ -608,6 +655,7 @@ mod tests {
             Command::Status,
             Command::FramCrc { sector: 0 },
             Command::EventHistory,
+            Command::Capabilities,
             Command::SetMode { mode: Mode::Passive },
             Command::SetThreshold { id: 0, value: 0 },
         ];
@@ -620,5 +668,35 @@ mod tests {
             // Clean structured data — no ANSI/emoji baked into source (that's the renderer's job).
             assert!(!spec.help.contains('\x1b'), "verb {verb:?} help has an ANSI escape");
         }
+    }
+
+    /// `caps_for` is generated from CATALOG categories; bit `i` ⇔ `CATALOG[i]`. A Node+Operate node
+    /// (`execute`) reports introspection+operation; a Node-only node (`execute_core`) reports only
+    /// introspection — and the Operate mask is a strict superset that adds exactly `mode`/`thresh`.
+    #[test]
+    fn capabilities_mask_generated_from_catalog() {
+        let intro = caps_for(true, false);
+        let full = caps_for(true, true);
+        // Every bit set in `intro` corresponds to an Introspection catalog entry; `full` adds Operation.
+        for (i, s) in CATALOG.iter().enumerate() {
+            let bit = 1u32 << i;
+            match s.category {
+                Category::Introspection => {
+                    assert!(intro & bit != 0 && full & bit != 0, "{} should be in both masks", s.verb);
+                }
+                Category::Operation => {
+                    assert!(intro & bit == 0 && full & bit != 0, "{} should be operation-only", s.verb);
+                }
+                _ => assert!(full & bit == 0, "{} should be in neither mask", s.verb),
+            }
+        }
+        // `execute` (Node+Operate) reports the full mask; `execute_core` the introspection subset.
+        let mut n = MockNode::new();
+        let mut scratch = [Event::default(); EVENT_RING_LEN];
+        assert_eq!(execute(&mut n, Command::Capabilities, &mut scratch), Response::Capabilities(full));
+        assert_eq!(
+            execute_core(&mut n, Command::Capabilities, &mut scratch),
+            Some(Response::Capabilities(intro))
+        );
     }
 }

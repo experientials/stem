@@ -660,6 +660,30 @@ async fn main(_spawner: Spawner) {
                                 let _ = write_str(&mut class, "  FAIL (crc read)\r\n").await;
                             }
                             let _ = write_str(&mut class, "> ").await;
+                        } else if contains_ci(line, b"caps") {
+                            // On-device introspection: Command::Capabilities -> Response::Capabilities(mask).
+                            // The node advertises WHICH commands it supports (bit i = CATALOG[i]); we render
+                            // the verbs from our OWN shared CATALOG — same source, so names can't drift.
+                            let target = if nt >= 2 { parse_hex(toks[1]).unwrap_or(ADDR_EXPANDER) } else { ADDR_EXPANDER };
+                            let _ = write_str(&mut class, "\r\ncaps @0x").await;
+                            let _ = write_hex8(&mut class, target).await;
+                            match vendor_cmd(&mut i2c, target, command::Command::Capabilities) {
+                                Ok(command::Response::Capabilities(mask)) => {
+                                    let _ = write_str(&mut class, " mask=0x").await;
+                                    let _ = write_hex32(&mut class, mask).await;
+                                    let _ = write_str(&mut class, " supports:").await;
+                                    for (i, s) in command::CATALOG.iter().enumerate() {
+                                        if mask & (1u32 << i) != 0 {
+                                            let _ = write_str(&mut class, " ").await;
+                                            let _ = write_str(&mut class, s.verb).await;
+                                        }
+                                    }
+                                    let _ = write_str(&mut class, "  PASS\r\n").await;
+                                }
+                                Ok(_) => { let _ = write_str(&mut class, "  FAIL (unexpected response)\r\n").await; }
+                                Err(e) => { let _ = write_str(&mut class, "  FAIL (").await; let _ = write_str(&mut class, e).await; let _ = write_str(&mut class, ")\r\n").await; }
+                            }
+                            let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"id") {
                             let _ = write_str(&mut class, "\r\nid ").await;
                             let _ = class.write_packet(serial.as_bytes()).await;
@@ -703,7 +727,7 @@ async fn banner<'d, T: embassy_rp::usb::Instance + 'd>(
 /// category) is sourced from `stembus::command::CATALOG` via `spec_for`, so it is SINGLE-SOURCED with the
 /// node defs + on-device introspection + hwd chat and cannot drift. (The probe omits wire verbs it doesn't
 /// implement yet, e.g. `events`/`thresh`.)
-const PROBE_WIRE_VERBS: &[&str] = &["ident", "status", "crc", "mode"];
+const PROBE_WIRE_VERBS: &[&str] = &["ident", "status", "crc", "caps", "mode"];
 
 /// Probe-LOCAL verbs — bench-rig / aggregate / cros_ec-standard commands that are NOT node wire commands,
 /// so they live here (not in stembus). Same `CommandSpec` shape → rendered by the same generated path as
