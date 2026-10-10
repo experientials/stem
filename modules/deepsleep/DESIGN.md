@@ -40,7 +40,13 @@ owner's requirements captured **verbatim** — it is the anchor; everything else
 > in which case it should show output after POST about what was found. Not a full diag, but some basic
 > info
 
-_(captured 2026-09-21; modes added 2026-09-24; console/--debug logging added 2026-10-04)_
+> [diag] You should treat it as an extended POST mode that happens if not disabled within the first 2
+> seconds of boot
+
+> The stem-probe or M7 can monitor boot and send a command to turn off diag. Or the user can press a
+> button to skip diag
+
+_(captured 2026-09-21; modes added 2026-09-24; console/--debug logging added 2026-10-04; diag-as-runtime-boot-mode added 2026-10-10)_
 
 ---
 
@@ -195,6 +201,65 @@ register-map home — is now designed from the datasheet.
    it suspends). This also prevents a **boot-time two-master fight** on the sensor bus. `mode::default_boot`.
 4. **Sensor enumeration** — ONLY in Sensing: if a sensor-master bus exists, probe it and record what's
    present / sensable; expose to the SoM.
+
+### diag — a `--diag` build flag that fills a POST extension point (runtime-gated) (2026-10-10)
+**diag IS a `--diag` build flag** (orthogonal to the chip axis) — but it is **NOT a separate `diag/`
+crate / parallel harness**. It toggles an **extension point in the STANDARD node codebase**
+(`modules/deepsleep`): the flag compiles in **extended-POST behavior whose primary job is testing the
+connected I2C devices** (presence / correctness / stress of the Leaf-bus sensors). This is how
+`prod ⊆ diag` (memory `diag-prod-variants`) is realized — one shared codebase, diag is the build that
+fills the hook — **retiring the parallel `diag/` crate**.
+
+**Structure = PER-DEVICE POST, with a diag variant that does MORE (Henrik 2026-10-10):** *"I imagine POST
+to be per device supported with a diag variant that does more."* So each supported device/subsystem
+exposes **two** checks (maps onto [[per-sensor-module-convention]] — the `crates/devices` trait + the
+GPIO/ADC subsystems):
+- **POST (regular, always):** a basic per-device check — present? / ID ok? / healthy? — run at every boot.
+- **diag (the `--diag` extension, runtime-gated):** the SAME devices exercised *further* — read live values,
+  correctness, stress/soak, signature/fault-isolation.
+
+**ALL of today's `diag/` coverage is accommodated** (not just I2C — audited 2026-10-10):
+- **I2C devices** (SSD1306/MCP23017/VL53L0X/APDS-9960/MC6470/Si7021/IS31) — presence/ID in POST; exercise +
+  margin/soak + signature battery in diag.
+- **RCWL-0516 radar** (GPIO P2.4) — presence in POST; motion-window readout in diag.
+- **Board health via ADC** — supply rail (mV) + die temp (°C): a regular-POST health line.
+- **S1 button** (GPIO P4.0) — already the diag mode-cycle control; doubles as the "press to skip/cycle" input.
+- **`regs::dump` + `bootrec`** — boot inspection/instrumentation: regular POST (or `--debug`), not the diag extension.
+
+**diag checks are TASK-BASED — async, cooperatively scheduled, future-triggerable (Henrik 2026-10-10):**
+*"the diag was intended to be task based so it can run async or triggered by command/condition in the
+future."* Each per-device diag check is a **`sched` async task** (ADR-0013 — the same pattern as
+`enumerate::leaf_scanner` and today's `diag/tasks.rs` cooperative mode tasks), **interleaved with the
+Stem-slave service** so a long/stress diag never blocks the control channel (the master can still skip it
+mid-run, or issue other commands). The **2 s boot window is just the FIRST trigger**; the *same* tasks
+can later be started by a **command** (a master says "run diag task X") or a **condition** — so diag is a
+set of triggerable async tasks, not a boot-only blocking suite.
+
+In a `--diag` build it runs like this:
+
+1. Boot: **Stem slave up first** (existing step 0) + model-detect + pins + the **normal POST** (FRAM CRCs,
+   enumerate) — **always**, same as today.
+2. The normal POST is **EXTENDED with additional diagnostic behavior** (the one-feature-at-a-time
+   presence / correctness / stress tests, currently the separate `diag/` crate) **unless disabled within
+   ~2 s** — during that window the node services the Stem slave AND polls a skip button:
+   - a **master** (stem-probe / M7) monitoring boot sends a **"skip diag" command** over the Stem bus, OR
+   - the **user presses a button**.
+3. **EITHER WAY the node then proceeds to NORMAL OPERATION** (the Passive/Sensing mode machine). diag is
+   **ADDITIVE to the POST, not an alternative to booting** — skipping only omits the extended behavior;
+   it never changes whether the node reaches normal operation.
+
+**Open design points (to settle before building):**
+- **Skip signal (command):** a dedicated cros_ec command (new `Command` variant, e.g. `SkipDiag`/a boot
+  control) vs. reusing an existing one. Must be serviceable within the 2 s window (slave is up first).
+- **Skip signal (button):** which GPIO per model; debounce; is a button present on the product (vs bench)?
+- **Size:** compiling the full extended-POST suite into every image is large (the `diag/` suite is ~2.5 KLOC).
+  Fits the dual 32 KB parts; **likely NOT the FR2433 15 KB** (expander, slave-only) — so the extended POST
+  is **feature-/`--dark`-gated** (a production/`--dark` image compiles it out; the master then never needs
+  to skip it). Ties to the discovery/`--dark` axis (COMMANDS.md).
+- **Default:** runs by default at boot (dev); a production node would ship with the master always skipping,
+  or the suite compiled out.
+- **Integration:** the suite should reuse the shared crates (bsp/devices/stem-node/leaf-scan), not remain a
+  parallel `diag/` codebase — fold it in as the node's extended-POST module.
 
 ### Single binary across multiple models
 Requirement: **one binary image serves multiple MSP430 models**, detecting the exact model and
