@@ -42,10 +42,8 @@ console = ["stem-node/console", "leaf-scan?/console"]
 # status dump + a Leaf/eUSCI diagnostic) and the interactive s/r/d/m/l commands. Built via
 # `just build <chip> --debug`. "Not a full diag, but some basic info" (DESIGN.md, Henrik 2026-10-04).
 debug = ["console", "stem-node/debug", "leaf-scan?/debug"]
-# `cros_ec` — the cros_ec v3 EC-slave framing path (COMMANDS.md §0). On the dual node it runs the cros_ec
-# framer INSTEAD of the PCA9698-regmap slave. Opt-in via `--features cros_ec`; the regmap removal on the
-# dual path is a later slice (S2b). (The FR2433 cros_ec node now lives in `modules/expander/`, S2a.)
-cros_ec = ["stem-node/cros_ec"]
+# (The `cros_ec` feature was removed — cros_ec is the SOLE command interface now; the PCA9698-regmap slave
+# is gone, COMMANDS.md §0. `stem-node`'s ec/node are always compiled; nothing to gate.)
 
 # OPERATING MODES (see DESIGN.md "Operating modes"). A build compiles in the modes it supports; the
 # active mode is a RUNTIME switch among them. At least ONE mode is required (compile_error guard).

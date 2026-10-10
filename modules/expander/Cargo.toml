@@ -6,9 +6,9 @@ description = "bob-929 FR2433 I/O EXPANDER firmware (Rust) — single-I²C slave
 
 # SINGLE-CHIP binary: FR2433 only (the cheap, well-stocked single-I²C slave-only expander). Unlike prod/
 # (the dual-I²C family axis), this module carries ONE chip — chip/arch is bound by crate composition, not
-# a family if-ladder (STEM-DIRECTION "Repo layout" item 3). cros_ec is the ONLY command interface here
-# (COMMANDS.md §0 — regmap is dropped by omission): `deepsleep` is depended on WITH its `cros_ec` feature
-# unconditionally (see [dependencies]), so there is NO `cros_ec` feature to toggle.
+# a family if-ladder (STEM-DIRECTION "Repo layout" item 3). cros_ec is the ONLY command interface
+# (COMMANDS.md §0 — the regmap slave was removed): `stem-node` compiles its cros_ec ec/node surface
+# unconditionally, so there is NO `cros_ec` feature to toggle.
 [features]
 default = ["fr2433", "console", "mode-passive"]
 # Chip/family feature: selects the PAC + memory map (build.rs) and the device vector table for the
@@ -33,12 +33,11 @@ node-hal = { path = "../../crates/node-hal" }
 sched = { path = "../../crates/sched" }
 # Stem-bus wire contract + command vocabulary (role addr, cros_ec framer, WakeReason).
 stembus = { path = "../../crates/stembus" }
-# Shared per-device drivers (transitive via deepsleep; kept to mirror prod's dep set).
+# Shared per-device drivers (transitive via stem-node; kept to mirror the dep set).
 devices = { path = "../../crates/devices" }
-# The MSP430 deepsleep-supervisor capability crate. cros_ec is UNCONDITIONAL here — enabling it on the
-# dependency (not as a crate feature) makes the cros_ec `ec`/`node` modules + the postcard command codec
-# ALWAYS compiled, with no `cros_ec` gate to flip. (COMMANDS.md §0: cros_ec is the default command face.)
-stem-node = { path = "../../crates/stem-node", features = ["cros_ec"] }
+# The shared Stembus-node control surface. cros_ec (ec/node + the postcard codec) is now UNCONDITIONAL in
+# stem-node — there is no `cros_ec` feature to request; it's the sole command interface (COMMANDS.md §0).
+stem-node = { path = "../../crates/stem-node" }
 
 # opt-level "s" + LTO: size wins over speed (the FR2433 15 KB FRAM budget is the point). The gate
 # (`just expander build`) fails if the footprint exceeds that budget.

@@ -2,13 +2,14 @@
 name = "stem-node"
 version = "0.1.0"
 edition = "2021"
-description = "The shared Stembus-node control surface: cros_ec serve + command dispatch (ec/node/stem), boot self-test (post), and identity/status reporting (status), plus the legacy regmap decode (retiring). What EVERY Stembus node does to serve its control surface and report identity/health — consumed by modules/deepsleep AND modules/expander. Generic over node-hal seams (PAC-free)."
+description = "The shared Stembus-node control surface: the cros_ec serve + command dispatch (ec/node), the slave transport bring-up (stem), boot self-test (post), and identity/status reporting (status). What EVERY Stembus node does to serve its (cros_ec) control surface and report identity/health — consumed by modules/deepsleep AND modules/expander. Generic over node-hal seams (PAC-free)."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# The Stem-bus wire vocabulary (regmap addresses/codes, role/crc, cros_ec framing, mode codes). The
-# control surface re-exports + extends it.
-stembus = { path = "../stembus" }
+# The Stem-bus wire vocabulary (role/crc constants, mode codes) + the cros_ec framing + the postcard
+# command codec. `postcard` is UNCONDITIONAL now: cros_ec (ec/node) is the sole command surface, so the
+# codec is always needed (the old regmap slave that had no postcard dep is gone).
+stembus = { path = "../stembus", features = ["postcard"] }
 # Host-clean hardware-seam traits the `stem`/`ec` dispatch is generic over (StemSlave/GpioBanks/LeafMaster
 # + SlaveEvent) — so no module names a concrete PAC. The MSP430 impl is `bsp::StemHw`, wired by the bin.
 node-hal = { path = "../node-hal" }
@@ -34,6 +35,5 @@ _dual = ["dep:leaf-scan"]
 # `console` = UART report paths; `debug` = extra diagnostics (implies console).
 console = []
 debug = ["console"]
-# `cros_ec` = the cros_ec v3 EC-slave framing path (COMMANDS.md §0) — adds `ec` (glue to
-# stembus::cros_ec::EcSlave) + `node` (the Node/Operate adapter) and enables the postcard command codec.
-cros_ec = ["stembus/postcard"]
+# (The `cros_ec` feature was removed with the regmap drop — cros_ec is now the ONLY command surface, so
+# `ec`/`node` are always compiled and `stembus/postcard` is an unconditional dep above. COMMANDS.md §0.)

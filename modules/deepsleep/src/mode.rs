@@ -12,7 +12,7 @@
 
 #![allow(dead_code)] // some paths are unused depending on which mode features are compiled in.
 
-use crate::regmap;
+use stembus::regmap; // shared mode-code constants (the regmap register-file is gone)
 use node_hal::LeafBus;
 
 // Sensor-bus acquire/release is the host-clean `node_hal::LeafBus::{acquire,release}` seam (Phase 6b):

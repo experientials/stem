@@ -12,7 +12,7 @@
 // crate (optional dep, pulled in only under `_dual`).
 #[cfg(feature = "_dual")]
 use leaf_scan::Scan;
-use crate::regmap;
+use stembus::regmap; // shared wire constants (MODE_CODE_*, DBG_IFACE_MAGIC) — the regmap register-file is gone
 use crate::{VER_MAJOR, VER_MINOR, VER_PATCH}; // deepsleep's capability version (§B)
 use node_hal::ChipId; // host-clean chip identity (device id + family-match), Phase 6c
 #[cfg(feature = "console")]
@@ -116,7 +116,6 @@ impl Status {
 
     /// Build the cros_ec `Identity` from this snapshot (COMMANDS.md §5.7). `role` is the node's Stem
     /// address (role-based). Keeps all field access inside `status.rs`; the mapping lives in one place.
-    #[cfg(feature = "cros_ec")]
     pub fn identity(&self, role: u8) -> stembus::command::Identity {
         stembus::command::Identity {
             iface: regmap::DBG_IFACE_MAGIC,
@@ -129,7 +128,6 @@ impl Status {
 
     /// Build the cros_ec `StatusData` from this snapshot. `wake` is supplied by the caller (the node's
     /// wake-attribution source; `None` until a node tracks one).
-    #[cfg(feature = "cros_ec")]
     pub fn status_data(&self, wake: stembus::command::WakeReason) -> stembus::command::StatusData {
         stembus::command::StatusData {
             flags: self.status,
@@ -140,41 +138,12 @@ impl Status {
         }
     }
 
-    /// Read one debug register (0x30–0x3F). The shared read path for the slave ISR and the UART dump;
-    /// reserved offsets read 0.
-    pub fn read_reg(&self, reg: u8) -> u8 {
-        match reg {
-            regmap::DBG_IFACE => regmap::DBG_IFACE_MAGIC,
-            regmap::DBG_MODEL_L => self.model_id as u8,
-            regmap::DBG_MODEL_H => (self.model_id >> 8) as u8,
-            regmap::DBG_BUILD_0 => self.build_id as u8,
-            regmap::DBG_BUILD_1 => (self.build_id >> 8) as u8,
-            regmap::DBG_BUILD_2 => (self.build_id >> 16) as u8,
-            regmap::DBG_BUILD_3 => (self.build_id >> 24) as u8,
-            regmap::DBG_STATUS => self.status,
-            regmap::DBG_DEV_COUNT => self.dev_count,
-            regmap::DBG_KNOWN_PRESENT => self.known_present,
-            regmap::DBG_FAULT => self.fault,
-            regmap::DBG_FW_VER_MAJOR => VER_MAJOR,
-            regmap::DBG_FW_VER_MINOR => VER_MINOR,
-            regmap::DBG_FW_VER_PATCH => VER_PATCH,
-            regmap::MODE_CTRL => self.mode,
-            _ => 0,
-        }
-    }
-
-    /// Bench dump of the debug window over UART — the escape hatch until an I2C master reads it.
-    /// Prints the raw 0x30–0x3F bytes (exactly what the SoM would read) plus a decoded one-liner.
+    /// Bench dump of the identity/status model over UART — the console escape hatch. (The regmap 0x30–0x3F
+    /// register-window read was retired with the regmap drop; the SoM reads this state via the cros_ec
+    /// `Identify`/`Status` commands now, and this prints the same fields decoded.)
     #[cfg(feature = "console")]
     pub fn dump<H: Console>(&self, hw: &H) {
-        hw.puts("dbg 30-3F:");
-        let mut r = regmap::EXT_BASE;
-        while r <= regmap::EXT_END {
-            hw.putc(b' ');
-            hw.hex8(self.read_reg(r));
-            r += 1;
-        }
-        hw.puts("\n  model=");
+        hw.puts("status  model=");
         hw.hex8((self.model_id >> 8) as u8);
         hw.hex8(self.model_id as u8);
         hw.puts(" build=");

@@ -338,11 +338,16 @@ shared; which TRANSPORT exposes it is per diag/prod variant:
       `expander` module) happens in the **`modules/` REORG**, not as in-place surgery.
     - *"Plus as soon as we have parity we drop regmap fully."* + *"the reorg can just leave it out"* +
       *"I don't care. If we have parity I'm happy however we proceed."* → **parity is the only gate, and it
-      is met.** Mechanism is open and doesn't matter: the simplest is to **drop regmap by OMISSION in the
-      `modules/` reorg** — carry only the cros_ec path forward; the regmap slave/debug-window/PCA9698 banks
-      (conceptual) simply aren't brought across. No separate surgical in-place deletion is required. Current
-      codebase stands at Ra (cros_ec default; regmap reachable behind `--regmap` until the reorg leaves it
-      out). The per-variant console + expander GPIO + terse verbs + `--dark` are also reorg/future work.
+      is met.** → **DONE (2026-10-10): regmap is fully dropped.** cros_ec is the SOLE node command interface.
+      Removed: `crates/stem-node/regmap.rs` (RegSel/decode/ShadowState), `stem.rs`'s `RegFile`/`Slave`/`poll`/
+      `loopback_selftest` (stem.rs is now just the transport `init`), `status::read_reg` (the 0x30–0x3F window
+      serializer), the deepsleep serve-loop's regmap branch + boot/`l` loopback, the `cros_ec` **feature**
+      across stem-node/deepsleep (now unconditional), and the `--regmap`/`--cros-ec` build flags. Artifacts
+      lost the `-cros_ec` suffix (there's only one interface). KEPT: `stembus::regmap` as the shared wire
+      CONSTANTS (role addresses, mode codes, CRC width, iface magic, model ids) that cros_ec itself uses —
+      that was never "the regmap command approach," just the contract data. *HW-verified:* dual node
+      (@fr2476/@fr2355) + expander (@fr2433) all serve ident/status/mode/caps over cros_ec post-removal.
+      The per-variant console + expander GPIO + terse verbs + `--dark` are still reorg/future work.
     [[role-based-stem-addressing]] [[talki-pins-use-pinmux-skill]]
 
 (Below was the SUPERSEDED plan — kept for history:) ~~The MSP console goes read-only.~~ The MSP430 is a

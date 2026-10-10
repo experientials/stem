@@ -50,6 +50,6 @@ jobs:
             examples/hello-rust/target/msp430-none-elf/release/hello-rust
             diag/target/msp430-none-elf/release/diag
             modules/deepsleep/target/msp430-none-elf/release/deepsleep-fr247x
-            modules/deepsleep/target/msp430-none-elf/release/deepsleep-fr2xxx-silent-cros_ec
+            modules/deepsleep/target/msp430-none-elf/release/deepsleep-fr2xxx-silent
             modules/expander/target/msp430-none-elf/release/expander-cros_ec
           if-no-files-found: error

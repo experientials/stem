@@ -47,34 +47,29 @@ default:
 build target *flags:
     #!/usr/bin/env bash
     set -euo pipefail
-    # cros_ec is now the DEFAULT command interface (COMMANDS.md §0 — regmap register-poke is being retired).
-    # `--regmap` is a TRANSITION escape hatch to build the old regmap slave until that path is deleted (Rb).
-    cls=default; crosec=cros_ec; fam=""
+    # cros_ec is the SOLE node command interface (COMMANDS.md §0 — the regmap register-poke slave was
+    # removed, so there is no `--regmap`/`--cros-ec` toggle anymore; cros_ec is always built).
+    cls=default; fam=""
     for f in {{flags}}; do case "${f#--}" in
         diag) cls=diag;; debug) cls=debug;; prod) cls=prod;;
-        cros-ec|cros_ec) crosec=cros_ec;;  # explicit (now the default); kept for compatibility
-        regmap) crosec="";;                # TRANSITION-ONLY: build the legacy regmap slave (to be removed)
-        *) echo "unknown flag '$f' — use --diag | --debug | --regmap(transition)" >&2; exit 1;; esac; done
+        *) echo "unknown flag '$f' — use --diag | --debug" >&2; exit 1;; esac; done
     case "{{target}}" in
         fr2355|fr235x) fam=fr235x; diagt=fr2355; kind=msp ;;
         fr2476|fr247x) fam=fr247x; diagt=fr2476; kind=msp ;;
-        fr2433|fr24xx) kind=expander ;;  # FR2433 I/O expander — its OWN binary crate (modules/expander), cros_ec-only; no diag image
+        fr2433|fr24xx) kind=expander ;;  # FR2433 I/O expander — its OWN binary crate (modules/expander); no diag image
         fr2155|fr215x) fam=fr215x; diagt=fr2155; kind=msp ;;
         fr2xxx)        fam=fr2xxx; diagt="";     kind=msp ;;  # COMBINED single image (FR2476+FR2355/FR2155) — dark prod, no diag
         rp2040)        kind=cortex ;;
         *) echo "unknown chip '{{target}}' — fr2355|fr2476|fr2433|fr2155|fr2xxx|rp2040" >&2; exit 1 ;;
     esac
-    # cros_ec is an MSP430 EC-slave path (the default command interface on the nodes). It does not apply to
-    # the RP2040 (it's the bus MASTER / stem-probe, not a node) — so clear the default crosec for non-MSP.
-    [ "$kind" = msp ] || crosec=""
     if [ "$kind" = msp ]; then
         [ "$cls" = default ] && cls=prod
         case "$cls" in
             # The COMBINED image (fr2xxx) is DARK by default: console-ON needs a runtime per-chip loopback
             # hint that isn't built yet, so a console/debug combined build won't compile (S2b.2b TODO).
-            prod)  con=console; [ "$fam" = fr2xxx ] && con=""; just deepsleep build "$fam" auto "$con" "" "$crosec" ;;
-            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;  # diag ignores crosec for now (converges onto the unified vocabulary in Rd)
-            debug) [ "$fam" = fr2xxx ] && { echo "no console/debug build for the combined fr2xxx image yet (dark only — S2b.2b)" >&2; exit 1; }; just deepsleep build "$fam" auto debug "" "$crosec" ;;  # prod + `debug` feature (post-POST "what was found")
+            prod)  con=console; [ "$fam" = fr2xxx ] && con=""; just deepsleep build "$fam" auto "$con" "" ;;
+            diag)  [ -n "$diagt" ] || { echo "no diag image for {{target}}" >&2; exit 1; }; just diag build "$diagt" ;;
+            debug) [ "$fam" = fr2xxx ] && { echo "no console/debug build for the combined fr2xxx image yet (dark only — S2b.2b)" >&2; exit 1; }; just deepsleep build "$fam" auto debug "" ;;
         esac
     elif [ "$kind" = expander ]; then
         # FR2433 I/O expander (modules/expander): cros_ec is UNCONDITIONAL in that crate, so there is no

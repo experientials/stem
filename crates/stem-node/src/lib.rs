@@ -14,28 +14,22 @@
 //! (History: split out of the old product-named `deepsleep` crate — see `docs/DEEPSLEEP-EXTRACTION.md`.
 //! `enumerate` → `leaf-scan`; the Passive/Sensing `mode` machine → the `modules/deepsleep` product.)
 
-/// I²C-slave register-map decode — re-exports the shared `stembus::regmap` wire contract and adds the
-/// server-internal decode (`RegSel`/`decode`/`next_ai`) + `ShadowState`. **Retiring** with the regmap
-/// removal (cros_ec is the surface); kept until that slice lands.
-pub mod regmap;
-
 pub mod post;
 pub mod status;
 
-/// Stem-bus I²C-**slave** dispatch — the register-file/command-pointer layer that maps a master's reads
-/// and writes onto [`regmap`], consuming the `bsp::stem_i2c` `SlaveEvent` transport seam. Present on EVERY
-/// node: dual families serve it on eUSCI_B1, fr2433 on its one eUSCI_B0.
+/// Stem-bus I²C-**slave transport bring-up** (`stem::init`). The command SURFACE above it is cros_ec
+/// (`ec`/`node`), NOT a register file — the PCA9698 regmap slave was retired (COMMANDS.md §0: cros_ec is
+/// the sole command interface). The shared wire CONSTANTS (role addr, mode codes, CRC) live in
+/// `stembus::regmap`.
 #[cfg(any(feature = "_dual", feature = "fr2433"))]
 pub mod stem;
 
 /// cros_ec v3 EC-slave transport glue (COMMANDS.md §0) — binds the `bsp::stem_i2c` `SlaveEvent` seam to the
-/// pure `stembus::cros_ec::EcSlave` framer. Opt-in via `cros_ec`; the surface that replaces the regmap slave.
-#[cfg(feature = "cros_ec")]
+/// pure `stembus::cros_ec::EcSlave` framer. The node's command interface (replaces the old regmap slave).
 pub mod ec;
 
-/// The `Node`+`Operate` adapter (`stembus::command`) over this node's live state — what the vendor+postcard
-/// path dispatches against. Opt-in via `cros_ec`.
-#[cfg(feature = "cros_ec")]
+/// The `Node`+`Operate` adapter (`stembus::command`) over this node's live state — what the cros_ec
+/// vendor+postcard path dispatches against.
 pub mod node;
 
 // ── Build identity (DEEPSLEEP-EXTRACTION.md §B) ──────────────────────────────────────────────────
