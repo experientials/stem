@@ -20,6 +20,9 @@
 //! product's `ModeMachine` — same pin-route + master bring-up, but it leaves the mode machine unperturbed
 //! (the node stays Passive throughout; diag runs before normal operation).
 
+mod signature;
+mod stress;
+
 use bsp::fmt as uart;
 use bsp::hal::EusciI2c;
 use bsp::pac::Peripherals;
@@ -29,6 +32,7 @@ use devices::{Device, Error};
 use leaf_scan::enumerate;
 use node_hal::LeafBus;
 use stem_node::{ec, node};
+pub use stembus::diag_mode::DiagMode;
 
 // Boot window ≈ a few seconds at 1 MHz SMCLK. The DESIGN target is ~2 s; this first slice uses a generous
 // span so the skip is testable by hand on the bench. Each pass services the slave + checks for a
@@ -99,7 +103,17 @@ pub fn run(
     let scan = enumerate::scan(hw);
     enumerate::report(hw, &scan);
     exercise_devices(p, &scan); // per-device value reads (re-homed t_gravity/t_temphum), guarded by presence
-    // TODO(slice 3c): stress/soak/signature as task-based, command/condition-triggered diag modes.
+
+    // CONTINUAL diag MODE (DESIGN.md "CONTINUAL diag is a MODE controlled by command/register"): the master
+    // (SoM/stem-probe) selected one via `SetDiagMode` during the boot window above; the bus is acquired.
+    // DEFAULT Off → nothing runs → the node proceeds to normal operation. Margin/Signature are bounded
+    // (run once); Soak is cooperative (services the slave each pass, so `diagmode off` stops it at runtime).
+    match live.diag_mode() {
+        DiagMode::Off | DiagMode::Unknown(_) => {}
+        DiagMode::Margin => stress::margin_sweep(p, &scan),
+        DiagMode::Signature => signature::signature_battery(p, &scan),
+        DiagMode::Soak => stress::soak_loop(hw, ec_slave, live, p, &scan),
+    }
     hw.release();
 
     uart::puts(p, "diag: done\n");
