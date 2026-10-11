@@ -51,6 +51,30 @@ pub fn run(
     // Window elapsed without a skip → run the extended POST.
     uart::puts(p, "diag: extended POST\n");
 
+    // Boot reason FIRST (MCU-self, no bus): WHY the MCU last reset — the dominant instrument for a
+    // reset loop (BOR/SVSH ⇒ brownout/SVS; WDT/PUC ⇒ software). Drains SYSRSTIV (read-clears), so all
+    // pending causes are listed, dominant first. Guards against a runaway (max 6 reads → None).
+    uart::puts(p, "  reset: ");
+    let mut printed = 0u8;
+    for _ in 0..6 {
+        let (code, why) = bsp::bootreason::take_primary(p);
+        if code == 0 {
+            break;
+        }
+        if printed > 0 {
+            uart::puts(p, ", ");
+        }
+        uart::puts(p, why);
+        uart::puts(p, "(");
+        uart::dec(p, code);
+        uart::puts(p, ")");
+        printed += 1;
+    }
+    if printed == 0 {
+        uart::puts(p, "none(0)");
+    }
+    uart::putc(p, b'\n');
+
     // Board health (MCU-self, no bus): supply rail + die temperature from the ADC's internal channels.
     bsp::adc::init(p);
     uart::puts(p, "  board: DVCC=");
