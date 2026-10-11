@@ -3,6 +3,15 @@
 Status: Accepted (tier split) · **In progress** (async-`sched` evolution — spikes DONE; FIRST subsystem migrated + hardware-verified: prod Leaf enumerate, 2026-10-06)
 Date: 2026-10-05   Source: Henrik 2026-10-05 ("can we use embassy on MSP prod?" → "can we write async/await and execute with our own sched, resolving it all at compile time to the same size?")
 
+> **Reinforcement (Henrik 2026-10-11, verbatim):** *"I want an async actor model in all firmware. Not
+> synchronous garbage."* · *"Everything event driven."* · (on migrating diag) *"You are migrating working
+> code, why would you rewrite it?"* — i.e. the target programming model for ALL firmware is async actor /
+> event-driven (this ADR's direction, extended to an actor framing and to *all* firmware, not just prod);
+> AND migrations (e.g. folding `diag/` into `crates/diag`) must **move working code faithfully** — a
+> `sched::Task` is already the degenerate async task of the one engine, so preserve it; do not flatten it
+> to a synchronous/linear rewrite. (A 3c-2 flattening of StressTask/SignatureTask to linear functions was
+> such a rewrite and is being reverted to the task form.)
+
 ## Context
 Two MSP430 firmwares drive their work differently: **diag** uses the `sched` crate
 (`Task::poll(&mut self, cx, now) -> Option<u32>`, `Slot::every`, `tick`), **prod** hand-rolls a

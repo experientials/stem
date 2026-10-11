@@ -117,6 +117,54 @@ impl Oled {
         }
         Ok(c)
     }
+
+    /// Fill every pixel with `byte` (0x00 = off, 0xFF = on) — the boot self-test's "driver works" flash.
+    pub fn fill<I: I2c>(&self, bus: &mut I, byte: u8) -> Result<(), Error<I::Error>> {
+        let mut buf = [byte; 129];
+        buf[0] = DATA; // control byte, not pixel data
+        let n = 1 + self.p.width as usize;
+        for page in 0..self.p.pages {
+            self.window(bus, page, 0, self.p.width - 1)?;
+            bus.write(self.p.addr, &buf[..n])?;
+        }
+        Ok(())
+    }
+
+    /// Blank from `col` to the end of `page` — wipe a variable-width line's tail so a shrinking value
+    /// can't leave stale glyphs behind.
+    pub fn clear_eol<I: I2c>(&self, bus: &mut I, page: u8, col: u8) -> Result<(), Error<I::Error>> {
+        if col >= self.p.width {
+            return Ok(());
+        }
+        self.window(bus, page, col, self.p.width - 1)?;
+        let mut b = [0u8; 129];
+        b[0] = DATA;
+        let n = 1 + (self.p.width - col) as usize;
+        bus.write(self.p.addr, &b[..n])?;
+        Ok(())
+    }
+
+    /// Render `v` in decimal (no leading zeros) at (page, col); returns the next free column.
+    pub fn num<I: I2c>(&self, bus: &mut I, page: u8, col: u8, v: u32) -> Result<u8, Error<I::Error>> {
+        let mut tmp = [0u8; 10];
+        let mut n = 0usize;
+        let mut val = v;
+        if val == 0 {
+            tmp[0] = b'0';
+            n = 1;
+        }
+        while val > 0 {
+            tmp[n] = b'0' + (val % 10) as u8;
+            val /= 10;
+            n += 1;
+        }
+        let mut s = [0u8; 10]; // reverse (digits were emitted least-significant first)
+        for i in 0..n {
+            s[i] = tmp[n - 1 - i];
+        }
+        let st = core::str::from_utf8(&s[..n]).unwrap_or("");
+        self.text(bus, page, col, st)
+    }
 }
 
 // 5×7 font (column-major, bit0 = top row). Standard glcdfont values; unmapped renders blank.

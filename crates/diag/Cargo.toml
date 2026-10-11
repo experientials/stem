@@ -22,3 +22,6 @@ devices = { path = "../devices" }
 stem-node = { path = "../stem-node" }
 # Leaf sensor-bus enumeration (scan + report) — the I2C device inventory the extended POST prints.
 leaf-scan = { path = "../leaf-scan" }
+# The cooperative executor the diag harness tasks run under (Task/Slot/tick) — the SAME engine prod uses
+# (ADR-0013: a sched::Task is the degenerate async task of the one engine).
+sched = { path = "../sched" }

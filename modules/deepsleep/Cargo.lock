@@ -64,6 +64,7 @@ dependencies = [
  "leaf-scan",
  "msp430",
  "node-hal",
+ "sched",
  "stem-node",
  "stembus",
 ]
