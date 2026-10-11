@@ -1,0 +1,53 @@
+[package]
+name = "expander"
+version = "0.1.0"
+edition = "2021"
+description = "bob-929 FR2433 I/O EXPANDER firmware (Rust) — single-I²C slave-only Stembus node, cros_ec-only command face. Extracted from prod/ (STEM-DIRECTION Repo-layout reorg S2a)."
+
+# SINGLE-CHIP binary: FR2433 only (the cheap, well-stocked single-I²C slave-only expander). Unlike prod/
+# (the dual-I²C family axis), this module carries ONE chip — chip/arch is bound by crate composition, not
+# a family if-ladder (STEM-DIRECTION "Repo layout" item 3). cros_ec is the ONLY command interface
+# (COMMANDS.md §0 — the regmap slave was removed): `stem-node` compiles its cros_ec ec/node surface
+# unconditionally, so there is NO `cros_ec` feature to toggle.
+[features]
+default = ["fr2433", "console", "mode-passive"]
+# Chip/family feature: selects the PAC + memory map (build.rs) and the device vector table for the
+# eUSCI_B0 slave wake ISR (deepsleep LPM). `bsp/rt` + `msp430-rt/device` give the real vector table.
+fr2433 = ["bsp/fr2433", "stem-node/fr2433", "bsp/rt", "msp430-rt/device"]
+# `console` — dev-only UART logging (version + per-sector FRAM checksums). OFF = silent production image.
+console = ["stem-node/console"]
+# `debug` — verbose build (implies console): the boot status dump.
+debug = ["console", "stem-node/debug"]
+# Operating mode — FR2433 is Passive-only (no 2nd I²C → no sensor master → no Sensing mode).
+mode-passive = []  # LOCAL marker for the Passive-only compile_error guard (stem-node has no mode features)
+
+[dependencies]
+msp430 = "0.4"
+msp430-rt = "0.4"
+panic-msp430 = "0.4"
+# Shared low-level layer: chip-select PAC alias, board semantic map, hal I2c seam, stem_i2c transport.
+bsp = { path = "../../crates/bsp" }
+# Host-clean hardware-seam traits + `ChipId`.
+node-hal = { path = "../../crates/node-hal" }
+# Cooperative executor (run_pended + Pender for the LPM wake path).
+sched = { path = "../../crates/sched" }
+# Stem-bus wire contract + command vocabulary (role addr, cros_ec framer, WakeReason).
+stembus = { path = "../../crates/stembus" }
+# Shared per-device drivers (transitive via stem-node; kept to mirror the dep set).
+devices = { path = "../../crates/devices" }
+# The shared Stembus-node control surface. cros_ec (ec/node + the postcard codec) is now UNCONDITIONAL in
+# stem-node — there is no `cros_ec` feature to request; it's the sole command interface (COMMANDS.md §0).
+stem-node = { path = "../../crates/stem-node" }
+
+# opt-level "s" + LTO: size wins over speed (the FR2433 15 KB FRAM budget is the point). The gate
+# (`just expander build`) fails if the footprint exceeds that budget.
+[profile.release]
+opt-level = "s"
+lto = true
+# Keep DWARF symbols: non-loadable .debug_* sections, so they do NOT count against the FRAM/SRAM budget.
+debug = true
+
+# Fast-iteration profile: same size-opt, NO LTO, for a quicker edit→flash loop. May exceed the budget.
+[profile.fast]
+inherits = "release"
+lto = false

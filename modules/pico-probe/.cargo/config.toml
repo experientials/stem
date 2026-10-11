@@ -1,0 +1,7 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+# `cargo run` flashes via picotool (board must be in BOOTSEL). No debug probe needed.
+# picotool loads the ELF directly (-t elf), -x executes after load.
+[target.thumbv6m-none-eabi]
+runner = "picotool load -x -t elf"

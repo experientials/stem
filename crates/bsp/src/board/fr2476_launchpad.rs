@@ -42,6 +42,15 @@ pub fn route_console_uart_pins(p: &Peripherals) {
     p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | P1_UART_PINS) }); // SEL0=1
 }
 
+// Stem-I²C (slave uplink) pins: UCB1 on P3.2(SDA)/P3.6(SCL), SEL1:SEL0 = 01. Chip-specific — the
+// UCB1↔pin mux is NOT uniform across the family (verified per-datasheet: FR2476 ds p67 port-select).
+// Clear SEL1 explicitly so we never depend on reset state. Called from `bsp::stem_i2c::init`.
+const P3_STEM_I2C_PINS: u8 = 0x44; // BIT2 (P3.2=UCB1SDA) | BIT6 (P3.6=UCB1SCL)
+pub fn route_stem_i2c_pins(p: &Peripherals) {
+    p.p3.p3sel1().modify(|r, w| unsafe { w.bits(r.bits() & !P3_STEM_I2C_PINS) }); // SEL1=0
+    p.p3.p3sel0().modify(|r, w| unsafe { w.bits(r.bits() | P3_STEM_I2C_PINS) }); // SEL0=1
+}
+
 // Console UART = eUSCI_A0, 9600 8N1 @ 1 MHz SMCLK (the FR2476 LaunchPad backchannel).
 const UCSWRST: u16 = 0x0001;
 const UCSSEL_SMCLK: u16 = 0x0080;

@@ -27,6 +27,14 @@ const NO_ID: u8 = 0xFF;
 // Later this becomes a per-product (Bob/Ziloo) manifest for config-drift checking.
 static DEVICES: &[Dev] = &[
     Dev { name: "SSD1306 OLED  ", addr: 0x3C, id_reg: NO_ID, id_val: 0x00 },
+    // MCP23017 16-bit I²C I/O expander (ports A/B). Default base address 0x20 (A2:A0 straps → 0x20–0x27)
+    // — which COLLIDES with the Stem Supervisor role address, so an address-only hit here is ambiguous.
+    // The MCP23017 has NO WHO_AM_I register (Microchip gives none), so this is NOT a true id check: it
+    // reads IODIRA (reg 0x00), whose power-on reset value is 0xFF (all pins inputs). That is a POST-time
+    // signature — valid on a freshly-reset board, BEFORE anything configures the expander (once driven,
+    // IODIRA changes and this would read MISMATCH). It still beats a bare ACK: it proves a register-based
+    // expander answers reg 0x00, not just that *something* sits at 0x20.
+    Dev { name: "MCP23017 I/O  ", addr: 0x20, id_reg: 0x00, id_val: 0xFF },
     Dev { name: "VL53L0X ToF   ", addr: 0x29, id_reg: 0xC0, id_val: 0xEE },
     Dev { name: "APDS-9960     ", addr: 0x39, id_reg: 0x92, id_val: 0xAB },
     // 6DOF IMU 13 Click (MIKROE-4228) is an mCube MC6470 eCompass — accel + magnetometer as two

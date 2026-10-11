@@ -1,0 +1,39 @@
+[package]
+name = "stem-node"
+version = "0.1.0"
+edition = "2021"
+description = "The shared Stembus-node control surface: the cros_ec serve + command dispatch (ec/node), the slave transport bring-up (stem), boot self-test (post), and identity/status reporting (status). What EVERY Stembus node does to serve its (cros_ec) control surface and report identity/health — consumed by modules/deepsleep AND modules/expander. Generic over node-hal seams (PAC-free)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The Stem-bus wire vocabulary (role/crc constants, mode codes) + the cros_ec framing + the postcard
+# command codec. `postcard` is UNCONDITIONAL now: cros_ec (ec/node) is the sole command surface, so the
+# codec is always needed (the old regmap slave that had no postcard dep is gone).
+stembus = { path = "../stembus", features = ["postcard"] }
+# Host-clean hardware-seam traits the `stem`/`ec` dispatch is generic over (StemSlave/GpioBanks/LeafMaster
+# + SlaveEvent) — so no module names a concrete PAC. The MSP430 impl is `bsp::StemHw`, wired by the bin.
+node-hal = { path = "../node-hal" }
+# The cooperative/async executor (ADR-0013): the `ec`/`stem` serve paths integrate with it.
+sched = { path = "../sched" }
+# `status` reports the known-present sensor bitmap over `devices::KNOWN`.
+devices = { path = "../devices" }
+# OPTIONAL: `status` (on `_dual` nodes) reports the Leaf scan result (`leaf_scan::Scan`). Pulled in ONLY
+# when `_dual` is set — a slave-only node (expander) reports no scan, so it never links leaf-scan.
+leaf-scan = { path = "../leaf-scan", optional = true }
+
+[features]
+# Chip-select PLAIN cfg markers (as in the old crate): used only for this crate's own internal `#[cfg]`
+# (e.g. `stem.rs` dual-vs-fr2433 `read_ip`, console loopback hints). They do NOT forward to bsp — the bin
+# selects the PAC via its own bsp edge.
+fr2476 = []
+fr2355 = []
+fr2155 = []
+fr2433 = []
+# Dual-I²C marker — the node masters a Leaf sensor bus, so `status` reports a scan → pull in leaf-scan.
+# A slave-only (fr2433) node never sets this.
+_dual = ["dep:leaf-scan"]
+# `console` = UART report paths; `debug` = extra diagnostics (implies console).
+console = []
+debug = ["console"]
+# (The `cros_ec` feature was removed with the regmap drop — cros_ec is now the ONLY command surface, so
+# `ec`/`node` are always compiled and `stembus/postcard` is an unconditional dep above. COMMANDS.md §0.)

@@ -47,6 +47,24 @@ status**. Check the box when done. Keep newest context at the top of each item.
 
 ---
 
+- [ ] **BUG-5 · FR2355 Leaf `read_reg` fails on a device the probe ACKs (marginal pull-ups?)** — *low (bench/electrical; not blocking)*
+  - Evidence (2026-10-06, MCP23017 I/O expander @0x20 on the FR2355 Leaf, 5.6 kΩ pull-ups): the address
+    **probe ACKs** (`I2C scan: 0x20`, inventory `present`) but `read_reg(0x20, 0x00)` (IODIRA) returns
+    `false` → `id-read FAILED`. A **transaction** failure (NACK/timeout mid-sequence), not an `id=XX
+    MISMATCH`.
+  - Likely cause: NOT the code — `i2c.rs` is shared `bsp` and the same `read_reg` is proven on **FR2476**
+    (VL53L0X WHO_AM_I-style reads + ranging, 2026-10-06). `read_reg` does a **repeated-START read** with a
+    master-TX→slave-TX turnaround, far more rise-time-demanding than a bare address probe — so weak 5.6 kΩ
+    pull-ups into the bus capacitance ACK the probe but fail the read. Consistent with the long-open FR2355
+    Leaf electrical root-trigger (see [[i2c-scl-low-wedge-recovery]]).
+  - Confirm (A/B): move the MCP23017 to the **FR2476 Leaf** (clean bus) OR fit **2.2 kΩ** pull-ups on the
+    FR2355 Leaf and re-run. `id=FF OK` on the stronger bus confirms electrical AND closes the FR2355 Leaf
+    root-cause with a concrete reproduction. (MCP23017 added to diag's `DEVICES` manifest @0x20 with IODIRA
+    POR=0xFF as a POST-time signature — recognition works; only the read is unconfirmed on this bench.)
+  - Optional aid: finer-grained `read_reg` logging (which phase NACKs) — hold until the pull-up test.
+
+---
+
 - [x] **BUG-4 · prod `model.rs` FR2355 id was a placeholder → false "WRONG-FAMILY FLASH"** — *FIXED
   2026-09-30*. `DEVICE_ID_FR2355 = 0x830C` (was placeholder `0xF235`); FR2476 `0x832A` / FR2433 `0x8240`
   were already correct. Verified on hardware: FR2355 now boots `(FR2355)`, no wrong-family warning,
@@ -54,25 +72,45 @@ status**. Check the box when done. Keep newest context at the top of each item.
 
 ## Convergence / tech-debt — from the diag/prod → bsp work (STEM-DIRECTION.md)
 
-- [ ] **CONV-1 · prod `clock.rs`/`uart.rs` → `bsp::board`** — *medium · DESIGN-GATED (not short-term)* · [GitHub #5](https://github.com/experientials/stem/issues/5)
-  - The hal/i2c fork is eliminated (both use `bsp`), but prod still has its own family-generic
-    `clock.rs`/`uart.rs`. Folding them into `bsp::board` is **not just effort** — it embeds a design
-    decision: prod uses **runtime model-detect + pin-map** (`model.rs`, one image per family) vs
-    `bsp::board`'s **compile-time per-`<chip>_<module>`**; and prod targets the **product PCB** while
-    `board` has only LaunchPad modules. Decide the board-layer philosophy first (see #5).
+- [x] **CONV-1 · prod `clock.rs`/`uart.rs` → `bsp::board`** — *DONE 2026-10-06 ([ADR-0014](adr/0014-board-layer-structure.md))* · [GitHub #5](https://github.com/experientials/stem/issues/5)
+  - Gate resolved by ADR-0014 (complementary axes: `bsp::board` = compile-time family, `bsp::model` =
+    runtime member; LaunchPad modules serve as product-board modules until a product PCB exists), then:
+    - [x] **clock:** prod/`clock.rs` deleted; run_dual + run_fr24xx call `bsp::board::clock_init_1mhz`
+      (b9ef0e2). New fr2433 board module carries the factory-trim init.
+    - [x] **uart:** formatters moved to `bsp::fmt` (shared, one copy — 5a246b6); the fr2433 console
+      folded into `bsp::board::fr2433_launchpad` (b9ef0e2); both `uart.rs` collapse to
+      `pub use bsp::fmt::*` + init/rx/getc board delegates. HW-verified @fr2433.
+  - **Unblocked by this:** the **`deepsleep` extraction** (Stem slave CONV-3, `mode`/`status`/`post`
+    lift, Leaf-scan convergence) — **full plan: [DEEPSLEEP-EXTRACTION.md](DEEPSLEEP-EXTRACTION.md)**
+    (derives from ADR-0014).
 - [ ] **CONV-2 · `bootrec.rs` de-hardcode** — *low (dormant); PAC import DONE, full agnosticism open*
   - DONE 2026-09-30: `diag/src/bootrec.rs` now uses `crate::pac::Peripherals` (via diag's bsp re-export),
     not the hardcoded `msp430fr2355`. Not build-exercised (still `mod`-undeclared/dormant).
   - Still open: making it *truly* chip-agnostic — its snapshot fields assume the fr2355 board
     (UCA1 ctlw0, p4sel0). Finish when it's actually wired in.
-- [ ] **CONV-3 · Stem-I²C slave in `bsp::board`** — *feature (prod milestone)* · [GitHub #2](https://github.com/experientials/stem/issues/2)
-  - Add the slave/target uplink (`stem_i2c`) role; needs a non-embedded-hal target abstraction.
+- [ ] **CONV-3 · Stem-I²C slave driver + dispatch split** — *feature (prod milestone)* · [GitHub #2](https://github.com/experientials/stem/issues/2) · **plan: [DEEPSLEEP-EXTRACTION.md §A](DEEPSLEEP-EXTRACTION.md)**
+  - Split `stem.rs`: slave **driver + ISR → `bsp/src/stem_i2c.rs`** (sibling to `i2c.rs`, event seam),
+    **pins → `board`**, **dispatch → `deepsleep`** (async over `SlaveEvent`). Non-embedded-hal target;
+    interrupt-driven + LPM. See the plan for the event-seam decision and the wake model.
+- [ ] **Command surface (Phase 2) — the COMMON cross-MCU control API (`postcard` over I²C + UART) + firmware
+  patches** — *feature; design captured, build later* · **overview: [COMMANDS.md](COMMANDS.md)** (regmap +
+  role addressing: [I2C-API.md](../I2C-API.md); MSP430 impl: [DEEPSLEEP-EXTRACTION.md](DEEPSLEEP-EXTRACTION.md) §2/§A)
+  - The SoM masters TWO buses (Henrik 2026-10-06): a **sensor bus** (sensors + MSP-passive-slave) and a
+    **control bus** for the MCUs. On the control bus, ALL MCU modules (deepsleep/lowvision/bluetooth) speak
+    ONE common `stembus::Command` API — `postcard`-serialized; I²C transaction (`START…STOP`) frames it for
+    free, UART needs COBS. **Firmware patches ride this bus** (streamed; MSP→host BSL reflash, see
+    `msp-fw-ota-host-root-of-trust`). **PCA9698-emulation is optional per-module compat, NOT the common
+    denominator** (doubtful all MCUs support it) — where a module opts in, the CMD/RESP stream port lives in
+    the 0x30–0x3F window so the stock `gpio-pca953x` driver keeps 0x00–0x1F untouched. Rides the proven 1b
+    `next_event()` seam (accumulate `Rx` → decode on `Stop`). Full design + caveats + port addresses in §2a.
 - [x] **CONV-6 · fr24xx (FR2433) I²C-SLAVE / regmap surface — the node's real role** — *DONE (boot-
   verified) 2026-09-30; physical GPIO/ADC backing + master-reads-slave proof still open*
   - Built the fr24xx node's whole job: answer the SoM's PCA9698-emulation register file on the single
     eUSCI_B0 (UCB0). Reused the chip-agnostic contract WHOLESALE — `regmap.rs` unchanged; `RegFile`/
     `Slave`/`poll` in `stem.rs` unchanged. Only the peripheral seam differs, isolated in a new cfg-split
     `stem::hw` module: DUAL → `e_usci_b1`/`ucb1*`/P3.2-6 (unchanged); fr24xx → `usci_b0_i2c_mode`/`ucb0*`
+    *(correction 2026-10-01: "P3.2-6" holds only for FR247x; the dual path was later chip-split —
+    FR23xx/FR21xx UCB1 = P4.6/P4.7 via `_stem_p3`/`_stem_p4`. See stem.rs.)*
     (IFG = `ucb0ifg_i2c`, mode-split PAC) / P1.2-3. `status.rs` decoupled from the sensor scan
     (`from_scan` gated `_dual`; `booted`/`read_reg`/`dump` shared). `run_fr24xx` now: detect → booted+
     Passive status → `stem::init` (UCB0 slave @0x20) → print-once banner+dump (console) → serve loop.
@@ -149,6 +187,21 @@ status**. Check the box when done. Keep newest context at the top of each item.
   register values match source exactly. See `diag/proofs/console-fr2355.log`.
 
 ---
+
+## stem-probe (RP2040 bench host) — sniffer bring-up (2026-10-04)
+
+- [ ] **PROBE-1 · measure the Pico console-logging transfer speed** — *medium · perf/observability* —
+  Henrik 2026-10-04: measure the end-to-end throughput of how we LOG the Pico's console output (the
+  `sniff`/`taps` decoded frames over USB-CDC → `thepia hwd console`). Motivation: during sniffer
+  bring-up the decoded-frame output felt slow, and a slow/bottlenecked log path risks masking or
+  truncating results. Measure: (a) firmware-side CDC write throughput (bytes/s the
+  `write_packet` loop sustains in 64-byte chunks), (b) `hwd console tail`/`interact` readback rate,
+  and (c) whether either drops bytes under a full 512-event dump. Decide if we need batched writes /
+  a bigger CDC buffer / a terser frame format. NOTE: already confirmed NOT the cause of the truncated
+  FR2355 captures (the firmware's own `sniff:` summary counts the decode, independent of the log path).
+  - Evidence to date: `i2c_sniff` is a self-contained portable core (`debug/stem-probe/src/i2c_sniff.rs`);
+    `sniff <sda> <scl> [ms]` + `taps` added to stem-probe. See the FR2355 LESSONS for the capture-timing
+    gotchas that surfaced this.
 
 ## External — thepia `hwd` (report upstream, not fixed here)
 

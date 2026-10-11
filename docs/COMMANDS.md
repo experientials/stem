@@ -1,0 +1,766 @@
+# Command system across MCUs
+
+**Status:** DESIGN (the first implementation is Phase 2 of [DEEPSLEEP-EXTRACTION.md](DEEPSLEEP-EXTRACTION.md),
+on the MSP430 `deepsleep` module). This doc is the **cross-MCU overview** — the common command interface
+every MCU module (MSP430 `deepsleep`, future `lowvision`, `bluetooth`, …) exposes to the SoM/M7. Register
+map + role addressing live in [`I2C-API.md`](../I2C-API.md) (the transport contract); this is the command
+*model* layered on it.
+
+## 0. Direction update (2026-10-07): ChromeOS EC protocol, not PCA9698, for Linux leverage
+> (Henrik 2026-10-07) I found out that ChromeOS has already solved the Linux I2C communication protocol
+> for MCUs. This means that Supporting PCA9698 on the Stem bus is no longer the best solution for
+> leveraging existing Linux driver support.
+
+The **ChromeOS EC host-command protocol (`cros_ec`)** is the Linux-standard way a host talks to an MCU
+("EC") over I²C/SPI — a far richer leverage point than PCA9698's GPIO-only `gpio-pca953x`:
+- **Mature Linux stack:** `drivers/mfd/cros_ec` + `cros_ec_i2c` → `/dev/cros_ec` + sub-drivers (GPIO,
+  sensors via IIO, PWM, I²C-passthrough, …) + the `ectool` userland.
+- **Firmware update built in:** `ectool` reads/writes EC flash over host commands while the OS runs — our
+  "receive firmware patches" requirement WITH host tooling (PCA9698 offered nothing here).
+- **Fits our slave:** protocol v3 = a request/response packet (`ec_host_request`: struct_version=3,
+  checksum [all bytes sum to 0], command, command_version, data_len; `ec_host_response`: result, data_len,
+  checksum). On I²C the **EC clock-stretches until the response is ready** — which our MSP430 eUSCI slave
+  does natively (slau445i §24.3) — and returns filler `0xEC` on over-reads. A Linux host binds via
+  `EC_CMD_GET_PROTOCOL_INFO` / `EC_CMD_HELLO` / `EC_CMD_GET_CMD_VERSIONS`; a reserved board-specific
+  command range carries our own semantics.
+
+**Supersedes PCA9698 as the Linux-leverage path** (§4 is now legacy/narrow). It very likely **also
+supersedes the bespoke `postcard` control-bus protocol (§1)**: if every MCU is a `cros_ec` "EC", *that*
+is the common command API — standard commands bind standard Linux sub-drivers for free; vendor commands
+carry our semantics. `postcard` may survive only for MCU↔MCU / non-Linux links, or as a vendor-command
+payload encoding — TBD.
+
+**Open decisions (this is a protocol PIVOT, not a drop-in — for Henrik):**
+1. **How much cros_ec?** (a) standard commands mapped onto our GPIO/sensor/mode semantics → maximal Linux
+   sub-driver leverage; (b) cros_ec as transport + mostly vendor commands → channel + ectool + firmware,
+   less sub-driver leverage; (c) keep `postcard`, use cros_ec only where Linux leverage is wanted.
+2. **FR2433 fit (15 KB):** a MINIMAL cros_ec EC (v3 packet + checksum + the 3 baseline commands + a few
+   of ours) — measure; the protocol core is small, the command *set* is what grows. We implement a
+   subset, not the full ChromeOS EC OS.
+3. **Who masters which bus?** (TENTATIVE, Henrik 2026-10-07): **Linux (A-core) masters the Stem/control
+   bus, M7 masters the Leaf/sensor bus** — *"not certain; depends on how often Linux is suspended."* If
+   that holds it's the GOOD case for cros_ec (Linux drives the command bus → leverage applies; Leaf stays
+   the M7's non-Linux domain → postcard/bespoke). The real driver is **Linux suspend frequency**: if Linux
+   is often down, the Stem bus may need a **when-suspended secondary master** (M7, or the PD controller —
+   `I2C-API.md`'s existing "SoM-off master"), making Stem **multi-master**; cros_ec then helps only the
+   Linux master, the secondary reimplements the protocol. So this is a **power-architecture decision
+   upstream of the protocol choice** — keep both open together.
+4. **`postcard`'s fate** (per the above).
+
+Sources: [AP↔EC comm protocol](https://chromium.googlesource.com/chromiumos/platform/ec/+/HEAD/docs/ap-ec-comm.md) ·
+[cros_ec_i2c driver](https://codebrowser.dev/linux/linux/drivers/platform/chrome/cros_ec_i2c.c.html) ·
+[Chromium EC README](https://chromium.googlesource.com/chromiumos/platform/ec/+/HEAD/README.md) ·
+[(Ab)using Google's Chromium EC (FOSDEM'17)](https://mfischer.github.io/fosdem17-slides/).
+
+### Cross-platform support → ONE vocabulary, per-link ENCODING (Henrik 2026-10-07)
+> It likely pushes out postcard, but it can still be relevant for sending commands between two Rust
+> firmwares, unless the protocols are supported on macOS, iOS, MSP430, Windows, etc
+
+Checked (sources below): cros_ec is **native on Linux only**; Windows/macOS are niche community tools
+(CrosEC / coolstar `croseci2c`), iOS has nothing, the Rust host crate (`crosec-rs`) is WIP/unpublished,
+and on the MCU (MSP430/RP2040) we **implement** the EC side ourselves regardless. `postcard` is the
+inverse: native Rust↔Rust, a lib-port everywhere else. So neither is universal → **don't force one wire
+format everywhere, and don't lock the choice now.**
+
+> **Decision DEFERRED (Henrik 2026-10-07):** *"keep options open and see where implementation ends [up]."*
+> cros_ec / postcard / PCA9698 are candidate wire faces, not a settled pick — implementation reveals which
+> pays off per link. What keeps this cheap is the decoupling below: design the **command semantics** (the
+> `stembus` vocabulary + each module's `execute`) INDEPENDENT of the wire encoding, so a face can be
+> added/swapped late without touching the command set (the transport↔dispatch↔state layering,
+> `references/firmware-architecture.md` §9 — the anti-lock-in move).
+
+Working guidance (NOT locked):
+- **ONE command vocabulary** (the semantic `Command` set in `stembus`) with **per-link encodings**:
+  - **cros_ec host-command framing** on the **Linux control bus** — leverage the kernel stack + `ectool`
+    + firmware update (only pays off if the master is Linux — the open question in §0);
+  - **`postcard`** for **Rust↔Rust** MCU links (both ends ours → no ecosystem needed; cros_ec would be
+    dead weight there).
+- The **phone/app side (iOS/macOS/Windows)** is almost certainly a **separate channel — BLE via the
+  bluetooth module** with its own (GATT) protocol — so NEITHER cros_ec nor postcard is turn-key there and
+  it does **not** drive this choice. (Confirm the app channel.)
+
+Extra sources: [crosec-rs (Rust)](https://github.com/FyraLabs/crosec-rs) · [framework-ec / ectool ports](https://github.com/DHowett/framework-ec).
+
+### Constraint: the Linux side MUST be Yocto-buildable (Henrik 2026-10-07)
+The i.MX8 SoM image is a **Yocto/OpenEmbedded** build, so whatever Linux-side command stack we pick must
+express as **kernel config + device-tree + a userland recipe** — no out-of-tree hacks. How the candidates
+map (another reason to keep the choice open until we try it):
+- **cros_ec — YES, available on Yocto (verified 2026-10-07), the lightest integration:**
+  - **Kernel:** the drivers are **mainline** (`CONFIG_CHROME_PLATFORMS`, `CONFIG_MFD_CROS_EC_DEV`,
+    `CONFIG_CROS_EC_I2C`, + IIO/GPIO sub-drivers) → just a **kernel-config fragment** in the `linux-*`
+    recipe + a **DT node** on the SoM I²C bus (`compatible = "google,cros-ec-i2c"`). **No custom driver,
+    no special layer** for the kernel side.
+  - **Userland:** the community **`meta-chromebook`** layer ships an **`ectool-chromium`** recipe (ectool +
+    EC modules) — a ready path; or build `crosec-rs` via `cargo.bbclass`. (fwupd also has ChromeOS-EC
+    support if we want managed firmware update.)
+  - **Age/version:** cros_ec has been **mainline since Linux 3.10** (2013; in `drivers/mfd/`), **moved to
+    `drivers/platform/chrome/` in 4.19** (2018). **Yocto Dunfell 3.1 = kernel 5.4** (Apr 2020), so a
+    **~5-year-old Yocto already has the driver** — no Yocto migration needed *just* for cros_ec; it's a
+    kconfig fragment + DT node on that kernel.
+  - **⚠️ Verify on OUR kernel:** the i.MX8 build usually rides NXP's **`linux-imx`** (meta-imx), which can
+    trail mainline — confirm that version carries `drivers/platform/chrome` + `CONFIG_CROS_EC_I2C` + the DT
+    binding (present-but-disabled is the likely state → enable via fragment). The **userland recipe**
+    (`meta-chromebook`/`ectool-chromium`) may need porting to an old release — vet/vendor it. Note a
+    5-yr-old Yocto (Dunfell) is **community-EOL** (~2024) — migrating may be worth it for security/support
+    *regardless* of cros_ec, but that's a separate decision, not forced by this.
+- **postcard / bespoke on Linux — needs a userland recipe + the Yocto Rust toolchain** (`cargo.bbclass`,
+  `meta-rust`-style), and a raw-I²C userland path (`i2c-dev`), with NO kernel sub-driver leverage (we'd
+  write the host client). Heavier to own, lighter on kernel.
+- **Either way:** confirm the SoM I²C controller + the MCU slave address are in the DT, and that the build
+  layer has Rust support if a Rust userland tool is chosen. Prove a minimal recipe early (hello-EC over
+  `/dev/cros_ec`, or a raw-`i2c-dev` postcard ping) so the packaging path is de-risked before committing.
+
+### Decision (Henrik 2026-10-07): follow the cros_ec standard, carry OUR commands as postcard
+> So cros_ec is not packed struct, it is whatever the command consumer specifies, and the client app
+> must comply. […] We follow the standard, but implement our commands with postcard. Wrapped in COBS
+> when we do it over UART.
+
+This **resolves open decisions #1 and #4** above. The split:
+
+- **Follow the cros_ec standard for the framing + a tiny baseline of standard commands.** The outer
+  envelope is fixed and non-negotiable — v3 `ec_host_request`/`ec_host_response` headers + the byte-sum
+  checksum, and on I²C the `cros_ec_i2c` wrapper (leading length byte, clock-stretch while the EC
+  computes). Only the **payload** (`data[]`) layout is consumer-defined. On top of that framing we
+  implement **just three standard commands** as their exact `ec_commands.h` packed structs:
+  `EC_CMD_HELLO` (0x0001), `EC_CMD_GET_VERSION` (0x0002), `EC_CMD_GET_BUILD_INFO` (0x0004) *(optionally
+  `EC_CMD_GET_FEATURES` 0x0D later)*. These are **trivial once the framing exists**, and they buy the
+  only real stock-driver freebies: `cat /sys/class/chromeos/cros_ec/version` and `ectool hello`/`version`
+  work with **zero client code** — a standard liveness/identity probe for free. *(There is no stock sysfs
+  node for arbitrary status or a wake/reason code — those are NOT `cat`-able without a kernel sub-driver
+  patch, so they do not belong in the standard-command set; see below.)*
+
+- **Implement all OUR commands with `postcard`, carried as the cros_ec vendor-command payload.** The
+  product-specific semantics — `Identity`, `Status`, `WakeReason`, `FramCrc`, `EventHistory`, `SetMode`,
+  `SetThreshold` (the `stembus::command` vocabulary) — ride a vendor/board command whose `data[]` is a
+  **postcard-encoded** `Command`/`Response`. postcard stays the single payload codec for everything we
+  own; the cros_ec layer provides only the standard framing + kernel channel + `ectool` + firmware update.
+  This keeps `stembus::command` the single source of truth and is why `postcard` is **kept, not dropped**
+  (reversing the §0-top "likely supersedes postcard" lean): the Python/M7 clients decode the same postcard
+  payload the MSP430 emits.
+
+- **Framing per link:** **cros_ec** on the Linux control bus (I²C); the postcard payload is framed by
+  cros_ec itself there. On **UART** (SoM↔MCU, and the firmware-update path), the postcard bytes are
+  **wrapped in COBS** for byte-framing (zero-delimited packets) — postcard's companion framing, no cros_ec
+  envelope needed on a point-to-point serial link. Rust↔Rust MCU I²C links stay bare postcard.
+  - **Why UART is the non-cros_ec link:** mainline cros_ec *does* have a UART transport
+    (`drivers/platform/chrome/cros_ec_uart.c`) but it's **new (~Linux 6.5, 2023)** — Dunfell/5.4 and a
+    trailing NXP `linux-imx` almost certainly lack it, so a stock cros_ec-UART driver isn't available to
+    us; cros_ec-over-I²C is. So UART is ours end-to-end (postcard+COBS), I²C is cros_ec. *(Verify the 6.5
+    figure against the platform/chrome git log if it becomes load-bearing.)*
+  - **BUT the UART still needs a driver anyway (Henrik 2026-10-07):** the UART-to-MCU connection is
+    **gated by I²C registers** — the same mechanism used to program and debug the MCU over a **single HOST
+    UART**. So the serial link is not free-standing: something must drive the I²C gating to route/enable
+    the UART. The COBS choice therefore buys **framing independence** (no bleeding-edge kernel driver for
+    the *wire format*), **not** a zero-driver path — a host-side driver/userland to operate the I²C gate is
+    required regardless.
+
+- **Python client = a maturin/PyO3 wheel over `stembus` (codec only; transport in Python).** FFI-build the
+  crate for the host so the wheel **is** `stembus` (no hand-mirrored vocabulary → no drift). The wheel
+  exposes `Command → bytes` / `bytes → Response` (and the cros_ec framing/COBS if wanted); **Python owns
+  the OS transport** — the `/dev/cros_ec` ioctl or raw `i2c-dev` — since that's syscall territory outside
+  the crate's transport-injection seam. Cost acknowledged: a compiled native artifact (per-platform wheels
+  + maturin in CI), not a drop-in `.py`. Because the codec is the crate itself, the postcard payload needs
+  **no** Python port — it just works, which is what removed the last argument for standard structs on the
+  rich data.
+
+**Net:** standard cros_ec framing + 3 standard commands (sysfs/ectool freebie) · everything
+product-specific = vendor command with a postcard payload · COBS-framed postcard over UART · Python client
+= PyO3 wheel over `stembus`. Open decision #2 (FR2433 fit) and #3 (bus mastership) remain open.
+
+### First milestone — thinnest cros_ec slice over I²C on FR2433 + Pico ✅ ACHIEVED 2026-10-08 (CANONICAL — verbatim, Henrik 2026-10-07)
+> One milestone I would like to reach i to have the thinnest slice of cros_ec API supported over I2C on
+> FR2433 and Pico
+>
+> I would also want stem-probe codebase to use crates whenever possible
+
+**ACHIEVED on hardware (2026-10-08)** — `@fr2433` (cros_ec EC-slave firmware) ↔ Pico (`stem-probe` master),
+both calling the shared `stembus::cros_ec` codec:
+```
+cros_ec HELLO @0x22              in=A5A51234 out=A6A71538  PASS   (out == in + 0x01020304)
+cros_ec GET_PROTOCOL_INFO @0x22  versions=0x00000008 max_req=40 max_resp=40  PASS (v3)
+```
+`EcSlave` framer (pure, host-tested 23/23) + `deepsleep::ec` glue + prod `--features cros_ec`
+(`just build fr2433 --cros-ec`; image 4244/15360 B FRAM). The HELLO PASS also proves the board is
+*running* the cros_ec build (regmap firmware at 0x22 cannot produce a valid cros_ec reply) and that it
+wakes from LPM on the eUSCI_B0 slave ISR. **Still deferred** (the honest limit): a *real Linux `cros_ec`
+driver* binding on the SoM (DT node + kconfig) — the Pico proves our framing against our own master, not
+the kernel. `HELLO` + `GET_PROTOCOL_INFO` are exactly the handshake that binding performs, so it's unblocked.
+
+**Derivation (subordinate to the verbatim block).** First end-to-end cros_ec target, chosen to prove the
+*protocol skeleton* on real hardware at minimum cost — **before** any SoM/Yocto/Linux-driver involvement:
+
+- **Scope = the thinnest meaningful slice: a single `EC_CMD_HELLO` (0x0001) round-trip** over cros_ec-I²C
+  framing. HELLO (echo `in_data + 0x01020304`) exercises the *entire* skeleton at once — v3
+  request/response framing, the byte-sum checksum, and I²C clock-stretch — with the simplest possible
+  payload. Add `EC_CMD_GET_VERSION` (0x0002) / `EC_CMD_GET_BUILD_INFO` (0x0004) next (the sysfs/ectool
+  freebie), then the first vendor+postcard command. Don't pull more of `ec_commands.h` than the slice needs.
+  **Exact wire framing + command numbers: `references/cros-ec-wire-framing.md`** (local verbatim capture —
+  do not re-derive from memory; that's how `HELLO`'s number was first miswritten as 0x00).
+- **Ends:** **FR2433** = the EC *slave* (`prod`/`deepsleep`, UCB0 Stem-slave, the 15 KB target part);
+  **Pico** (`debug/stem-probe`, RP2040 master) = the host stand-in, driving the cros_ec-I²C *master*
+  framing in Rust. Both ends ours, both Rust, both over the real Stem bus (the proven stem-probe path — no
+  jumpers/SoM).
+- **stem-probe uses the shared crates (Henrik directive above):** the Pico master must get cros_ec framing
+  + the `Command`/`Response` vocabulary from **`stembus`** (which already compiles for `thumbv6m` and which
+  stem-probe already depends on for `regmap`/`role`), **not** a hand-rolled copy. One codec crate, two ends
+  — the same bytes the FR2433 decodes. This is the whole point of `stembus` being target-agnostic; extend
+  that usage, don't fork it.
+- **What this milestone forces to exist** (and thereby de-risks): (1) the deferred **cros_ec-I²C framing
+  codec** in `stembus` (encode/decode `ec_host_request`/`ec_host_response` + checksum) — at least the HELLO
+  path; (2) `deepsleep` implementing the `Node` adapter so a decoded command can be served; (3) a **real
+  FR2433 footprint measurement** for the EC core (open decision #2 — the 15 KB budget).
+- **Honest limit:** the Pico master proves our framing **against our own master**, not that the Linux
+  kernel `cros_ec` driver will bind. Kernel-binding (`EC_CMD_GET_PROTOCOL_INFO` succeeds → `/dev/cros_ec`
+  appears) is a **separate, later** validation on the SoM — necessary before claiming "cros_ec works on
+  Linux," and not covered by this slice. State it that way; don't overclaim the milestone.
+
+### Replacement plan — the CONSOLE command vocabulary (PROPOSED 2026-10-08, for Henrik)
+
+**Scope correction (Henrik 2026-10-08):** *"When I say commands, I'm talking about console commands. The
+I/O-Extender commands were never used or planned in any detail."* So this plan is about the **console
+command surfaces** — the typed operator/dev verbs — NOT the PCA9698/regmap register interface. The
+I/O-extender regmap is simply **dropped** (never used/planned in detail), not migrated; the `DBG_*`
+identity/status/CRC/mode window it also carried is the only part that survives, re-expressed as the
+commands below.
+
+**Current console command surfaces (grounded, what exists today):**
+- **(A) MSP430 `prod` UART keystroke menu** (debug builds) — `s`=scan, `r`=report, `d`=debug-regs dump,
+  `m`=switch mode, `l`=loopback self-test (`prod/src/main.rs` ~313). Already declared **throwaway**
+  (COMMANDS.md §1 build-order canonical).
+- **(B) MSP430 `diag` console menu** — the one-feature-at-a-time test driver (`diag/src/tasks.rs` getc).
+  Separate concern (a test harness, not the operator command set).
+- **(C) stem-probe (Pico) CDC console** — the bench/dev operator surface:
+  `id scan r w lscan lr sniff taps selftest vstem vleaf pass sens sound0/1 por0/1 pins boot hello proto`.
+
+**Target: ONE console vocabulary that mirrors the WIRE vocabulary.** A Developer / `thepia hwd` types the
+same verbs whether driving a board over the USB console or the command bus, because the console is a thin
+front-end that encodes the unified command (`stembus::command` over cros_ec/postcard, or a cros_ec
+standard command), issues it, and prints the `Response`. This is the "unified vocab, sections" Henrik
+asked for — now realized as: **console verb == wire command**.
+
+**Prune, don't grandfather (Henrik 2026-10-08):** *"you created the UART menus. We used them successfully,
+but you might have added commands that were never used, and never needed. All we know is that the current
+console command set has been of some value."* So the current set is **not a requirements spec** to port
+1:1 — the *set* has proven some value, individual verbs have not. The migration is the moment to **drop
+the speculative ones**.
+
+**Judge each command on implementation size vs usefulness (Henrik 2026-10-08).** The test is cost/benefit,
+not binary "was it used":
+- **cheap + any real use → keep** (a few bytes for an occasional aid is fine);
+- **expensive + marginal → drop** (the clearest gold-plating — big code for rare value);
+- **expensive + essential → keep** (pay for it deliberately);
+- **cheap + useless → drop** (low stakes, but no reason to carry it).
+
+"Expensive" is concrete here: FRAM/RAM bytes (the FR2433 15 KB budget), dispatch complexity, and the
+maintenance surface of one more wire command. So each verb gets weighed, not grandfathered. The mapping
+table marks KEEP / FOLD / **DROP?**; the `DROP?`/`?` marks are my prune candidates — confirm them.
+
+**This gate is mostly FORWARD-LOOKING (Henrik 2026-10-08):** *"The current commands are few, so this gate
+may be forward looking."* Right — with only a handful of current console verbs, building a measurement rig
+to prune them is itself over-engineering. Don't instrument the existing few; judge them by quick
+inspection and apply the real discipline to *new* commands. **And note where size actually bites:** the
+console verbs live on the **Pico (stem-probe), which is flash-rich (~2 MB)** — so their byte cost is
+nearly free; pruning there is for *clarity/clutter*, not bytes (`sniff` ~168 lines and `verify_stem` ~104
+are the largest, but the Pico affords them). The FRAM/size half of the gate bites on the **MCU
+wire-command side** (each new cros_ec/postcard command the FR2433 EC-slave must implement) — that is where
+"implementation size vs usefulness" is a hard constraint, and where the forward-looking gate matters most.
+
+**Mapping — each current console command → its replacement:**
+
+Verdicts: **KEEP** (earns its place) · **FOLD** (subsumed by a unified verb).
+**Prune settled (Henrik 2026-10-08): keep all — no drops.** Corrected premises: Leaf verbs aren't dead
+(they're meaningful where **deepsleep masters Leaf**; FR2433 simply has no Leaf), `sniff` is very useful
+on any dual-I²C, and `selftest` is near-zero-cost (required on diag; runs in POST, reduced form OK). So
+the current console set is retained; the work is FOLDING the regmap verbs into unified ones, not dropping.
+
+| Current console command | New console verb (→ wire command) | Verdict |
+|---|---|---|
+| MSP `d` (debug regs) · stem-probe `vstem` | `ident` (`Identify`) + `status` (`Status`) | FOLD |
+| MSP `m` · stem-probe `pass`/`sens` | `mode [passive\|sensing]` (`SetMode`) | FOLD |
+| MSP `s` (scan) + `r` (report) | `status` (dev_count/known) + `events` (`EventHistory`) | FOLD |
+| MSP `l` · stem-probe `selftest` | `selftest` | KEEP (Henrik: required on diag; runs in POST, reduced form OK → near-zero cost) |
+| stem-probe `hello` / `proto` | `hello` / `proto` (cros_ec standard) | KEEP — done (HW-proven) |
+| *(new)* `crc` / `thresh` | `crc [sector]` (`FramCrc`) · `thresh <id> <val>` (`SetThreshold`) | KEEP (cheap, real callers) |
+| stem-probe `r` / `w` (raw bus poke) | raw cros_ec request-builder (regmap being dropped) | WEIGH / D1 |
+| stem-probe `scan` · `boot` · `id` | kept bench-rig (Pico's own USB/bus) | KEEP (cheap, clearly used) |
+| stem-probe `sniff` | — | KEEP (Henrik: very useful on any dual-I²C) |
+| stem-probe `taps` · `pins` · `sound0/1` · `por0/1` | kept bench-rig (drive/read the Pico's sideband pins) | KEEP |
+| stem-probe `lscan` / `lr` / `vleaf` (Leaf bus) | — | KEEP — meaningful where **deepsleep masters Leaf** (dual); FR2433 just has no Leaf |
+
+**REVISED (Henrik 2026-10-09) — command INTERFACE reorganization, NO functionality removed; transport
+exposure is PER-VARIANT (diag vs prod).**
+> *"I expect you to not remove functionality, just replace the command interface. Both UART/console and
+> I2C interfaces will be implemented."*
+> *"At the very least we have commands with --diag. In prod, it can be console readonly with I2C command
+> interface."*
+
+So the regmap→cros_ec work removes NO capability — it swaps the interface and the command VOCABULARY is
+shared; which TRANSPORT exposes it is per diag/prod variant:
+- **One command vocabulary** (`stembus::command` + `execute_core`), transport-agnostic.
+- **I2C command interface** (cros_ec framing, `EcSlave` → `execute`): present in **prod AND diag**.
+- **UART/console command interface** (parser → the SAME `execute`): **diag has it** (the test-harness verbs
+  — "at the very least we have commands with --diag"). **prod MAY be console read-only** (banner + POST +
+  logging) with its commands arriving over **I2C** — read-only prod console is acceptable, not required.
+- So the ORIGINAL "console goes read-only" plan is **correct for prod**, **wrong for diag** (diag keeps the
+  console command interface). No command is dropped — every function is reachable over I2C always, and over
+  the console in diag (optionally in prod under `debug`).
+- **No capability is dropped** — every function the regmap register surface provided is **recreated** as a
+  cros_ec command reachable over both transports. What goes away is only the *regmap register-poke WAY*
+  (PCA9698 pointer + `r`/`w` on a 0x30–0x3F window), not any function.
+- **RESOLVED — GPIO is PER-ROLE, not one generic surface (Henrik 2026-10-09):**
+  > *"When we talk about GPIO-expander, I see it being a particular MCU role. We have deepsleep and
+  > expander. While deepsleep will have GPIO pins that can be toggled, they will have a known role, not a
+  > generic pin ID. The expander could simply be like an expander with pin IDs, since I don't yet know the
+  > exact purpose it will have in our product line. I just know that FR2433 would work well as a
+  > programmable I/O expander."*
+
+  So the generic pin-ID GPIO is an **EXPANDER-role capability (FR2433)**, NOT a deepsleep capability:
+  - **expander (FR2433):** a generic programmable I/O expander — cros_ec command addressing pins by
+    **generic pin ID** (read/write/direction), mirroring what the regmap banks did. Keep it **minimal**:
+    the exact product purpose is TBD, so recreate the generic read/write/config and **defer** the richer
+    semantic/topic-mapping layer (STEM-DIRECTION §"Expanders & semantic pin identity" — uid/topic/topic-pin)
+    until a purpose lands. This is its own role/capability → belongs in the future `expander` module/crate
+    (modules/msp-expander), distinct from `deepsleep`.
+  - **deepsleep (supervisor):** its GPIO pins have a **KNOWN ROLE, addressed semantically (by role), NOT a
+    generic pin ID** → a *different, future* command shape (toggle-pin-by-role), not the generic bank. The
+    regmap GPIO banks on the dual/deepsleep side were shadow (no real pins) → **simply deleted** in Rb, not
+    recreated.
+  - **Net (REVISED, Henrik 2026-10-09):**
+    - *"So far the expander and passive firmware designs have been CONCEPTUAL and not served any role."* →
+      the regmap GPIO banks are **not real functionality to preserve** — conceptual scaffolding, safe to
+      **drop** (reconciles with "dropped, never used"). "Do not remove functionality" governs the **real**
+      functions = deepsleep's `ident`/`status`/`mode`/`crc`, which are already recreated in cros_ec. The
+      generic-pin expander command is **future design**, built when the `expander` module gets a real
+      product role (purpose TBD). `deepsleep` = dual SUPERVISOR (FR2476/FR2355/FR2155, real/HW-proven);
+      `expander` = FR2433 (conceptual placeholder).
+    - *"We will not refactor the current codebase with this distinction, but we will reorganise according
+      to this modules structure."* → the **deepsleep/expander DISTINCTION** (role split, per-role GPIO, the
+      `expander` module) happens in the **`modules/` REORG**, not as in-place surgery.
+    - *"Plus as soon as we have parity we drop regmap fully."* + *"the reorg can just leave it out"* +
+      *"I don't care. If we have parity I'm happy however we proceed."* → **parity is the only gate, and it
+      is met.** → **DONE (2026-10-10): regmap is fully dropped.** cros_ec is the SOLE node command interface.
+      Removed: `crates/stem-node/regmap.rs` (RegSel/decode/ShadowState), `stem.rs`'s `RegFile`/`Slave`/`poll`/
+      `loopback_selftest` (stem.rs is now just the transport `init`), `status::read_reg` (the 0x30–0x3F window
+      serializer), the deepsleep serve-loop's regmap branch + boot/`l` loopback, the `cros_ec` **feature**
+      across stem-node/deepsleep (now unconditional), and the `--regmap`/`--cros-ec` build flags. Artifacts
+      lost the `-cros_ec` suffix (there's only one interface). KEPT: `stembus::regmap` as the shared wire
+      CONSTANTS (role addresses, mode codes, CRC width, iface magic, model ids) that cros_ec itself uses —
+      that was never "the regmap command approach," just the contract data. *HW-verified:* dual node
+      (@fr2476/@fr2355) + expander (@fr2433) all serve ident/status/mode/caps over cros_ec post-removal.
+      The per-variant console + expander GPIO + terse verbs + `--dark` are still reorg/future work.
+    [[role-based-stem-addressing]] [[talki-pins-use-pinmux-skill]]
+
+(Below was the SUPERSEDED plan — kept for history:) ~~The MSP console goes read-only.~~ The MSP430 is a
+*slave*; operator commands also arrive over the bus (cros_ec) from the master (SoM / Pico / hwd). Its five
+menu functions map to unified commands: `s`→`status`/rescan, `r`→`events`, `d`→`ident`+`status`,
+`m`→`mode`, `l`→`selftest` — but reachable over BOTH the console AND I2C, not bus-only.
+
+**Phased sequencing (each phase HW-provable on the FR2433+Pico bench):**
+1. ✅ **DONE (2026-10-08)** — **`Node`+`Operate` adapter** (`deepsleep::node::StaticNode`) +
+   **vendor command + postcard** (phase 2 merged in): `EC_CMD_STEMBUS` payload = postcard `Command`/
+   `Response`, routed in `EcSlave` → `command::execute`. Standard `GET_VERSION`/`GET_BUILD_INFO`
+   **deferred** (Linux-only payoff, premature). *HW-proven:* `ident` (real model 0x8240 / build
+   0x1AE847E2 / ver), `status`, `crc` (8 per-sector CRC16s); postcard fits FR2433 (6494/15360 B).
+2. ✅ merged into 1.
+3. **Rebuild stem-probe's device verbs** on the unified vocabulary — `ident`/`status`/`crc`/`mode` **DONE**
+   (`mode` token-matched to avoid the `sens`/`pass` collision; addr arg targets any node). `thresh`/`events`
+   deferred (no threshold catalog / event source yet).
+4. ✅ **DONE (2026-10-08)** — **Flip the dual families to cros_ec** (gated `cros_ec` feature; default dual
+   stays regmap). `run_dual` swaps the regmap slave for `EcSlave` + `deepsleep::node::LiveNode` (status
+   refreshed each pass; `SetMode` records a request the loop applies via the real mode machine). *HW-proven
+   on @fr2476 @0x21:* `ident` → model 0x832A; `mode sensing`→`status` mode=0x01 devs=1 (mode machine
+   acquired Leaf + enumerated), `mode passive`→ mode=0x00. Dual image 7654/32768 B.
+   - ✅ **Stem-probe verb convergence DONE (2026-10-10).** Removed the regmap-era verbs `pass`/`sens`
+     (superseded by `mode <addr> p|s`); **rewrote `vstem` and `vleaf` onto cros_ec** — role discovery via
+     `Identify`, identity/fw/status via `Identify`+`Status`, the mode round-trip + the Leaf Sensing/Passive
+     handoff via `SetMode`+`Status` (no more `DBG_*`/`MODE_CTRL` register pokes; those regmap imports are
+     gone). `r`/`w` kept as an explicit **raw-I²C escape hatch** (D1 — relabelled: raw bus bytes, not a
+     cros_ec/regmap command). Help text updated to match. *HW-proven on the bench:* `vstem` all-PASS across
+     0x20/0x21/0x22; `selftest` **RESULT pass=8 fail=0** (incl. the cros_ec Leaf handoff, `dev_count=0x01`).
+   - **Still open:** remove the `cros_ec` gate (make it the default for all families) once the regmap path's
+     remaining consumers are migrated — then drop the regmap slave from the dual image entirely.
+4. **Retire the MSP `prod` keystroke menu** (A) → read-only logging; functions now reachable as bus
+   commands. (Does not touch (B) diag's test menu.)
+5. **Converge diag (B)** onto the same verbs where it overlaps the operator set; keep diag-specific test
+   commands as their own section.
+6. **Real Linux `cros_ec` binding** on the SoM (DT + kconfig) — the deferred kernel proof; `HELLO` +
+   `GET_PROTOCOL_INFO` (done) are its handshake. At that point `ectool` is itself a console onto the node.
+
+**Decisions I need from you (not assumed):**
+- **(D1) Keep raw `r`/`w` on the console?** A raw bus read/write is a useful debug aid even once typed
+  verbs exist. Lean: **keep** (label it a low-level escape hatch), but it pokes the regmap which is being
+  dropped — so it'd become a raw cros_ec request-builder instead. Confirm you want a raw escape hatch at all.
+- **(D2) MSP console: read-only, or a tiny local verb set?** Lean: **read-only logging** (commands come
+  over the bus); but a handful of *local* dev verbs (dump status without a master) could stay under
+  `debug`. Confirm whether the MSP console keeps ANY interactive input.
+- **(D3) diag menu (B): converge or leave standalone?** diag is a test harness with its own
+  one-feature-test verbs. Lean: **leave it standalone**, adopting the shared verbs only where they already
+  overlap (status/ident), not forcing a rewrite.
+
+### Command discovery: `--dark` vs discoverable builds + terse verbs (PLAN · Henrik 2026-10-09)
+
+**Verbatim (Henrik 2026-10-09):**
+> *"We should also record a plan for having a `--dark` vs `--help` flag for the build. The question is
+> whether you can discover commands by poking the MCU. While developing, testing, debugging the discovery
+> is very helpful. In a production product we would want to be able to build a prod build that is dark to
+> discovery. It would provide a build+device ID that allows looking up the exact interfaces available using
+> MCP or developer documentation."*
+> *"I would also think that console commands can be single/double letter, as they will mostly be used by
+> hackers/ai-agents."*
+
+**Derived plan (not verbatim):**
+- **A build-time DISCOVERY axis, orthogonal to diag/prod and to the chip axis:**
+  - **discoverable build (dev — `--help`/default-for-dev):** the device can **enumerate its own command
+    interface** when poked over the bus/console — on-device introspection (the `stembus::command` **`Node`
+    introspection** surface + a cros_ec "list commands / versions" query). Invaluable for dev/test/debug
+    and for an AI agent exploring an unknown node.
+  - **DEFAULT = discoverable; `--dark` is OPT-IN (Henrik 2026-10-09):** *"we don't want to build dark by
+    default at this time"* — during the dev/test/debug phase discovery stays on everywhere. The flag
+    **SETS dark** (adds the restriction), it does not clear a dark default. (Polarity may flip to
+    dark-by-default for *shipping* products later; not now.)
+  - **dark build (prod — opt-in `--dark`):** on-device command **introspection is COMPILED OUT**. The node exposes
+    only a **build ID + device ID** (already have both: `ident` → model + build-id). The actual interface is
+    looked up **out-of-band** — an **MCP server / developer-docs catalog keyed by (build ID, device ID)**
+    returns the exact command set that build supports. Build-time (not a runtime toggle) so the introspection
+    is genuinely absent (smaller image; can't be re-enabled by an attacker) — fits the FR2433 size budget too.
+- **Terse console verbs (1–2 chars):** the UART/console command binding uses **single/double-letter tokens**
+  (optimized for hackers + AI-agents, not human mnemonics). Consistent with dark+catalog: on-device names
+  need not be self-descriptive because discovery is external. (The cros_ec I2C side is numeric `EC_CMD_*`
+  already; this is purely the text binding's verb names.)
+- **Maps onto existing pieces:** the discovery surface to gate = the `Node` introspection trait (narrowed
+  per [[purity-seam-trait]]); the (build,device) ID already ships in `ident`; an MCP catalog server is the
+  new external piece (an AI agent queries it with a device's ident to learn the verbs — ties the dark device
+  to AI-agent tooling).
+
+**My critical notes (quality-bar — flagging, not rubber-stamping):**
+- **"Dark to discovery" is obscurity of the INTERFACE LIST, not access control.** A dark node's commands
+  still execute if a caller knows them (from the catalog). That's a legitimate product hardening (don't
+  self-advertise the attack surface; save code) but it is NOT authentication — real command access control
+  (auth/signing on sensitive commands) is a SEPARATE concern to track, not satisfied by `--dark`.
+- **Naming (polarity DECIDED, exact token TBD):** default discoverable + opt-in `--dark` (above). `--help`
+  as a *build* flag reads oddly (help feels runtime); the axis is *discoverable* vs *dark*. Exact token and
+  whether it folds into the diag(discoverable)/prod(dark-capable) split rather than a standalone flag — TBD.
+- **Deferred / not now** — recorded so it isn't lost; sequence it after the regmap→cros_ec reorg (Ra–Rd)
+  lands, since it builds on the finished `Node`/`ident` surface.
+
+### Help/introspection is GENERATED from the command definitions (REQUIREMENT · Henrik 2026-10-09)
+
+**Verbatim (Henrik 2026-10-09):**
+> *"thepia hwd chat can introspect the stem-probe command structure using `help` and know how to
+> manipulate the hardware. It builds a chat interface on top which allows me to chat with the latest
+> hardware capabilities as they evolve. For this reason it is vital that the command structures are
+> correctly reflected in the help information, so the help text should be generated based on a
+> template/compile step from the command definitions in code."*
+
+**Derived requirement (not verbatim):**
+- **Single source of truth = the command definitions in code** (`stembus::command` — the vocabulary +
+  per-command metadata: name, args, help blurb). The `help` text, the on-device introspection reply, and
+  any catalog are **GENERATED** from those defs via a **template/compile step** (build.rs codegen, a derive
+  macro, or a const table emitted at build) — **never hand-maintained**. Help that can drift from the real
+  commands is a defect, because `thepia hwd chat` *acts on it* to drive hardware.
+- **Why it's vital:** `thepia hwd chat` introspects `help` to manipulate the hardware AND to build a chat
+  UI over *evolving* capabilities. Drift ⇒ the chat lies about what the device can do → wrong hardware
+  actions. So "help matches code" must be a **build-time guarantee**, not discipline.
+- **Ties to the discovery/`--dark` plan above:** the discoverable surface (`help`/introspection) IS this
+  generated artifact; a `--dark` build compiles it out and exposes only build+device ID → an **MCP/dev-docs
+  catalog**, which is itself generated from the *same* command defs (so on-device `help` and off-device
+  catalog can never disagree). Terse 1–2-char verbs are fine precisely because the names are generated +
+  documented, not memorized.
+- **Decoration (ANSI color / emoji) is a RENDER concern, not source data (Henrik 2026-10-09):** the
+  generated catalog stays **clean structured data** (verb/help/args/**`category`**); a **host-side renderer**
+  (`thepia hwd console`/`chat` or `pico-probe`) adds ANSI + emoji — zero MSP430 size cost, and the surface
+  `hwd chat` introspects stays escape-code-free (machine reads data, human sees icons). Never hardcode escape
+  codes/emoji into help strings. For *semantic* color/emoji, map the structured `category` → icon/color in
+  the renderer (🔎 introspection, ⚙️ operation, red destructive). In-firmware color only if a node's *direct*
+  console needs it, gated behind a `color` feature, OFF on prod/FR2433 (budget).
+- **Concrete debt — ✅ RESOLVED (2026-10-10).** The stem-probe `help` is now **GENERATED**, not a
+  hand-maintained string: `stembus::command` gained a `CommandSpec{verb,args,help,category}` + `CATALOG`
+  (the single source for the WIRE vocabulary, shared with future on-device introspection + the MCP catalog),
+  plus `Command::cli_verb()` (exhaustive match) and a host test `catalog_covers_every_command` that forces a
+  catalog entry per `Command` variant — the build-time-ish drift guard. The probe renders `help` from the
+  stembus `CATALOG` (device verbs it exposes, via `spec_for` → single-sourced) + a probe-local `PROBE_LOCAL`
+  table (its rig/aggregate/cros_ec verbs), grouped by `category`. Catalog strings carry **no ANSI/emoji**
+  (the test asserts it) — decoration is the host renderer's job, keyed on `category`. *HW-verified:* `help`
+  on @rp2040 emits the generated listing (introspection/operation/debug/flashing sections).
+- **On-device introspection reply — ✅ DONE (2026-10-10).** `Command::Capabilities` → `Response::Capabilities(u32)`:
+  the node advertises a **bitmask over `CATALOG`** (bit `i` ⇔ it implements `CATALOG[i]`), computed by the
+  const `CAPS_NODE`/`CAPS_NODE_OPERATE` = `caps_for(..)` (generated from the catalog categories; a `Node`
+  reports introspection, a `Node`+`Operate` adds operation). It is CONST-folded, so a node that only answers
+  `Capabilities` links NO catalog strings — it ships the 32-bit mask, the **master** owns the strings and
+  renders verbs from its OWN shared `CATALOG` (zero drift). *HW-proven:* `caps 0x22` → `mask=0x7F supports:
+  ident status crc events caps mode thresh` on the FR2433 node (expander 6368/15360 B). A stembus-aware master
+  (stem-probe/hwd/M7) needs nothing more; a non-stembus agent (MCP) still uses build-id+device-id → off-device
+  catalog. Still deferred: the off-device **MCP catalog** (from this SAME `CATALOG`) + `--dark` compiling the
+  introspection out.
+
+**Everything below (§1–§5) predates this pivot** — kept for the problem framing (two buses, framing,
+firmware-patch streaming, per-module execute), but the *wire protocol* is now the cros_ec-framing +
+postcard-payload split decided above (no longer PCA9698). The replacement plan above supersedes their
+command-surface details; revise §1–§5 to match when they're next touched.
+
+## 1. The model — one command vocabulary, two transports, per-module `execute`
+- **One `Command` vocabulary** in the shared **`stembus`** crate (the codec + the command set the SoM and
+  every MCU compile against — [ADR-0012](adr/0012-stembus-shared-contract-crate.md)). Serialized with
+  **`postcard`** (compact `serde` binary, `no_std`, no-alloc).
+- **The shared surface is INTROSPECTION, not the whole command set** (structure decision, Henrik
+  2026-10-07 — see `references/firmware-architecture.md` §10). What is *universal* across MCU modules is the
+  who/how/what-happened/integrity surface — identity, status, event history, FRAM CRC. That is the one
+  genuinely cross-module trait (`stembus::command::Node`), dispatched by a shared, host-tested
+  `execute_core`. **Operation / debug / flash commands are per-module** — a sensor-supervisor like
+  `deepsleep` has mode + thresholds (`Operate`), a future bluetooth/vision node has an entirely different
+  operation surface. Do **not** widen the universal trait with one module's operation commands (that was the
+  original `Node` mistake: `set_mode`/`set_threshold` are not universal).
+- **Why a trait at all, with one node today:** the `Node` trait is the **hardware-free boundary** — its
+  methods are pure data in/out, so dispatch (`execute_core`) lives in `stembus` and unit-tests on the host
+  with a mock, independent of any MCU peripheral. An inherent per-module `execute` would entangle dispatch
+  with PAC/peripheral types and lose host-testability — or force you to recreate the same pure seam unnamed.
+  So the trait earns its place as a *purity seam*, not via multiple implementors.
+- **Each MCU module composes** `execute_core` (universal) with its own operation dispatch. The
+  command/dispatch layer is separate from the bus transport and from the device state (transport ↔ dispatch
+  ↔ state; see `references/firmware-architecture.md` §9).
+- **Two transports, differing only in FRAMING:**
+
+| | I²C (control bus) | UART |
+|---|---|---|
+| Message boundary | **free** — `START…STOP` delimits one message; the slave buffers RX bytes to `Stop`, then deserializes | **none** — a raw stream, so COBS or a length prefix (`postcard` provides COBS: `to_slice_cobs`/`CobsAccumulator`) |
+| Direction | R/W bit: **write** = command (master→MCU); **read** = response (MCU→master) | full-duplex |
+| Request→response | write command → read response (or combined repeated-START), reply pre-staged / clock-stretched | interleaved |
+
+- **Build order (CANONICAL — verbatim, Henrik 2026-10-06):**
+  > We will redesign the command system anyway starting with commands over I2C and then commands over UART
+
+  → **I²C commands first, UART second**, and it's a deliberate redesign (not a retrofit of the current
+  regmap menu). Corollary: the existing **polled console `getc`/`rx_ready` menu is throwaway** — the UART
+  command path is replaced, so don't invest in extending it.
+
+## 2. Buses & addressing — the SoM masters TWO buses (CANONICAL — verbatim, Henrik 2026-10-06)
+> We have two I2C busses for the SoM M7 to master while it runs. One has sensors and MSP deepsleep
+> modules in passive, the other is meant for controlling MCUs. The MCUs would be controlled using
+> commands with postcard data and receive firmware patches. Whether MCUs would all support PCA9698 style
+> API is doubtful, and it would make sense to have a common API to all MCUs.
+
+- **Control bus** = the Stem bus — the MCU uplink: commands + firmware patches, every MCU a **slave**,
+  addressed by **role** (see [`I2C-API.md`](../I2C-API.md) "Stem address is ROLE-BASED": `0x20` supervisor,
+  `0x21` dev stand-in, `0x22` I/O-expander, `0x23` PD controller).
+- **Sensor bus** = Leaf — sensors **and** the MSP as a passive slave (the SoM masters it directly while the
+  MSP is Passive — the "reachable on both" refinement; see DEEPSLEEP-EXTRACTION.md behaviour model). This
+  bus is nice-to-have for the MSP's own Sensing role; the command system rides the **control** bus.
+  *(Bus mapping is my read — confirm against the behaviour-model block, which is the authority.)*
+
+## 3. Firmware update — IN-FIELD, SoM-driven, ROW-BASED (CANONICAL, Henrik 2026-10-07)
+> The SoM will field update MCU firmware. It has UART and Stem I2C available. I expect we will follow the
+> row based firmware update available for the PD Controller.
+
+So **flashing IS a bus-command category** (not dev-only): the SoM delivers firmware to each MCU in the
+field, over **UART or Stem I²C**, following the **row-based** scheme the **PD controller** uses (Cypress/
+Infineon EZ-PD PMG1 bootloader — flash written a **row/page at a time** with verify; confirm the exact
+protocol when that firmware is developed). The common update flow ≈ **enter-update → write-row(index,
+bytes) → verify (CRC/row-check) → activate** — a *sequence of bounded rows*, not one opaque blob (fits
+the §1 streamed framing; each row is one transaction). **Per-MCU apply differs** behind the same command
+shape: MSP430 FRAM can't A/B self-update → host-driven BSL/STEM reflash (memory
+`msp-fw-ota-host-root-of-trust`); RP2040/RP2350 (deepsleep? lowvision) via its own flash; the PD
+controller's own row bootloader is the template.
+
+## 4. Coexistence with PCA9698-emulation (SUPERSEDED — see §0)
+> **Superseded 2026-10-07:** PCA9698 is no longer the Linux-leverage path — `cros_ec` (§0) covers GPIO
+> *and* sensors *and* firmware update *and* a generic channel with a richer Linux stack. Keep this section
+> only as a narrow legacy option (a lone PCA9698 GPIO view) if a specific consumer ever needs exactly that.
+
+PCA9698-emulation is an **optional per-module compatibility shim, NOT the common denominator** — not all
+MCUs will support it ("whether MCUs would all support PCA9698 style API is doubtful"). Where a module opts
+in (e.g. MSP430 as a Linux-gpiochip I/O-expander via the stock `gpio-pca953x` driver), the command system
+coexists with no collision:
+- Keep the PCA9698 command-pointer + auto-increment envelope on the GPIO banks (`0x00–0x1F`) so the stock
+  driver is untouched.
+- Put a reserved, **non-incrementing stream port** in the semantic window PCA9698 leaves free (0x30–0x3F;
+  taken: `0x30` iface, `0x3B–0x3D` ver, `0x3E` MODE_CTRL, `0x3F` CRC — so e.g. **`0x37` CMD / `0x38` RESP**):
+  writes APPEND a postcard command buffer, `Stop` triggers decode+dispatch; RESP streams the reply.
+- Caveats (settle when building): CMD port = AI-off accumulate (vs PCA9698 overwrite/increment); one
+  command per transaction; buffer bounded to the MCU's RAM; never point the stock driver at the stream
+  port; SMBus masters (not raw I²C) cap blocks at 32 B.
+
+## 5. Phase 2 discovery — MCU inventory × command taxonomy
+**The Phase 2 kickoff: enumerate the product's MCUs/boards, what each does, and the commands each should
+support — across four categories, over two access paths** (Henrik 2026-10-07). The vocabulary is common
+(`stembus`); each module registers the subset it implements.
+
+### 5.0 Source of commands — provenance (CANONICAL, verbatim, Henrik 2026-10-07)
+> Production-functionality commands would come from the SoM or the PD Controller that both may be masters
+> of the Stem Bus. PD controller would only be during near full shutdown of the device.
+> Introspection/Inspection commands can come from Developer over USB via stem-probe(Pico firmware role) or
+> PD controller. Both would be where you connect USB to debug the device.
+> Additional commands would be directly to stem-probe or equivalent Yocto/M7 firmware for servicing hwd
+> agent and Developer working on product features.
+> Bob-929 is a prototyping/learning product, so it will have full support for Developer commands by
+> default. Talki is a consumer product, so it will have much less.
+
+Derivation — **a command exists ONLY with a named caller + purpose; else it is "capability-gold-plating
+dressed up as an API." DEFER everything until truly needed.**
+- **Callers by category:**
+  - **Operation (production):** the **SoM** (normal), or the **PD controller** (CYPM1111) *only during near
+    full shutdown*. Both are Stem-bus masters in their regime.
+  - **Introspection/inspection:** a **Developer over USB via the stem-probe** (Pico firmware role), or the
+    PD controller — the "USB-connected to debug the device" context.
+  - **`hwd` is an external CALLER, not a separate command layer** (Henrik 2026-10-07): "hwd agent" =
+    **`thepia hwd` driven by an AI agent** assisting firmware/hardware work, connecting to bench or product
+    over the **single USB-C cable** (through a router, or handled by a single on-device controller board).
+    So it isn't its own vocabulary — it's a caller that reaches any node over USB-C.
+  - **The gateway/host nodes are themselves command TARGETS** (SoM, M7/CPU-core, the on-device controller):
+    the gateway is **both a router** (forwards MCU-node commands onward) **and directly commandable**. So
+    "commands to the SoM/M7/controller" are just another part of the ONE vocabulary (a section), NOT a
+    scoped-out surface. (Supersedes my earlier "scope it out" — Henrik: unify, with sections.)
+- **Product tier sets the default surface, via COMPILE-TIME feature gating** (Henrik 2026-10-07: "most
+  likely, unless it runs a debug build") — the **same mechanism as `console`/`debug`**: dev/debug commands
+  register only when their feature is on, so a production image literally doesn't contain them (zero cost,
+  genuinely lean). **Bob-929** defaults to the **full** set; **Talki** defaults **lean**; but a **debug
+  build of ANY product** includes the dev/debug set (Talki-debug ≠ Talki-production). Gate = build variant,
+  not hard-wired to the product.
+- **Doc roles:** DESIGN.md = high-level; **I2C-API.md = HOW to send commands** (transport/framing/
+  addressing), *not* the command list; **COMMANDS.md = the actual commands — ONE UNIFIED vocabulary**
+  (with sections), covering **what is sent internally between MCU / SoM / CPU-core (M7), or from outside
+  to one of them** (Henrik 2026-10-07). Nodes (MCUs, SoM, M7, on-device controller) are all targets;
+  callers are the SoM, PD controller, M7, and external agents (AI-driven `thepia hwd`, developer).
+
+### 5.1 Command categories
+| Category | What | Primary consumer |
+|---|---|---|
+| **Operation** | runtime product behaviour: mode (Passive/Sensing/…), power states, sensor/GPIO I/O, presence/wake, actuation | SoM (dev for test) |
+| **Introspection** | identity (model/role/build-id/version), capabilities, status/health, FRAM CRC, enumeration ("what's present") — read-mostly, always available | SoM **and** dev |
+| **Debugging** | logs, register dumps, self-tests, fault injection, the diag suites | dev (gate off production) |
+| **Flashing** | firmware update / patch delivery — per-MCU mechanism | dev (SBW/USB) + SoM (over the protocol) |
+
+### 5.2 Access model — ONE external USB-C port + a power-state gateway that routes (CANONICAL, Henrik 2026-10-07)
+> The product ends up with a single USB-C connection that either goes to the SoM (Yocto and likely msg
+> routing to M7) or Pico/PD Controller if SoM is off. So commands will need to go through that channel
+> when sent from a person or outside agent.
+
+So external access (a **person or outside agent** — dev laptop, `hwd`, a remote/CI agent over the mesh) is
+a **single USB-C port**, and what it lands on depends on power state:
+- **SoM ON → gateway = SoM** (Yocto; also **routes/relays to the M7** and to the MCUs over the Stem bus).
+- **SoM OFF → gateway = Pico / PD controller** (which then masters the Stem bus) — i.e. the productised
+  **stem-probe** role.
+
+**Two hops, one vocabulary:** external `USB-C ↔ gateway` (USB-CDC) then `gateway ↔ target MCU`
+(Stem I²C / UART). The gateway bridges framing (per-link encoding, §0) but the command *semantics* are
+preserved end-to-end. Internal transports unchanged: Stem I²C control bus + per-MCU UART; the bench's
+SBW/USB-DFU flashing is the same USB-C port reaching whichever gateway owns it.
+
+**Consequence — commands need a TARGET/route:** since one port fans out to many MCUs (+ M7), an external
+command must say *which node* it's for so the gateway forwards it. Open fork (shapes the protocol — §5.4):
+is the gateway a **tunnel/router** (external addresses a specific MCU by role; gateway forwards the raw
+command over Stem — thin, MCU owns the API) or a **translator** (external speaks the *gateway's* API;
+gateway interprets and issues its own Stem commands — richer, gateway owns the API)? cros_ec leans
+tunnel-ish on the SoM (each MCU a `/dev/cros_ec` device the agent targets); the Pico/PD gateway is
+naturally a tunnel (forward to the addressed node). Decide when we design routing.
+
+**Bench ≠ product — the bench is OPEN (Henrik 2026-10-07):** *"benches are much more open than any
+product, so individual modules/boards can be reached over USB from the outside."* On the bench each board
+has its **own direct USB** to the dev machine (MSP430 eZ-FET SBW+console, Pico USB-CDC, …) — **no gateway,
+no routing**; `hwd` drives each board directly. So a board must be reachable+commandable **both** ways:
+**direct over its own USB (bench)** AND **routed over the Stem bus via the gateway (product)**. Same
+command vocabulary, two topologies — which maps onto §1's two faces: the **UART/console face ≈ bench-direct
+per-board**, the **I²C/Stem face ≈ product-routed**. The gateway/routing model above is the PRODUCT
+topology only; the bench bypasses it.
+
+### 5.3 MCU/board inventory — PROVISIONAL (seeded from the repo + memory; **Henrik to confirm/correct**)
+| MCU/board | Role | Stem addr | Flashing | Source |
+|---|---|---|---|---|
+| MSP430 **FR2355/FR2155** | deepsleep supervisor (production) | `0x20` | BSL (host-reflash) | I2C-API.md |
+| MSP430 **FR2476/FR2475** | supervisor — DEV stand-in (same fw) | `0x21` | BSL / SBW | I2C-API.md |
+| MSP430 **FR2433** | I/O-expander / passive (slave-only) | `0x22` | BSL / SBW | I2C-API.md |
+| **CYPM1111** (EZ-PD PMG1-S1) | PD / power controller; Stem node; SoM-off master | `0x23` | row-based (PMG1 bootloader) | **future — fw not started, not on any bench** (Henrik 2026-10-07); its row-update is the §3 reference |
+| **RP2040** | dev-bench stem-probe (SoM stand-in) | master | UF2 / picotool | MCU-BENCH.md |
+| **RP2350** | product node (future) | ? | UF2 / picotool | ADR-0013 |
+| **nRF52** (nRF52840 / Raytac MDBT50Q) | BLE / bluetooth networking module | ? | DFU / SWD | datasheets; "bluetooth" module |
+| **i.MX8 SoM** | host: Linux A-core (Stem master) + M7 (Leaf master, tentative) | master | — | this session |
+| **"lowvision"** | vision/sensing module **on a Pico** (RP2040/RP2350); keeps a history | ? | UF2 / picotool | Henrik 2026-10-07 |
+
+### 5.4 Next (drive from the confirmed inventory, not this draft)
+1. **Confirm/correct §5.3** — the authoritative MCU list + roles is Henrik's; this is a repo-seeded draft.
+2. **Pick the first MCU × category** to define concretely — likely **MSP430 `deepsleep` × introspection +
+   operation** (the proven node; introspection is the always-available baseline every MCU needs).
+3. Enumerate that MCU's exact `Command` set (name, params, response, access-path gating), then generalise
+   the shared vocabulary from the real cases — not top-down.
+
+### 5.5 Derived command set v0 — from NAMED callers (Henrik 2026-10-07)
+First real operations, each with a caller + purpose (verbatim source):
+> SoM wakes up: Asks all MCUs did you wake me? what are recent events?
+> SoM asks PD Controller for a power state or history report
+> SoM asks lowvision(Pico) for a recent history report
+> SoM updates thresholds for PD controller, lowvision, deepsleep sensors/triggers
+
+Derived vocabulary (note: these are **cross-MCU COMMON** commands — validates one shared `Command` set):
+
+| Command | Caller → target | Purpose | Category |
+|---|---|---|---|
+| **WakeAttribution** ("did you wake me?") | SoM → **all MCUs** (on wake) | which node triggered the wake | operation/introspection |
+| **EventHistory** ("recent events" / "history report") | SoM → **all MCUs** (deepsleep, PD, lowvision) | read the node's recent-event log | operation/introspection |
+| **PowerStateReport** | SoM → **PD controller** | current power state (+ history) | operation |
+| **SetThreshold** | SoM → **PD, lowvision, deepsleep** | update a sensor/trigger threshold | operation |
+
+**Common capabilities these REQUIRE of every participating MCU** (the real design implications):
+- a **recent-event ring** — wake triggers, threshold crossings, mode changes — with **wake-source
+  attribution** (so "did you wake me?" + "recent events" are answerable). Bounded (small ring; MSP430 RAM).
+- **settable thresholds** for its sensors/triggers (deepsleep already has VSOM/CHARGE voltage thresholds
+  in I2C-API.md §2E; PD + lowvision have their own).
+- the **SoM wake-flow**: wake → poll every MCU (`WakeAttribution` + `EventHistory`) → read PD power state →
+  (re)set thresholds. This sequence is the anchor the vocabulary is derived from.
+
+**lowvision = a Pico** (RP2040/RP2350) running vision/sensing + its own history — update §5.3.
+
+**Firmware update is IN scope** (row-based, §3) — a real category, SoM-driven.
+
+**PD controller commands DEFERRED (Henrik 2026-10-07):** "the PD Controller isn't yet part of any bench,
+so I have not started developing the firmware." So `PowerStateReport`, its shutdown-master role, and its
+row-update protocol are a **future target** — but its **row-based update is the design reference** for §3.
+
+Still DEFERRED (no named caller yet): per-pin GPIO, voltage *read* beyond thresholds, sensor proxying.
+
+> **Implemented (2026-10-07) in `crates/stembus/src/command.rs`** (pure, wire-agnostic — the §0
+> decoupling, no codec): the §5.6 data model (`WakeReason`, `EventKind`, `Event`, `EventRing<16>`), the
+> §5.7 `Command` vocabulary, the `Response`/`Identity`/`StatusData` types, and the **two-trait seam**
+> (narrowed 2026-10-07, see §1 + firmware-architecture.md §11): a **universal `Node`** introspection trait
+> (identity/status/fram_crc/drain_events) dispatched by a shared, host-tested `execute_core`, plus a
+> **per-module `Operate`** trait (deepsleep's mode/threshold operation surface) composed in by `execute`
+> for nodes that are both. 10/10 host unit tests (ring, overflow, wake round-trip, `execute` dispatch via a
+> mock, and `execute_core` declining operation arms); compiles in budget for msp430/cortex-m. **Next:**
+> `deepsleep` implements `Node` + `Operate` over its RegFile/Status/mode/EventRing (thin adapter), then the
+> wire codec when §0 lands.
+
+### 5.6 Data model — APPROVED v0 (Henrik 2026-10-07)
+- **`WakeReason` = a byte enum, hardcoded in `stembus` source** (shared SoM↔MCU). The *reason* an MCU woke
+  the SoM: `None=0`, then per real trigger — e.g. `SoundTrigger`, `ThresholdCross`, `GpioEdge`, `Timer`,
+  `Fault`, … (fill from each MCU's actual triggers). **`WakeAttribution` = read this byte** from each node;
+  the SoM scans all nodes and the non-`None` one is the culprit (+ *why*, for free).
+- **Event record = `{ type, id, flag, seq }`**, common schema. `type` from a shared enum (trigger /
+  threshold-cross / mode-change / fault — reuses the `WakeReason` space for trigger events); `id` = which
+  trigger/threshold; `flag` = direction/aux; `seq` = **sequence number, NO clock/RTC**. Ordering =
+  **drain-on-read** (SoM reads → gets all since last read → MCU clears).
+- **Event ring = 16 deep**, drop-oldest + an `overflowed` bit (so the SoM knows it missed some while asleep).
+- **`SetThreshold` = uniform `(threshold_id: u8, value)`**; each MCU owns its threshold-id catalog.
+
+### 5.7 `deepsleep` command set v0 — WORKED EXAMPLE (the proven node; generalise from here)
+Mostly **formalises existing regmap** (I2C-API.md) into the vocabulary + adds `EventHistory`/`WakeReason`/
+`SetThreshold`. Tiers: `all` = every image; `debug` = Bob-929 default / Talki-debug build only (§5.0).
+
+| Command | Dir | Params | Response | Category | Tier |
+|---|---|---|---|---|---|
+| `Identify` | R | — | iface magic `0xD0`, model id, role, build-id, fw version | introspection | all |
+| `Status` | R | — | status flags, fault, dev-count, current mode, **`WakeReason`** | introspection | all |
+| `FramCrc` | R (windowed) | sector idx | per-sector CRC16 (ADR-0010) | introspection | all |
+| `EventHistory` | R (drain) | — | ≤16 × `{type,id,flag,seq}` + `overflowed`; clears ring | introspection/operation | all |
+| `SetMode` | W | mode (Passive/Sensing) | ack + current mode | operation | all |
+| `SetThreshold` | W | `threshold_id`, value | ack | operation | all (deepsleep ids: VSOM, CHARGE, … from I2C-API §2E) |
+| `Scan` / `Dump` / `SelfTest` | R/action | — | enumerate / reg dump / POST result | debugging | debug |
+| `FwUpdate` | W (rows) | enter → `write_row(idx,bytes)` → verify → activate | per-row ack/CRC | flashing | SoM + dev |
+
+**Open specifics to fill as we implement (not blocking the shape):** the concrete `WakeReason` enum values
+(from deepsleep's real triggers — eCOMP sound/analog, GPIO edges, the voltage thresholds), the
+`SetThreshold` value width (I2C-API §2E has 16-bit voltage thresholds), and the `FwUpdate` row size/verify
+(follows the PD/PMG1 row scheme, §3).
+
+## References
+- [`I2C-API.md`](../I2C-API.md) — PCA9698 register map, extended/debug window, **role addressing** (transport contract).
+- [DEEPSLEEP-EXTRACTION.md](DEEPSLEEP-EXTRACTION.md) — the MSP430 `deepsleep` implementation + the `next_event` seam (Phase 2).
+- [ADR-0012](adr/0012-stembus-shared-contract-crate.md) — `stembus` as the one shared wire contract.
+- `references/firmware-architecture.md` — transport↔dispatch↔state layering; I²C stream facts (UM10204).

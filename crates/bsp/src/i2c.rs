@@ -43,41 +43,71 @@ pub fn bus_levels(p: &Peripherals) -> (bool, bool) {
     (lv & SDA_BIT != 0, lv & SCL_BIT != 0)
 }
 
-/// Recover a wedged bus: bit-bang SCL up to 9 pulses until SDA releases, issue a manual STOP, hand
-/// the pins back to eUSCI. No-op if SDA already high. Returns true if SDA ends high.
-pub fn recover(p: &Peripherals) -> bool {
-    if sda_high(p) {
-        return true;
-    }
-    p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() & !(SDA_BIT | SCL_BIT)) });
-    p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() | SCL_BIT) });
-    p.p1.p1dir().modify(|r, w| unsafe { w.bits((r.bits() & !SDA_BIT) | SCL_BIT) });
+/// True when both pads are idle-high (bus free).
+fn bus_idle(p: &Peripherals) -> bool {
+    let (sda, scl) = bus_levels(p);
+    sda && scl
+}
 
-    let mut i = 0u8;
-    while i < 9 && !sda_high(p) {
-        p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() & !SCL_BIT) });
+/// Recover a wedged bus. Two wedge modes are handled (both observed on the FR2355 Leaf bus):
+///   • **SCL held low by our own eUSCI** — an aborted/timed-out read leaves the master holding the
+///     clock (the dominant mode here). Asserting UCSWRST makes the module release SDA/SCL, so the
+///     pads float back to the pull-ups. Cheap and decisive; no bit-banging needed.
+///   • **SDA held low by a slave** mid-byte — bit-bang up to 9 SCL pulses until it releases, then a
+///     manual STOP (the classic 9-clock recovery).
+///
+/// A slave stretching **SCL** can't be forced safely (driving against it is contention), so that
+/// case is reported as failure rather than fought. Returns true iff the bus ends idle-high.
+///
+/// Preserves the caller's UCSWRST state: a live module is left live+configured; a module already in
+/// reset (e.g. `init` called us) is left in reset for the caller to finish configuring.
+pub fn recover(p: &Peripherals) -> bool {
+    if bus_idle(p) {
+        return true; // already free — fast path (also the SCL-low gate for callers)
+    }
+    let was_live = ctlw0(p) & UCSWRST == 0;
+    // Release any eUSCI-side hold first: in UCSWRST the module lets go of SDA/SCL and the pads float
+    // to the pull-ups. This clears a master-held SCL (or SDA) outright, and is the precondition for
+    // the bit-bang dance below (so we aren't fighting the module for the pins).
+    p.e_usci_b0.ucb0ctlw0().modify(|r, w| unsafe { w.bits(r.bits() | UCSWRST) });
+    bitdelay();
+    // If SDA is still low, a slave is holding it mid-byte → clock it out (≤9 pulses) + manual STOP.
+    if !sda_high(p) {
+        p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() & !(SDA_BIT | SCL_BIT)) });
+        p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() | SCL_BIT) });
+        p.p1.p1dir().modify(|r, w| unsafe { w.bits((r.bits() & !SDA_BIT) | SCL_BIT) });
+        let mut i = 0u8;
+        while i < 9 && !sda_high(p) {
+            p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() & !SCL_BIT) });
+            bitdelay();
+            p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() | SCL_BIT) });
+            bitdelay();
+            i += 1;
+        }
+        // Manual STOP: with SCL high, drive SDA low then release (rising edge = STOP).
+        p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() & !SDA_BIT) });
+        p.p1.p1dir().modify(|r, w| unsafe { w.bits(r.bits() | SDA_BIT) });
         bitdelay();
         p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() | SCL_BIT) });
         bitdelay();
-        i += 1;
+        p.p1.p1dir().modify(|r, w| unsafe { w.bits(r.bits() & !SDA_BIT) });
+        bitdelay();
+        p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | SDA_BIT | SCL_BIT) }); // pins → eUSCI
     }
-    // Manual STOP: with SCL high, drive SDA low then release (rising edge = STOP).
-    p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() & !SDA_BIT) });
-    p.p1.p1dir().modify(|r, w| unsafe { w.bits(r.bits() | SDA_BIT) });
-    bitdelay();
-    p.p1.p1out().modify(|r, w| unsafe { w.bits(r.bits() | SCL_BIT) });
-    bitdelay();
-    p.p1.p1dir().modify(|r, w| unsafe { w.bits(r.bits() & !SDA_BIT) });
-    bitdelay();
-
-    let freed = sda_high(p);
-    // Resync the master state machine (UCSWRST toggle) unless init() already holds it in reset.
-    if ctlw0(p) & UCSWRST == 0 {
-        p.e_usci_b0.ucb0ctlw0().modify(|r, w| unsafe { w.bits(r.bits() | UCSWRST) });
+    // Leave the module as the caller expects: re-enable it if it was live; else keep it in reset.
+    if was_live {
         p.e_usci_b0.ucb0ctlw0().modify(|r, w| unsafe { w.bits(r.bits() & !UCSWRST) });
     }
-    p.p1.p1sel0().modify(|r, w| unsafe { w.bits(r.bits() | SDA_BIT | SCL_BIT) });
-    freed
+    bus_idle(p)
+}
+
+/// Take the Leaf master OFF the bus: hold UCB0 in reset, which releases SDA/SCL to the pull-ups. The
+/// pin-mux return to GPIO is the caller's (board) concern — this is the driver half of a bus release
+/// (the mode machine's Passive handoff: `board::leaf_i2c_release`).
+pub fn release(p: &Peripherals) {
+    p.e_usci_b0
+        .ucb0ctlw0()
+        .modify(|r, w| unsafe { w.bits(r.bits() | UCSWRST) });
 }
 
 pub fn init(p: &Peripherals) {
@@ -131,7 +161,7 @@ fn stop(p: &Peripherals) {
 /// `false` rather than hanging. (TI's recommended eUSCI_B presence-probe order: read UCNACKIFG only
 /// AFTER the STOP completes.)
 pub fn probe(p: &Peripherals, addr: u8) -> bool {
-    if !sda_high(p) {
+    if !bus_idle(p) {
         recover(p);
     }
     p.e_usci_b0.ucb0i2csa().write(|w| unsafe { w.bits(addr as u16) });
@@ -162,7 +192,7 @@ pub fn write(p: &Peripherals, addr: u8, data: &[u8]) -> bool {
     if data.is_empty() {
         return probe(p, addr);
     }
-    if !sda_high(p) {
+    if !bus_idle(p) {
         recover(p);
     }
     p.e_usci_b0.ucb0i2csa().write(|w| unsafe { w.bits(addr as u16) });
@@ -226,7 +256,7 @@ pub fn read_reg_pumped(
     if buf.is_empty() {
         return false;
     }
-    if !sda_high(p) {
+    if !bus_idle(p) {
         recover(p);
     }
     // Phase 1: write the register pointer (transmitter), no STOP.
@@ -315,7 +345,7 @@ pub fn read(p: &Peripherals, addr: u8, buf: &mut [u8]) -> bool {
     if buf.is_empty() {
         return false;
     }
-    if !sda_high(p) {
+    if !bus_idle(p) {
         recover(p);
     }
     p.e_usci_b0.ucb0i2csa().write(|w| unsafe { w.bits(addr as u16) });

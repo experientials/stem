@@ -48,6 +48,16 @@ pub fn route_console_uart_pins(p: &Peripherals) {
     p.p4.p4sel0().modify(|r, w| unsafe { w.bits(r.bits() | P4_UART_PINS) }); // SEL0=1
 }
 
+// Stem-I²C (slave uplink) pins: UCB1 on P4.6(SDA)/P4.7(SCL), SEL1:SEL0 = 01. Chip-specific — the
+// UCB1↔pin mux differs from FR2476 (verified per-datasheet: FR2355 ds p24 signal + p102 select).
+// Distinct bits from the console UART (P4.2/P4.3), so the read-modify-write doesn't disturb it.
+// Serves FR2155 too (rides the FR2355 register superset). Called from `bsp::stem_i2c::init`.
+const P4_STEM_I2C_PINS: u8 = 0xC0; // BIT6 (P4.6=UCB1SDA) | BIT7 (P4.7=UCB1SCL)
+pub fn route_stem_i2c_pins(p: &Peripherals) {
+    p.p4.p4sel1().modify(|r, w| unsafe { w.bits(r.bits() & !P4_STEM_I2C_PINS) }); // SEL1=0
+    p.p4.p4sel0().modify(|r, w| unsafe { w.bits(r.bits() | P4_STEM_I2C_PINS) }); // SEL0=1
+}
+
 // Console UART = eUSCI_A1, 9600 8N1 @ 1 MHz SMCLK (the FR2355 LaunchPad backchannel; SLAU680 §2.2.4).
 const UCSWRST: u16 = 0x0001;
 const UCSSEL_SMCLK: u16 = 0x0080;

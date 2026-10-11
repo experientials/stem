@@ -132,3 +132,149 @@ pub fn tick<C>(slots: &mut [Slot<'_, C>], cx: &mut C, now: u32) -> u16 {
     }
     ran
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Async primitives (ADR-0013) — the SAME cooperative, never-block, one-stack model, but a task body
+// can be written as an `async fn … .await` and the compiler generates the state machine (vs the
+// hand-written [`Task`] above). Additive: a build uses `Task`/[`tick`] OR these, or both.
+//
+// There is no task arena and no real wake machinery: this is a cooperative executor that RE-POLLS its
+// futures every main-loop pass, so a `Waker` need do nothing. The caller pins its task futures
+// (`core::pin::pin!`), builds a `Context` from [`noop_waker`], and polls them each pass — exactly as
+// the hand-written loop calls `Task::poll`. `.await`ing [`yield_now`] is the async form of a
+// cooperative step returning so its peers get a turn. Pure `core`: no alloc, no embassy. See the
+// measured cost + the borrow rule ("never hold shared `&mut` state across `.await`") in ADR-0013 and
+// docs/TASK-STYLE-GUIDE.md.
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(|_| NOOP_RAW, |_| {}, |_| {}, |_| {});
+const NOOP_RAW: RawWaker = RawWaker::new(core::ptr::null(), &NOOP_VTABLE);
+
+/// A no-op [`Waker`]: this executor re-polls every pass, so `wake()` is inert. One shared vtable (4
+/// fn pointers) — the entire runtime cost beyond the generated futures (ADR-0013 spike: ~free).
+pub fn noop_waker() -> Waker {
+    // SAFETY: NOOP_VTABLE's fns are all no-ops / return the same no-op RawWaker; the data ptr is
+    // null and never dereferenced. This satisfies the RawWaker contract trivially.
+    unsafe { Waker::from_raw(NOOP_RAW) }
+}
+
+/// Yield control back to the executor exactly once: `Pending` now, `Ready` on the next poll. The
+/// async equivalent of a cooperative [`Task::poll`] returning so its peers run (the never-block
+/// contract, ADR-0006). `.await` this between units of work in a long async task.
+pub async fn yield_now() {
+    struct Yield(bool);
+    impl Future for Yield {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                Poll::Ready(())
+            } else {
+                self.0 = true;
+                Poll::Pending
+            }
+        }
+    }
+    Yield(false).await
+}
+
+// ── Real waker + LPM pender (ADR-0013 §"The valuable hard part is LPM sleep") ────────────────────────
+// [`noop_waker`] above RE-POLLS every pass (spins) — same power as today's loops. A `Pender` lets the
+// executor SLEEP instead: a future returns `Pending` when idle; a wake source (an ISR) calls the
+// `Waker`'s `wake()`, which sets a flag; [`run_pended`] runs a caller-supplied `idle` action (e.g. an
+// MSP430 LPM) ONLY when a poll round made no progress AND no wake arrived during it — so a wake racing
+// the poll is never lost. Still zero-dep + hardware-agnostic: the low-power wait itself is the caller's
+// `idle` closure (it owns the PAC/LPM/WDT); `sched` only decides WHEN to idle.
+//
+// The wake flag is a `volatile` byte, NOT an atomic: MSP430 (`core`-only tier, ADR-0013) has no
+// `core::sync::atomic` (`target_has_atomic_load_store = "8"` is false), and pulling `portable-atomic` +
+// a `critical-section` impl into this zero-dep crate for one bool is disproportionate. On the single
+// core the flag is a plain set-by-ISR / clear-then-read-by-executor latch: a `bool` store is one
+// non-tearing `MOV.B`, the only "other thread" is an ISR on the same core, and `volatile` stops the
+// compiler caching it across the idle. This is sound for that cooperative single-core model ONLY.
+use core::cell::UnsafeCell;
+
+/// A wake flag behind a [`Waker`], for the **single-core cooperative** MSP430 tier. One per executor;
+/// hand `&'static` to [`run_pended`] and have the wake source (the eUSCI slave ISR) call [`Pender::wake`]
+/// (or `waker.wake()`). See the module note on why it's a `volatile` byte, not an atomic.
+pub struct Pender {
+    woke: UnsafeCell<bool>,
+}
+
+// SAFETY: single-core cooperative use only. Every access is a `volatile` byte load/store that cannot
+// tear; the only concurrent accessor is an ISR on the SAME core (no true parallelism, no preemption of
+// the executor except by that ISR). The flag is a monotone latch (ISR sets; executor clears-then-reads).
+// This is the standard bare-metal `volatile bool` hand-off. NOT sound on a multi-core/preemptive host.
+unsafe impl Sync for Pender {}
+
+#[inline]
+fn set_woke(p: *const Pender) {
+    // SAFETY: `p` is a valid `&'static Pender` (the Waker data ptr); single-core volatile store.
+    unsafe { core::ptr::write_volatile((*p).woke.get(), true) }
+}
+
+static PENDER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+    |p| RawWaker::new(p, &PENDER_VTABLE), // clone
+    |p| set_woke(p as *const Pender),     // wake
+    |p| set_woke(p as *const Pender),     // wake_by_ref
+    |_| {},                               // drop
+);
+
+impl Pender {
+    /// Start "woke" so the first [`run_pended`] poll always runs before any idle.
+    pub const fn new() -> Self {
+        Self { woke: UnsafeCell::new(true) }
+    }
+    /// Signal readiness — call from the wake source (the eUSCI slave ISR) so a wake that races the poll
+    /// isn't lost. The ISR still clears `CPUOFF` to leave LPM (its `wake_cpu` trampoline); this flag is
+    /// what tells the executor NOT to re-idle.
+    #[inline]
+    pub fn wake(&self) {
+        // SAFETY: single-core volatile store (see the `unsafe impl Sync` note).
+        unsafe { core::ptr::write_volatile(self.woke.get(), true) }
+    }
+    #[inline]
+    fn clear(&self) {
+        unsafe { core::ptr::write_volatile(self.woke.get(), false) }
+    }
+    #[inline]
+    fn is_woke(&self) -> bool {
+        unsafe { core::ptr::read_volatile(self.woke.get()) }
+    }
+    /// A `Waker` over this pender (its data ptr is `&self`, so it must be `'static`).
+    pub fn waker(&'static self) -> Waker {
+        // SAFETY: the vtable's fns only volatile-store through the `*const Pender` data ptr, which is
+        // this `'static` self.
+        unsafe { Waker::from_raw(RawWaker::new(self as *const Pender as *const (), &PENDER_VTABLE)) }
+    }
+}
+
+impl Default for Pender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Drive a (typically never-completing) dispatch future, calling `idle` when a poll round makes no
+/// progress and no wake arrived since it started. `idle` is the caller's low-power wait — on MSP430 it
+/// arms the slave IE, holds the watchdog, and enters LPM with GIE; the eUSCI slave ISR then wakes the
+/// CPU **and** calls [`Pender::wake`]. ADR-0013's LPM pender; the degenerate `idle = || {}` just spins
+/// (== `noop_waker`). Returns the future's output if it ever completes.
+pub fn run_pended<F: Future>(
+    mut fut: Pin<&mut F>,
+    pender: &'static Pender,
+    mut idle: impl FnMut(),
+) -> F::Output {
+    let waker = pender.waker();
+    let mut cx = Context::from_waker(&waker);
+    loop {
+        pender.clear(); // clear BEFORE polling so a wake arriving during the poll sticks
+        if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+            return out;
+        }
+        if !pender.is_woke() {
+            idle(); // no progress + no pending wake → sleep; ISR wake()+CPU-wake returns us here
+        }
+    }
+}

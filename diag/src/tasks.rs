@@ -24,6 +24,7 @@ pub enum Mode {
     Post,
     Margin,
     Soak,
+    Signature,
 }
 
 impl Mode {
@@ -32,7 +33,8 @@ impl Mode {
         match self {
             Mode::Post => Mode::Margin,
             Mode::Margin => Mode::Soak,
-            Mode::Soak => Mode::Post,
+            Mode::Soak => Mode::Signature,
+            Mode::Signature => Mode::Post,
         }
     }
 
@@ -42,6 +44,7 @@ impl Mode {
             Mode::Post => "DIAG",
             Mode::Margin => "I2C SPEED",
             Mode::Soak => "I2C SCAN",
+            Mode::Signature => "I2C SIG",
         }
     }
 }
@@ -315,6 +318,25 @@ impl<'a> Task<Cx<'a>> for ButtonTask {
             uart::puts(cx.p, cx.mode.label());
             uart::puts(cx.p, "\n");
         }
+        // Console command — the same shared backchannel UART (no S1 needed, so the host/M7 can drive
+        // the menu). Explicit keys select a mode directly; Enter/space mirrors the button (next mode).
+        if uart::rx_ready(cx.p) {
+            let next = match uart::getc(cx.p) {
+                b'p' | b'P' => Some(Mode::Post),
+                b'm' | b'M' => Some(Mode::Margin),
+                b's' | b'S' => Some(Mode::Soak),
+                b'g' | b'G' => Some(Mode::Signature),
+                b'\r' | b'\n' | b' ' => Some(cx.mode.next()),
+                _ => None,
+            };
+            if let Some(m) = next {
+                cx.mode = m;
+                cx.st_phase = 0;
+                uart::puts(cx.p, "\n[key] -> ");
+                uart::puts(cx.p, cx.mode.label());
+                uart::puts(cx.p, "\n");
+            }
+        }
         Some(25) // ~40 Hz scan = the debounce interval
     }
 
@@ -437,6 +459,15 @@ impl<'a> Task<Cx<'a>> for UiTask {
                 let c = ssd::num(p, 3, c, cx.st_txn);
                 let c = ssd::text(p, 3, c, " TX");
                 ssd::clear_eol(p, 3, c);
+            }
+            // I2C SIG — the signature-pattern battery runs once and prints to UART; the OLED just
+            // names it (progress/results live on the console + the logic-analyzer trace).
+            Mode::Signature => {
+                ssd::text(p, 0, 0, "I2C SIG");
+                let c = ssd::text(p, 1, 0, "SEE UART");
+                ssd::clear_eol(p, 1, c);
+                let c = ssd::text(p, 2, 0, "+ SCOPE");
+                ssd::clear_eol(p, 2, c);
             }
         }
         Some(200) // 5 Hz refresh

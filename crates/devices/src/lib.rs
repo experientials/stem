@@ -15,6 +15,7 @@
 use embedded_hal::i2c::{I2c, SevenBitAddress};
 
 pub mod apds9960;
+pub mod is31;
 pub mod mc6470;
 pub mod si7021;
 pub mod ssd1306;

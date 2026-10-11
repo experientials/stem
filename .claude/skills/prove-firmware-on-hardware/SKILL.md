@@ -117,6 +117,21 @@ A port/build is **proven** only when, on real silicon:
 "It compiled and flashed" is **not** proven. Record the evidence (which channels, what values) — this
 is the transparency bar (`high-bar-mandate`).
 
+## Multi-model single image — prove on EVERY model, not just one
+
+A "combined" image meant to run on multiple parts (e.g. the FR2355+FR2476 combined/dynamic PAC — see
+`stem-dev`) is **NOT proven by building once + testing one chip**. Flash the **same binary** (byte-verified)
+to **each** target part and confirm the functional assertion on **each**. The runtime divergences
+(per-model peripheral base, IRQ vector slot, pins) only show up on the model that uses the *other* branch.
+- **Proven technique (2026-10-10):** one binary → flashed to @fr2476 AND @fr2355 → `scan` shows both role
+  addrs (`0x20 0x21`), and a slave read returns the sentinel (`0x5A`) on EACH → proves each chip woke from
+  LPM via *its* vector slot (0xFFDA vs 0xFFDE) with *its* runtime base/pins. One chip answering proves nothing
+  about the other.
+- **Watch the console timing trap:** a slower-waking part can clip a short `console interact --expect`
+  timeout and look like "no answer" when it's fine. Re-read with `console send` + `console tail` + a
+  generous wait before concluding a failure (this exact false-negative happened on FR2355 — the clean read
+  was `0x5A`).
+
 ## Proof-of-feature mode → a committed feature implementation log
 
 Encapsulate proof **in the source, per feature.** Build/run a feature in **`proof-of-feature` mode**

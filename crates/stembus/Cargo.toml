@@ -1,0 +1,20 @@
+[package]
+name = "stembus"
+version = "0.1.0"
+edition = "2021"
+description = "Stem-bus wire contract + shared codecs (register map, FRAM-CRC integrity) — ONE definition shared by the MSP430 node firmware (prod, the server), the RP2040 bench host (stem-probe), and the i.MX8 M7 (which depends on this repo as a git dep). Pure no_std logic: compiles for msp430-none-elf, thumbv6m, and aarch64/std alike."
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+# Reserved for future host-only (M7) conveniences that need `std` (e.g. reading an ELF to golden-CRC).
+# The core (regmap + crc) is no_std and needs none of it.
+std = []
+# `postcard` = the on-wire payload codec for the command vocabulary (COMMANDS.md §0 decision): derive
+# serde on Command/Response/… + the `wire` encode/decode helpers. OPT-IN so size-sensitive consumers that
+# don't need it (diag) pay nothing; only the cros_ec build enables it. (no_std: serde/postcard core only.)
+postcard = ["dep:serde", "dep:postcard"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+postcard = { version = "1", default-features = false, optional = true }

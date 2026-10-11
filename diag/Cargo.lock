@@ -11,6 +11,7 @@ dependencies = [
  "msp430fr2155",
  "msp430fr2355",
  "msp430fr2476",
+ "node-hal",
 ]
 
 [[package]]
@@ -36,6 +37,7 @@ dependencies = [
  "msp430-rt",
  "panic-msp430",
  "sched",
+ "stembus",
 ]
 
 [[package]]
@@ -98,6 +100,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "node-hal"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal",
+]
+
+[[package]]
 name = "panic-msp430"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -150,6 +159,10 @@ dependencies = [
 
 [[package]]
 name = "sched"
+version = "0.1.0"
+
+[[package]]
+name = "stembus"
 version = "0.1.0"
 
 [[package]]

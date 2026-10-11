@@ -1,5 +1,9 @@
 ## I2C Expander API
 
+> This is the **transport/register-map contract** (PCA9698 emulation, extended/debug window, and the
+> role-addressing table). The **cross-MCU command model** layered on it — the `postcard` `Command`
+> vocabulary over I²C/UART, common to all MCU modules — is in **[docs/COMMANDS.md](docs/COMMANDS.md)**.
+
 The firmware supports the emulation of a PCA9698 expanded to support 8 pin ports.
 In principle this supports 64 GPIO pins, but due to some being assigned to other functions
 the maximum with be ~52 pins.
@@ -24,6 +28,32 @@ The Polarity & Mask Interrupt must be maintained by the firmware as there is no 
 The open-drain interrupt output is activated when one of the port pins changes state and the pin is configured as an input. The interrupt is deactivated when the input returns to its previous state or the Input Port register is read (see Figure 12). A pin configured as an output cannot cause an interrupt. Since each 8-bit port is read independently, the interrupt caused by Port 0 will not be cleared by a read of Port 1 or the other way around.
 
 The I/O Expander I2C API is enabled by calling `stemI2C(scl_pin, sda_pin, i2c_address)`.
+
+### Stem address is ROLE-BASED (CANONICAL — verbatim, Henrik 2026-10-01)
+
+> The address for MCUs on the stem bus should be determined on the role they play, so for the FR2476
+> we need to give it an alt address value indicating that it isn't the real thing(or some other
+> excuse). It would have the same firmware as FR2355. FR2433 would have an I/O expander role, which
+> for now is a placeholder
+
+**Derivation (subordinate to the block above).** The node's Stem I²C slave address is **chosen at boot
+from the detected model → its role**, not fixed. A master (SoM / RP2040) can therefore tell *what it is
+talking to* from the address alone — and a dev stand-in cannot masquerade as the production supervisor.
+Values are within the PCA9698 strap group 0x20–0x27:
+
+| Role | Model(s) | Stem addr | Note |
+|---|---|---|---|
+| **Supervisor** (production) | FR2355, FR2155 | **0x20** | the genuine sleep-supervisor; PCA9698 group base |
+| **Supervisor — DEV stand-in** | FR2476 / FR2475 | **0x21** | SAME firmware as FR2355, but "not the real thing" → distinct address so it can't pose as the production supervisor |
+| **I/O-expander** (placeholder) | FR2433 | **0x22** | plays the dumb-expander role; PLACEHOLDER value until the role is defined |
+| **Power controller** | CYPM1111 (EZ-PD PMG1-S1) | **0x23** | the PD controller **is an MCU → a full Stem-bus node** (Henrik 2026-10-03): addressable like the others, **and it masters the Stem bus while the SoM is off** (the SoM-off-regime master). Requires the Stem bus to reach the power module (292) across the B2B. |
+
+*(Address values 0x21/0x22/0x23 are a derivation — the canonical block fixes the scheme, not the exact
+numbers; adjust here if the role map changes. Firmware: `Model::stem_addr()` in `prod/src/model.rs`.)*
+
+**Masters on the Stem bus** (bus mastership, not a side-channel handshake): the **SoM/M7** while it is
+alive; the **PD controller (CYPM1111)** while the SoM is off; the **RP2040** on the dev bench (SoM
+stand-in). Only one master at a time — the SoM→off handoff passes mastership to the PD controller.
 
 
 ### From the PCA9698 Datasheet
@@ -110,11 +140,26 @@ It could offer a way to set baud rate from master
 
 ### Extended Registers
 
-#### 30h 110000 - 
+#### 30h 110000 - Debug / identity / status window (0x30–0x3E)
 
-#### 3Fh 111111 - 
+See `prod/src/regmap.rs` (DBG_* constants): `0x30` iface magic (`0xD0`), `0x31/0x32` model id,
+`0x33–0x36` build id, `0x37` status, `0x38` dev-count, `0x39` known-present bitmap, `0x3A` fault,
+`0x3B–0x3D` fw version (maj/min/patch), `0x3E` MODE_CTRL (R: current mode; W: request Passive/Sensing).
 
+#### 3Fh 111111 - DBG_CRC: per-sector FRAM CRC16 readout (integrity; ADR-0010)
 
+A **windowed** register (the 6-bit command pointer leaves no room for the 8×u16 CRCs as separate
+addresses). Computed in POST on **every** boot (incl. the silent production image) — `post::fram_crcs`.
+
+- **WRITE `0x3F` = byte index 0..15** → moves the read cursor (`idx = 2·sector + {0=hi,1=lo}`).
+- **READ `0x3F`** → returns the CRC byte at the cursor.
+- So the M7 reads all 16 bytes as 16 × (write idx, read byte) and gets `[sec0_hi, sec0_lo, … sec7_hi,
+  sec7_lo]` = per-sector CRC16-CCITT (poly 0x1021, init 0xFFFF) over the program-FRAM window.
+
+**The MSP only reports; the M7 judges** (ADR-0010): the M7 holds the golden per-sector CRCs for the image
+it flashed, compares, and reflashes a mismatched sector over BSL. A buggy/corrupt MSP verifier can only
+cause a false "mismatch" (harmless reflash), never a false "OK". Reading it needs no UART (works on the
+silent build); the console echoes the same values when `console`/`--debug` is built.
 
 ### Custom Registers
 

@@ -53,3 +53,5 @@ dkms.conf
 
 # Rust build output (PACs, diag, examples)
 target/
+
+docs/scratch/

@@ -101,7 +101,20 @@ just diag run           # build + flash to the connected board
 just monitor            # watch the 9600 8N1 backchannel (auto-detects the usbmodem port)
 just usb status|recover # diagnose/recover the eZ-FET USB when it drops (hub/short/latch)
 just example build hello-rust
+
+# One chip-primary command builds any board's firmware; routes to prod/diag/probe + the right toolchain.
+just build fr2355            # FR2355 product (prod)        → Docker toolchain
+just build fr2355 --diag     # FR2355 POST/self-test (diag) → Docker toolchain
+just build rp2040            # RP2040 bench host (stem-probe) → HOST cargo (no container; Linux+macOS)
+just build-all               # every default image: MSP430 products (Docker) + the RP2040 probe
 ```
+
+**Which build path (automatic via `just build <chip>`):** MSP430 (`prod`/`diag`, `msp430-none-elf`)
+needs TI's external `msp430-elf-gcc` → **Docker**. The RP2040 (`debug/stem-probe`, thumbv6m) links with
+**rust-lld** (in Rust) → **host cargo**, no container, Linux+macOS alike. Future RP2350/nRF52/PD = a
+sibling firmware module + a `build` case arm. **Never** run raw `cargo build` for MSP430 and read the
+missing-linker error as "toolchain missing" — it means you bypassed `just build`. See
+[TOOLCHAIN.md](../../../TOOLCHAIN.md) "One `just build <chip>`, two link toolchains".
 
 Flashing gotchas (USB drops, "No unused FET found", `cargo install svd2rust` hangs, the old
 `cargo 1.64` on PATH) are all documented in the **msp430-macos-dev** skill — consult it whenever
@@ -114,6 +127,54 @@ yanked). Regenerate with `just pac gen [device]`; compile-test with `just pac ch
 The pipeline (prebuilt `svd2rust` binary — do **not** `cargo install` it — + absolute-path stable
 toolchain) and the reasons are in [pac/README.md](../../../pac/README.md) and the msp430-macos-dev
 skill's `references/rust-pac.md`.
+
+## Multi-model single image (combined / "dynamic" PAC) — HW-PROVEN 2026-10-10
+
+ONE firmware binary CAN run on register-*incompatible* MSP430 models (e.g. FR2476 **and**
+FR2355/FR2155) when the differences are few. This is now a **real, shipped prod target**, not a spike:
+build `prod` with `--features fr2xxx` (→ `bsp/fr2xxx` → combined PAC `pac/msp430fr2xxx-dual`), artifact
+`prod-fr2xxx-silent-cros_ec`. **HW-proven 2026-10-10:** the SAME byte-verified binary served its cros_ec
+Stem slave at the chip-correct role addr on BOTH @fr2476 (0x21) and @fr2355 (0x20) — see
+`docs/spikes/combined-image.md` "Productized (S2b)". The spike `spike/combined-mech/` de-risked the
+mechanism first. The method:
+
+- **Find EVERY divergence first — don't assume it's one peripheral.** Diff the generated PACs'
+  `pub type … = crate::Periph<…::RegisterBlock, 0xBASE>` lines **and** grep each board file for which
+  *instances* it uses (`grep -oE 'p\.[a-z_0-9]+'`). For FR2476 vs FR2355 the firmware-relevant set is:
+  eUSCI_B1 base (0x0580/0x05C0), **console eUSCI_A** (A0@0x0500 / A1@0x0580 — different instance), **CSCTL1
+  clock trim value** (manual vs factory), and the µs timer (TA0 vs TB1 — but **prod doesn't use it**, so it
+  drops out). Missing one = a combined image that boots on one chip and hangs on the other.
+- **Same-block / two-base peripherals → runtime overlay.** When the `RegisterBlock` layout is identical but
+  the base differs, overlay the typed block on a model-selected base: `&*(base as *const RegisterBlock)`
+  with `base` from `bsp::model::stem_i2c_base()` (or equivalent). Used for eUSCI_B1 (`stem_i2c` `_dynb1`
+  path) and the console eUSCI_A (`board/fr2xxx_combined.rs`). No `static`/init-ordering needed — resolve
+  per call from the TLV device-id (a cheap volatile read; valid even inside the wake ISR).
+- **Same register, different VALUE → runtime select the value.** CSCTL1 clock trim: FR2476 writes an
+  explicit manual DCO trim, FR2355 writes range-select only (factory trim; the FR2476 values won't lock the
+  FR2355 FLL). `if model.is_fr235x() { factory } else { manual }`. Use the **bounded** FLL lock-wait (safe
+  for both).
+- **Dual-slot vector table — let the combined PAC emit it.** The combined PAC (`pac/msp430fr2xxx-dual`,
+  feature `rt`) emits its OWN `__INTERRUPTS` with the SAME EUSCI_B1 handler at BOTH idx 45 (0xFFDA) and 47
+  (0xFFDE) + a real `device.x`. Consumers (`prod fr2xxx`) enable `bsp/rt` + `msp430-rt/device` as usual —
+  no hand-rolled table. Safe **only if no other firmware-used IRQ** maps to those slots (we use only
+  eUSCI_B1). objdump the real artifact to confirm: handler addr at both slots, reset @ 0xFFFE.
+- **Runtime pins + RAM floor + family guard.** Route per-model pins at runtime (ports share addresses);
+  `memory-fr2xxx.x` RAM = the smallest model (intersection, 4 KB) with the 0xFF80 superset vector region;
+  `model::matches_build_family()` must accept EVERY member the combined image covers (else it flags a false
+  mismatch on boot).
+
+**Gotchas:**
+- The generated PAC's `Vector` union has **private fields** → a table can't be built from another crate.
+  The combined PAC must **emit its own `__INTERRUPTS`** (the spike worked around this with its own identical
+  `union Vector`; the productized PAC emits the real table).
+- Console-OFF builds flush out latent bugs: `deepsleep::enumerate` gated the `Console` *import* but not its
+  (unconditional) trait bound → every silent/combined build failed until the import was made unconditional.
+  **Build the console-OFF / silent variant** when validating, not just the default console-ON one.
+- Post-flash the Stem bus is briefly perturbed by the board reset — the **first `scan` after a flash can
+  come back empty**; re-scan after a short settle before concluding a node is dead.
+
+This is the "combined dynamic PAC = a **3rd build target**" idea, now real: `prod --features fr2xxx` is ONE
+FR2355+FR2476+FR2155 image. Next: fold `prod` → `modules/deepsleep`. Dual-chip proof: [[prove-firmware-on-hardware]].
 
 ## Working on `diag` (the POST firmware)
 
