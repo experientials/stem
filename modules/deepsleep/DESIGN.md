@@ -295,6 +295,19 @@ In a `--diag` build it runs like this:
   clears `SYSRSTIV` before firmware runs; **expected here**, real causes latch in the field. This is the
   instrument the parked-button root-cause needs (BOR/SVS vs PUC/WDT). *(`diag/bootrec.rs` — a dormant,
   unproven, fr2355-hardcoded boot-STAGE tracker — is a separate concern, still un-rehomed.)*
+- **Slice 3c (extraction + diag-mode re-home):**
+  - **3c (extract):** `diag_ext` moved out of `modules/deepsleep` into the node-generic **`crates/diag`**
+    (`diag::run`); deepsleep keeps only the `#[cfg(feature="diag")] diag::run(...)` hook. Decoupled from the
+    product `ModeMachine` — grabs the Leaf bus via the `node-hal::LeafBus` seam (acquire/release). HW-proven
+    on @fr2476 (identical extended-POST output; `reset: BOR(2)` decoded live).
+  - **3c-1 (control plane):** `SetDiagMode` command/register on the cros_ec surface (`DiagMode`
+    off|margin|soak|signature; mirrors `SetMode`) + `LiveNode.diag_mode()` (default **Off**) + probe
+    `diagmode` verb. Host-tested (28 stembus tests). *The SoM/stem-probe sets a node's continual diag mode.*
+  - **3c-2 (re-home):** stress **margin**+**soak** (`crates/diag/src/stress.rs`) + **signature**
+    (`signature.rs`) re-homed as `DiagMode` bodies over the shared `bsp::i2c` (verified reads vs constant ID
+    regs; targets guarded by scan presence). Margin/signature bounded; soak cooperative (services the slave
+    → `diagmode off` stops it). Builds + fits (fr2476 --diag 66% FRAM). **END-TO-END HW-PROOF PENDING** a
+    bench run (flash new probe + a diag build on @fr2476 vs the APDS 0x39 / VL53 0x29 targets now present).
 
 **PARKED (deferred, 2026-10-11) — radar + button, with a reproduced finding:**
 - **Radar (RCWL-0516, P2.4):** the radar board isn't connected on the bench → **deferred**. The re-home is
@@ -310,7 +323,8 @@ In a `--diag` build it runs like this:
   see *why* it resets (BOR/SVS brownout vs PUC vs WDT), and scope/verify P2.4+P4.0 wiring + the S1 state.
   References for the re-home: `diag/src/{buttons,rcwl}.rs` (working) + `bsp/src/adc.rs` (the re-home model).
   Pins: FR2476 S1 = **P4.0** (SLAU802 Fig. 19); other boards' button pins need allocation via the pinmux model.
-- **stress / soak / signature:** the task-based long-running diag modes — not yet re-homed.
+- **stress / soak / signature:** re-homed as `DiagMode` bodies in `crates/diag` (slice 3c-2) — code
+  complete + builds; **end-to-end HW-proof pending** a bench run against the present sensor targets.
 
 ### Single binary across multiple models
 Requirement: **one binary image serves multiple MSP430 models**, detecting the exact model and
