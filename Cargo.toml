@@ -19,6 +19,7 @@ exclude = [
     "crates/bsp",       # MSP430 PACs/board/hal — target-only
     "crates/stem-node", # shared Stembus-node control surface — target-only (built as a dep of the modules)
     "crates/leaf-scan", # Leaf-bus enumeration — deps msp430 → target-only
+    "crates/diag",      # node-generic extended-POST (diag::run) — target-only (dep of a module's `diag` build)
     "diag",             # MSP430 diag binary (Docker build)
     "pac",              # generated svd2rust PACs — target-only
     "pac/msp430fr2xxx-dual", # combined FR2476/FR2355/FR2155 PAC (dual-slot __INTERRUPTS, B1X/B1Y) — target-only

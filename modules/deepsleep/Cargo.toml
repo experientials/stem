@@ -47,7 +47,9 @@ debug = ["console", "stem-node/debug", "leaf-scan?/debug"]
 # `diag` — the extended-POST extension (DESIGN.md "diag — per-device POST extension"): a boot window that,
 # unless a master sends `SkipDiag` (or S1 later), runs per-device diag tasks. Implies `console` (diag
 # output over UART). Dual-only (the extension uses the Leaf sensor bus); targets the 32 KB parts.
-diag = ["console"]
+# The extension itself is the node-generic `crates/diag` crate (pulled in only here); this module keeps
+# just the thin `#[cfg(feature = "diag")] diag::run(...)` hook in main.rs.
+diag = ["console", "dep:diag"]
 
 # OPERATING MODES (see DESIGN.md "Operating modes"). A build compiles in the modes it supports; the
 # active mode is a RUNTIME switch among them. At least ONE mode is required (compile_error guard).
@@ -79,6 +81,9 @@ stem-node = { path = "../../crates/stem-node" }
 # Leaf-I²C sensor enumeration — a dual-only capability (optional, pulled in by the `_dual` feature). Used
 # by the Sensing-mode scan path; a slave-only node wouldn't link it.
 leaf-scan = { path = "../../crates/leaf-scan", optional = true }
+# The node-generic extended-POST (`diag::run`) — pulled in ONLY by the `diag` feature. The extended-POST
+# code lives here (shared across node modules), not in this module; main.rs keeps just the boot hook.
+diag = { path = "../../crates/diag", optional = true }
 
 # opt-level "s" + LTO: size wins over speed (the FRAM budget is the point). The gate
 # (`just prod build`) fails the build if the footprint exceeds the active family's budget.

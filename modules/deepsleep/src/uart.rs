@@ -7,7 +7,10 @@
 use crate::pac::Peripherals;
 
 // Shared formatters over board::console_uart_tx — putc, puts, hex8, hex16, dec, dec_i16, fixed2.
-// One copy with diag (was duplicated here). prod uses a subset; the rest are LTO-stripped.
+// One copy with diag (was duplicated here). Which formatters a given build actually calls varies by
+// feature (console/debug, and whether the diag crate is linked), so the glob may be wholly unused in a
+// lean build — re-export it regardless (the unused names are LTO-stripped); silence the glob lint.
+#[allow(unused_imports)]
 pub use bsp::fmt::*;
 
 pub fn init(p: &Peripherals) {

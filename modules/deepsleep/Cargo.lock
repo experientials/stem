@@ -37,6 +37,7 @@ version = "0.1.0"
 dependencies = [
  "bsp",
  "devices",
+ "diag",
  "leaf-scan",
  "msp430",
  "msp430-rt",
@@ -52,6 +53,19 @@ name = "devices"
 version = "0.1.0"
 dependencies = [
  "embedded-hal",
+]
+
+[[package]]
+name = "diag"
+version = "0.1.0"
+dependencies = [
+ "bsp",
+ "devices",
+ "leaf-scan",
+ "msp430",
+ "node-hal",
+ "stem-node",
+ "stembus",
 ]
 
 [[package]]

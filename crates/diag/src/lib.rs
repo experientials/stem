@@ -1,24 +1,34 @@
-//! diag extension — the `--diag` build's **extended POST** (DESIGN.md "diag — a `--diag` build flag that
-//! fills a POST extension point"). Runs AFTER the normal POST and BEFORE normal operation:
+#![no_std]
+
+//! `diag` — the node-generic **extended POST** (DESIGN.md "diag — a `--diag` build flag that fills a POST
+//! extension point"). Runs AFTER the normal POST and BEFORE normal operation:
 //!
 //!   1. a boot **window** during which the node services the Stem slave (so a master monitoring boot can
 //!      send `SkipDiag`) — and, later, polls the S1 button;
-//!   2. unless skipped, the **per-device diag tasks** (I2C exercise / radar / ADC health / stress), run as
-//!      `sched` tasks interleaved with the slave service so they never block the control channel.
+//!   2. unless skipped, the per-device diag checks (boot-reason, ADC board-health, I2C scan + per-device
+//!      exercises) — and, later, the long-running task-based modes (stress/soak/signature).
 //!
-//! diag is ADDITIVE: either way the node returns here and proceeds to normal operation. This module is
-//! compiled ONLY in a `--diag` build (feature `diag`); a normal build leaves the hook empty.
+//! diag is ADDITIVE: either way the node returns to the caller and proceeds to normal operation.
 //!
-//! SLICE 1 (this file): the window + `SkipDiag` + the cooperative-service skeleton, with a placeholder
-//! extended-POST body. Per-device exercises are re-homed from the `diag/` crate incrementally (then
-//! `diag/` is deleted); the window is also the future entry for command/condition-triggered diag.
+//! **Why a crate, not a module in `modules/deepsleep`:** this is node-generic (what *any* Stembus node
+//! does for an extended self-test), so every node module keeps only a thin `#[cfg(feature = "diag")]
+//! diag::run(...)` hook and nothing node-generic bulks one module. Built only when the module's `diag`
+//! feature pulls this crate in (an optional dep). MSP430-oriented for now (ADC/boot-reason use `bsp`'s
+//! PAC); the bus/skip/scan paths are already generic over the `node-hal` seams.
+//!
+//! The Leaf bus is grabbed via the `node-hal::LeafBus` seam directly (`acquire`/`release`) rather than the
+//! product's `ModeMachine` — same pin-route + master bring-up, but it leaves the mode machine unperturbed
+//! (the node stays Passive throughout; diag runs before normal operation).
 
-use crate::hal::EusciI2c;
-use crate::pac::Peripherals;
-use crate::{ec, enumerate, mode, node, uart};
+use bsp::fmt as uart;
+use bsp::hal::EusciI2c;
+use bsp::pac::Peripherals;
 use devices::mc6470::{Mc6470, ADDR as MC6470_ADDR};
 use devices::si7021::{Si7021, ADDR as SI7021_ADDR, PART_SI7021};
 use devices::{Device, Error};
+use leaf_scan::enumerate;
+use node_hal::LeafBus;
+use stem_node::{ec, node};
 
 // Boot window ≈ a few seconds at 1 MHz SMCLK. The DESIGN target is ~2 s; this first slice uses a generous
 // span so the skip is testable by hand on the bench. Each pass services the slave + checks for a
@@ -34,7 +44,6 @@ pub fn run(
     ec_slave: &mut stembus::cros_ec::EcSlave,
     live: &mut node::LiveNode,
     p: &Peripherals,
-    mach: &mut mode::ModeMachine,
 ) {
     uart::puts(p, "diag: boot window — send 'skipdiag' (or S1, later) to skip extended POST\n");
     for _ in 0..WINDOW_PASSES {
@@ -84,14 +93,14 @@ pub fn run(
     uart::puts(p, "C\n");
 
     // I2C device tests (re-homed from diag/'s t_scan + t_devices, over the shared `leaf-scan`): acquire the
-    // Leaf sensor bus (a temporary Sensing switch — the node boots Passive), scan + report the connected
-    // devices' presence/inventory, then RELEASE back to Passive so normal operation starts off the bus.
-    mach.switch(hw, mode::Mode::Sensing);
+    // Leaf sensor bus (via the LeafBus seam — the node boots Passive), scan + report the connected devices'
+    // presence/inventory, then RELEASE back to Passive so normal operation starts off the bus.
+    hw.acquire();
     let scan = enumerate::scan(hw);
     enumerate::report(hw, &scan);
     exercise_devices(p, &scan); // per-device value reads (re-homed t_gravity/t_temphum), guarded by presence
-    // TODO(slice 3): radar (GPIO) + ADC rail/temp health + stress/soak/signature as sched tasks.
-    mach.switch(hw, mode::Mode::Passive);
+    // TODO(slice 3c): stress/soak/signature as task-based, command/condition-triggered diag modes.
+    hw.release();
 
     uart::puts(p, "diag: done\n");
 }
@@ -100,7 +109,6 @@ pub fn run(
 /// `t_temphum`, reusing the SAME proven `devices` drivers (no fork). Each is guarded by the scan's presence
 /// bitmap, so an absent sensor is skipped (not a false failure). On a bench with only an OLED these both
 /// skip; wire the sensor and the real read runs.
-#[cfg(feature = "diag")]
 fn exercise_devices(p: &Peripherals, scan: &enumerate::Scan) {
     let mut bus = EusciI2c::new(p);
 

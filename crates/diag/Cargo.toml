@@ -1,0 +1,24 @@
+[package]
+name = "diag"
+version = "0.1.0"
+edition = "2021"
+description = "The node-generic DIAG capability: the `--diag` build's extended-POST entry (`diag::run`) — a boot window that, unless a master sends `SkipDiag` (or S1 later), runs per-device diag tasks (I2C scan + exercises, ADC board-health, boot-reason). Lives in a crate (not in modules/deepsleep) so EVERY Stembus node module (deepsleep/prod/expander) keeps only a thin `#[cfg(feature=\"diag\")] diag::run(...)` hook. Generic over the node-hal seam (LeafBus/StemSlave/Console); MSP430-oriented for now (ADC/boot-reason use bsp PAC). Supersedes the standalone `diag/` binary crate (being retired)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# asm::nop for the boot-window pacing loop.
+msp430 = "0.4"
+# The shared low-level layer: PAC alias (Peripherals), the `EusciI2c` seam, ADC board-health, boot-reason.
+# The chip is selected by the consuming module's `bsp/<chip>` edge; features unify across the graph, so
+# diag names `bsp::pac`/`bsp::adc`/`bsp::StemHw` without forwarding a chip feature of its own.
+bsp = { path = "../bsp" }
+# The hardware-seam traits diag drives the bus through (LeafBus acquire/release/scan; Console for report).
+node-hal = { path = "../node-hal" }
+# cros_ec framing (`EcSlave`) the boot window services so a master's `SkipDiag` lands.
+stembus = { path = "../stembus", features = ["postcard"] }
+# Shared per-device drivers (MC6470/Si7021) via the embedded-hal seam — the same drivers prod uses (no fork).
+devices = { path = "../devices" }
+# The shared node control surface: `ec::poll` (serve the Stem slave) + `node::LiveNode` (skip-request).
+stem-node = { path = "../stem-node" }
+# Leaf sensor-bus enumeration (scan + report) — the I2C device inventory the extended POST prints.
+leaf-scan = { path = "../leaf-scan" }
