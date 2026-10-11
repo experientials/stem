@@ -51,6 +51,14 @@ pub fn run(
     // Window elapsed without a skip → run the extended POST.
     uart::puts(p, "diag: extended POST\n");
 
+    // Board health (MCU-self, no bus): supply rail + die temperature from the ADC's internal channels.
+    bsp::adc::init(p);
+    uart::puts(p, "  board: DVCC=");
+    uart::dec(p, bsp::adc::dvcc_mv(p));
+    uart::puts(p, "mV  Tdie=");
+    uart::dec_i16(p, bsp::adc::die_temp_c(p));
+    uart::puts(p, "C\n");
+
     // I2C device tests (re-homed from diag/'s t_scan + t_devices, over the shared `leaf-scan`): acquire the
     // Leaf sensor bus (a temporary Sensing switch — the node boots Passive), scan + report the connected
     // devices' presence/inventory, then RELEASE back to Passive so normal operation starts off the bus.

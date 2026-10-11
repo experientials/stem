@@ -54,6 +54,10 @@ pub mod model;
 pub mod hal;
 #[cfg(feature = "_leaf")]
 pub mod i2c;
+// ADC board-health (internal rail-mV + die-temp channels) — shared capability re-homed from diag/adc.rs
+// for the node's `--diag` extended POST. Dual-only (diag's scope); FR2355/FR2155 cal values to-confirm.
+#[cfg(feature = "_leaf")]
+pub mod adc;
 // The Stem-bus I²C **slave** transport — sibling to the Leaf-master `i2c` above. Present on EVERY node
 // (the slave control surface is every chip's job): dual families run it on eUSCI_B1, FR2433 on its one
 // eUSCI_B0. The protocol/register-file dispatch lives above this, in `deepsleep` (DEEPSLEEP-EXTRACTION.md §A).
