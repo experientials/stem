@@ -335,6 +335,36 @@ In a `--diag` build it runs like this:
 - **stress / soak / signature:** re-homed as `DiagMode` bodies in `crates/diag` (slice 3c-2) — code
   complete + builds; **end-to-end HW-proof pending** a bench run against the present sensor targets.
 
+### diag fold — faithful migration DONE; interrupt-driven integration is the NEXT step (2026-10-11)
+The **whole working diag harness** was migrated **verbatim** into `crates/diag` (diag & prod are two
+harnesses over one feature set, prod ⊆ diag — not standalone): `Cx` + the cooperative `sched::Task`s
+(`RadarTask`/`ProximityTask`/`PostTask`/`UiTask` + `StressTask`/`SignatureTask`) + the `diag.rs` POST
+registry, imports re-pointed to the shared crates, display DRIVERS = `devices::is31` (LED) +
+`devices::ssd1306` (OLED; `fill`/`clear_eol`/`num` added). `diag::run` = the ~2 s **SkipDiag** window →
+the `sched` loop; `cx.mode` bridged from the persisted `SetDiagMode`/`diag_mode`. **Builds, fits
+(fr2476 --diag ~91% FRAM), and RUNS on @fr2476:** POST/scan/inventory, the OLED UI ("DIAG · device
+inventory · N of M · FAULT"), real Si7021/APDS reads, `sched` loop — all verified on hardware.
+
+**Two integration issues HW-surfaced by running diag INSIDE the node (the migrated code is verbatim, so
+these are context, not code):**
+1. **Leaf device-read regression** — VL53L0X/MC6470/IS31/OLED-init reads corrupt (marginal-bus signature,
+   e.g. a garbage `0x32` Si7021 part-id while its measure+CRC passes), where the **standalone diag read
+   them clean** on the same bus/devices. Ruled out: clock (deepsleep already sets 1 MHz), GIE/interrupts
+   (`diag::run` runs before GIE is armed), init order (partial init shows it; a **full** init HANGS —
+   re-running `clock_init_1mhz` relocks the FLL mid-session).
+2. **Stem control-channel starved** — the cooperative diag loop can't service the eUSCI_B1 slave
+   reactively (GIE never armed in the diag build; `ec::poll` too infrequent between long tasks like the
+   ~1.5 s bus scan), so a master (stem-probe) can't command it or read its findings
+   (`ident`/`status`/`diagmode` time out).
+
+**Root cause (shared) + the plan:** folding a bare cooperative loop into the node means it must ALSO serve
+a **reactive** control channel, which a poll-only / GIE-off loop fundamentally can't. **Next step: make
+the Stem slave interrupt-driven in the diag build** (arm the eUSCI_B1 slave ISR so commands are serviced
+regardless of the diag tasks) — ADR-0013's event-driven model. That unblocks (2), and then (1) is
+diagnosed scope-free & field-automatable over the Stem bus (expose the Leaf scan + per-device **read-OK**
+bitmap via cros_ec — "which Leaf devices were found / which read cleanly" — populated from the diag scan).
+NOTE for any field diagnosis: **no scope** — software self-report + the built-in margin sweep only.
+
 ### Single binary across multiple models
 Requirement: **one binary image serves multiple MSP430 models**, detecting the exact model and
 mapping pins at runtime. Feasible **within a register-/memory-map-compatible family** (same peripheral
