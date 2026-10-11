@@ -7,6 +7,7 @@
 //! v0 scope = the `deepsleep` worked example (COMMANDS.md §5.7): introspection + operation. Debugging
 //! and the row-based firmware-update (`FwUpdate`, §3) are added as the other sections land.
 
+use crate::diag_mode::DiagMode;
 use crate::mode::Mode;
 
 /// Why an MCU woke the SoM — a **hardcoded enum byte** shared SoM↔MCU (COMMANDS.md §5.6). Read via the
@@ -192,6 +193,11 @@ pub enum Command {
     /// A master monitoring boot sends this within the ~2 s diag window to tell the node to omit the extended
     /// POST and go straight to normal operation. Harmless on a non-`--diag` build (nothing to skip → Ack).
     SkipDiag,
+    /// Operation/diag-control: set the node's **continual diag mode** (DESIGN.md "CONTINUAL diag is a MODE
+    /// controlled by command/register", Henrik 2026-10-11) — which long-running diagnostic (margin/soak/
+    /// signature) the `--diag` node runs. The SoM/stem-probe drives it; **default `Off`** (a continual test
+    /// left on makes the device unusable). Harmless on a non-`--diag` build: the stored mode is inert → Ack.
+    SetDiagMode { mode: DiagMode },
     // TODO (other sections, COMMANDS.md): Scan/Dump/SelfTest (debugging, feature-gated);
     // FwUpdate row-stream (flashing, §3).
 }
@@ -266,6 +272,10 @@ pub trait Operate {
     /// Default no-op — only a node that runs the diag extension (deepsleep) overrides it to set a flag its
     /// boot drains. Never applied inside dispatch (same deferral as `set_mode`).
     fn skip_diag(&mut self) {}
+    /// Record the requested **continual diag mode** (`SetDiagMode`; DESIGN.md "CONTINUAL diag is a MODE").
+    /// Default no-op — only a `--diag` node (deepsleep) overrides it to STORE the mode its diag loop reads
+    /// each pass (a persistent setting, not a one-shot). Default-off: an un-set node runs normally.
+    fn set_diag_mode(&mut self, _mode: DiagMode) {}
 }
 
 /// Dispatch the **universal introspection** arms of a [`Command`] against a [`Node`]. Returns `None` for
@@ -287,7 +297,10 @@ pub fn execute_core<N: Node>(node: &mut N, cmd: Command, events_out: &mut [Event
         // `Capabilities` before delegating here), so this core mask is correct for the Node-only case.
         Command::Capabilities => Some(Response::Capabilities(CAPS_NODE)),
         // operation/debug/flash — not the universal core's job
-        Command::SetMode { .. } | Command::SetThreshold { .. } | Command::SkipDiag => None,
+        Command::SetMode { .. }
+        | Command::SetThreshold { .. }
+        | Command::SkipDiag
+        | Command::SetDiagMode { .. } => None,
     }
 }
 
@@ -308,6 +321,10 @@ pub fn execute<N: Node + Operate>(node: &mut N, cmd: Command, events_out: &mut [
         Command::SetMode { mode } => Response::ModeNow(node.set_mode(mode)),
         Command::SkipDiag => {
             node.skip_diag();
+            Response::Ack
+        }
+        Command::SetDiagMode { mode } => {
+            node.set_diag_mode(mode);
             Response::Ack
         }
         Command::SetThreshold { id, value } => {
@@ -381,6 +398,7 @@ impl Command {
             Command::SetMode { .. } => "mode",
             Command::SetThreshold { .. } => "thresh",
             Command::SkipDiag => "skipdiag",
+            Command::SetDiagMode { .. } => "diagmode",
         }
     }
 }
@@ -397,6 +415,7 @@ pub const CATALOG: &[CommandSpec] = &[
     CommandSpec { verb: "mode", args: "[addr] [p|s]", help: "set operating mode Passive/Sensing", category: Category::Operation },
     CommandSpec { verb: "thresh", args: "<addr> <id> <v>", help: "set a sensor/trigger threshold", category: Category::Operation },
     CommandSpec { verb: "skipdiag", args: "[addr]", help: "skip the diag extension (within the ~2 s boot window)", category: Category::Operation },
+    CommandSpec { verb: "diagmode", args: "[addr] <off|margin|soak|signature>", help: "set the continual diag mode (default off)", category: Category::Operation },
 ];
 
 /// The catalog spec for a CLI `verb`, or `None`. Consumers render device-verb help from this so the
@@ -645,6 +664,13 @@ mod tests {
         assert_eq!(n.thresholds[1], 0x1234);
         assert_eq!(execute(&mut n, Command::SetThreshold { id: 9, value: 0 }, &mut scratch), Response::Unsupported);
 
+        // SkipDiag + SetDiagMode are boot/diag-control ops → always Ack (default no-op on a non-diag node).
+        assert_eq!(execute(&mut n, Command::SkipDiag, &mut scratch), Response::Ack);
+        assert_eq!(
+            execute(&mut n, Command::SetDiagMode { mode: DiagMode::Soak }, &mut scratch),
+            Response::Ack
+        );
+
         // EventHistory drains what the node recorded.
         n.ring.push(EventKind::Trigger, 1, 0);
         n.ring.push(EventKind::ModeChange, Mode::Sensing.code(), 0);
@@ -673,6 +699,7 @@ mod tests {
             Command::SetMode { mode: Mode::Passive },
             Command::SetThreshold { id: 0, value: 0 },
             Command::SkipDiag,
+            Command::SetDiagMode { mode: DiagMode::Off },
         ];
         for cmd in all {
             let verb = cmd.cli_verb();

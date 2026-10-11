@@ -9,6 +9,7 @@
 //! a live adapter (mode switches, events, thresholds) lands when the dual families / real sources exist.
 
 use stembus::command::{Event, Identity, Node, Operate, StatusData};
+use stembus::diag_mode::DiagMode;
 use stembus::mode::Mode;
 use stembus::regmap::DBG_CRC_BYTES;
 
@@ -69,11 +70,14 @@ pub struct LiveNode {
     crc: [u8; DBG_CRC_BYTES],
     mode_request: Option<u8>,
     skip_diag: bool,
+    diag_mode: u8,
 }
 
 impl LiveNode {
     pub fn new(identity: Identity, status: StatusData, crc: [u8; DBG_CRC_BYTES]) -> Self {
-        Self { identity, status, crc, mode_request: None, skip_diag: false }
+        // diag_mode defaults to 0 = `DiagMode::Off` (default-off: a continual diag left on makes the
+        // device unusable — DESIGN.md "CONTINUAL diag is a MODE ... default OFF").
+        Self { identity, status, crc, mode_request: None, skip_diag: false, diag_mode: 0 }
     }
     /// Refresh the status served by `Status`/introspection (call each loop pass, or on change).
     pub fn set_status(&mut self, status: StatusData) {
@@ -88,6 +92,12 @@ impl LiveNode {
     /// window polls this each pass to decide whether to omit the extended POST (DESIGN.md "diag").
     pub fn take_skip_request(&mut self) -> bool {
         core::mem::take(&mut self.skip_diag)
+    }
+    /// The current **continual diag mode** (set via `SetDiagMode`). A PERSISTENT setting — the `--diag`
+    /// loop reads it each pass to decide which long-running diagnostic to run (NOT cleared on read, unlike
+    /// the skip request). Default `Off` (see [`LiveNode::new`]).
+    pub fn diag_mode(&self) -> DiagMode {
+        DiagMode::from_code(self.diag_mode)
     }
 }
 
@@ -124,5 +134,10 @@ impl Operate for LiveNode {
     /// Record the skip-diag request; the boot diag window drains it via [`LiveNode::take_skip_request`].
     fn skip_diag(&mut self) {
         self.skip_diag = true;
+    }
+    /// Store the requested continual diag mode (a persistent setting the `--diag` loop reads via
+    /// [`LiveNode::diag_mode`]). Harmless on a non-`--diag` build — nothing reads it.
+    fn set_diag_mode(&mut self, mode: DiagMode) {
+        self.diag_mode = mode.code();
     }
 }

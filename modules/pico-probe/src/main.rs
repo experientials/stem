@@ -696,6 +696,31 @@ async fn main(_spawner: Spawner) {
                                 Err(e) => { let _ = write_str(&mut class, "  FAIL (").await; let _ = write_str(&mut class, e).await; let _ = write_str(&mut class, ")\r\n").await; }
                             }
                             let _ = write_str(&mut class, "> ").await;
+                        } else if eq_ci(cmd0, b"diagmode") {
+                            // Diag-control: Command::SetDiagMode -> Response::Ack. The SoM/stem-probe sets a
+                            // node's continual diag mode (off|margin|soak|signature). `diagmode <addr> <tok>`
+                            // or `diagmode <tok>` (default addr 0x20). DEFAULT off (bare `diagmode` disables).
+                            let (target, tok_i) = if nt >= 3 {
+                                (parse_hex(toks[1]).unwrap_or(ADDR_SUPERVISOR), 2)
+                            } else {
+                                (ADDR_SUPERVISOR, 1)
+                            };
+                            let tok = if nt > tok_i { core::str::from_utf8(toks[tok_i]).unwrap_or("") } else { "off" };
+                            let _ = write_str(&mut class, "\r\ndiagmode @0x").await;
+                            let _ = write_hex8(&mut class, target).await;
+                            match stembus::diag_mode::DiagMode::from_token(tok) {
+                                Some(m) => {
+                                    let _ = write_str(&mut class, " -> ").await;
+                                    let _ = write_str(&mut class, m.name()).await;
+                                    match vendor_cmd(&mut i2c, target, command::Command::SetDiagMode { mode: m }) {
+                                        Ok(command::Response::Ack) => { let _ = write_str(&mut class, "  PASS (Ack)\r\n").await; }
+                                        Ok(_) => { let _ = write_str(&mut class, "  FAIL (unexpected response)\r\n").await; }
+                                        Err(e) => { let _ = write_str(&mut class, "  FAIL (").await; let _ = write_str(&mut class, e).await; let _ = write_str(&mut class, ")\r\n").await; }
+                                    }
+                                }
+                                None => { let _ = write_str(&mut class, "  FAIL (bad mode; use off|margin|soak|signature)\r\n").await; }
+                            }
+                            let _ = write_str(&mut class, "> ").await;
                         } else if contains_ci(line, b"id") {
                             let _ = write_str(&mut class, "\r\nid ").await;
                             let _ = class.write_packet(serial.as_bytes()).await;
@@ -739,7 +764,7 @@ async fn banner<'d, T: embassy_rp::usb::Instance + 'd>(
 /// category) is sourced from `stembus::command::CATALOG` via `spec_for`, so it is SINGLE-SOURCED with the
 /// node defs + on-device introspection + hwd chat and cannot drift. (The probe omits wire verbs it doesn't
 /// implement yet, e.g. `events`/`thresh`.)
-const PROBE_WIRE_VERBS: &[&str] = &["ident", "status", "crc", "caps", "mode", "skipdiag"];
+const PROBE_WIRE_VERBS: &[&str] = &["ident", "status", "crc", "caps", "mode", "skipdiag", "diagmode"];
 
 /// Probe-LOCAL verbs — bench-rig / aggregate / cros_ec-standard commands that are NOT node wire commands,
 /// so they live here (not in stembus). Same `CommandSpec` shape → rendered by the same generated path as

@@ -23,6 +23,7 @@
 pub mod command;
 pub mod cros_ec;
 pub mod crc;
+pub mod diag_mode;
 pub mod flags;
 pub mod mode;
 pub mod msg;
