@@ -306,8 +306,17 @@ In a `--diag` build it runs like this:
   - **3c-2 (re-home):** stress **margin**+**soak** (`crates/diag/src/stress.rs`) + **signature**
     (`signature.rs`) re-homed as `DiagMode` bodies over the shared `bsp::i2c` (verified reads vs constant ID
     regs; targets guarded by scan presence). Margin/signature bounded; soak cooperative (services the slave
-    → `diagmode off` stops it). Builds + fits (fr2476 --diag 66% FRAM). **END-TO-END HW-PROOF PENDING** a
-    bench run (flash new probe + a diag build on @fr2476 vs the APDS 0x39 / VL53 0x29 targets now present).
+    → `diagmode off` stops it). Builds + fits (fr2476 --diag 66% FRAM).
+    - **HW-PROVEN (2026-10-11, @fr2476 role 0x21 vs the 7-device sensor bench):** the **control plane** —
+      probe `diagmode 0x21 <mode>` → `SetDiagMode` → `PASS (Ack)` over cros_ec; and **margin** end-to-end —
+      the re-homed sweep dispatched from `DiagMode::Margin` read the APDS 0x39 + VL53 0x29 ID regs across the
+      ladder: `10–500 kHz 400 txn 0 nack/0 corrupt OK`, `1000 kHz 400 nack FAIL`, `highest clean SCL = 500
+      kHz` (a real bus-margin result). Note: the diag mode is RAM + must be set *during* the boot window;
+      POR clears it, so a wide window was used for the capture (the race is the motivation for 3c-4 FRAM
+      persistence).
+    - **Signature + soak:** same (now-proven) dispatch mechanism, different bodies — HW capture still owed;
+      blocked on bench contention during this session (a concurrent external flash kept clearing the RAM
+      mode mid-capture), not a code defect. Finish on a quiet/exclusive bench.
 
 **PARKED (deferred, 2026-10-11) — radar + button, with a reproduced finding:**
 - **Radar (RCWL-0516, P2.4):** the radar board isn't connected on the bench → **deferred**. The re-home is
