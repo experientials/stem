@@ -270,6 +270,14 @@ In a `--diag` build it runs like this:
   `Device::measure`, guarded by presence.
 - **Slice 3a:** **ADC board-health** (`bsp::adc`, re-homed from `diag/adc.rs`): rail mV + die temp from the
   internal channels. HW-proven `board: DVCC=3311mV Tdie=32C`. (FR2355/FR2155 TLV cal *values* to-confirm.)
+- **Slice 3b:** **boot reason** (`bsp::bootreason`): decode `SYSRSTIV` (reset cause) — raw-bits, chip-agnostic
+  (the fr2433 PAC has no typed enum; codes are hardware-identical across the family), NOT `_leaf`-gated
+  (universal, incl. the FR2433 slave). Extended POST drains `SYSRSTIV` (read-clears) → `reset: <cause>(n)`,
+  dominant-first. **HW-proven on @fr2476:** a debugger-independent WDT reset read back + decoded as
+  `reset: WDT-timeout(22)`. On this eZ-FET-attached bench a flash/POR reset reads `none(0)` — the debugger
+  clears `SYSRSTIV` before firmware runs; **expected here**, real causes latch in the field. This is the
+  instrument the parked-button root-cause needs (BOR/SVS vs PUC/WDT). *(`diag/bootrec.rs` — a dormant,
+  unproven, fr2355-hardcoded boot-STAGE tracker — is a separate concern, still un-rehomed.)*
 
 **PARKED (deferred, 2026-10-11) — radar + button, with a reproduced finding:**
 - **Radar (RCWL-0516, P2.4):** the radar board isn't connected on the bench → **deferred**. The re-home is
