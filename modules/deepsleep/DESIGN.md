@@ -235,6 +235,23 @@ mid-run, or issue other commands). The **2 s boot window is just the FIRST trigg
 can later be started by a **command** (a master says "run diag task X") or a **condition** — so diag is a
 set of triggerable async tasks, not a boot-only blocking suite.
 
+**CONTINUAL diag is a MODE controlled by command/register, DEFAULT-OFF, master-driven (Henrik 2026-10-11):**
+*"Continual test would be a mode that can be enabled/disabled in the diag via a command/register. It could
+be persistent across boot. It could have a default value defined in the firmware set when the register is
+undefined. Now that prod has console commands, the keypress diag logic might no longer be relevant. I lean
+towards not enabling it by default in diag because it would make the device otherwise unusable."* And:
+*"By default the SoM/stem-probe should be able to control modes in MCUs via commands/register changes."*
+
+Derivation (subordinate to the verbatim above): the long-running diagnostics (stress margin/soak,
+signature) are **not** auto-run in POST and **not** keypress-driven (superseded by cros_ec console
+commands). They are a **diag-mode register** on the node's cros_ec control surface — the SoM/stem-probe
+sets it (same pattern as the existing `SetMode`/`SetThreshold`/`SkipDiag` → `Operate` dispatch). **Default
+= OFF** (a continual bus-hammering test left on would make the device unusable). The register **may be
+persisted in FRAM** (survives boot), with a **firmware default applied when the FRAM slot is undefined**
+(aligns with `mode.rs`'s own standing "FRAM INIT_CODE persistence of the default" TODO). When a continual
+mode IS enabled it runs **cooperatively, interleaved with the Stem-slave service**, so the master can
+always disable it (the control channel never blocks).
+
 In a `--diag` build it runs like this:
 
 1. Boot: **Stem slave up first** (existing step 0) + model-detect + pins + the **normal POST** (FRAM CRCs,
