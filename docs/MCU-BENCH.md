@@ -133,6 +133,27 @@ procedure. Each tier is a composite console command that prints `[PASS]`/`[FAIL]
 writes one (hex, `0x` optional). Use these to exercise any regmap entry (identity, status, future
 state-transfer registers) directly from the console or a host script.
 
+**Commanding a node's cros_ec surface via `@rp2040`.** The probe is the Stem-bus I²C **master**; each MCU
+is a slave at its **role address** — `0x20` = FR2355 (supervisor), `0x21` = FR2476 (dev stand-in), `0x22`
+= FR2433 (expander) (ADR-0002; models `0x830C`/`0x832A`/`0x8240`). Drive any verb through the probe
+console:
+```sh
+thepia hwd console interact --board @rp2040 --line "<verb> [addr] [args]"
+```
+cros_ec verbs (each → a `Response`; `PASS`/`Ack` = a full master↔node round-trip): `scan` (which
+addresses answer), `ident [addr]`, `status [addr]`, `caps [addr]` (capability bitmap over the shared
+`CATALOG`), `mode [addr] <p|s>` (SetMode), `skipdiag [addr]`, `diagmode [addr] <off|margin|soak|signature>`
+(SetDiagMode — the continual-diag selector), plus raw `r/w` and Leaf `lscan/lr`. The verb set is generated
+from `stembus::command::CATALOG` (COMMANDS.md), so the probe and any host render the same vocabulary.
+
+**⚠ This I²C control path is INDEPENDENT of the eZ-FET console (UART) backchannel** — different wires
+(Stem I²C GP18/19 ↔ node vs the eZ-FET App-UART read). So a `PASS`/`Ack` here proves the MCU is **alive
+and serving even when `thepia hwd console tail` shows nothing** (a dead/flaky console read — e.g. after a
+daemon auto-restart — does NOT mean the board is down). When in doubt whether a node is alive, ask the
+probe: `scan` then `ident <addr>`. Conversely, diag text output (margin sweep, signature battery, soak
+report) only comes over the **console** — so capturing *those* does need a live backchannel, even though
+*triggering* them (`diagmode …`) goes over I²C.
+
 **One-shot + automation:**
 - `selftest` runs T1–T3 across `0x20/0x21/0x22` and ends with a single machine-parseable
   **`RESULT pass=N fail=M`** line.

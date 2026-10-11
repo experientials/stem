@@ -39,7 +39,9 @@
 # `help` is authoritative; the `[[command]]` entries are only a curated annotation of a few.
 
 [board]
-select = "@rp2040"   # product default: chat/console/scan resolve the coordinator when --board is omitted
+select = "@fr2476"   # default board when --board is omitted — the FR2476 diag/dev MCU (so `lease` and bare
+                      # console/status commands resolve it WITHOUT a THEPIA_HWD_BOARD= prefix, which would
+                      # defeat permission matching). Probe/Pico ops still pass --board explicitly.
 
 # ── Subordinates: the three MSP430 nodes, commanded by @rp2040 over the shared Stem I²C bus ──
 [[board.alias]]
