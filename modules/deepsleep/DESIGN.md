@@ -261,6 +261,32 @@ In a `--diag` build it runs like this:
 - **Integration:** the suite should reuse the shared crates (bsp/devices/stem-node/leaf-scan), not remain a
   parallel `diag/` codebase — fold it in as the node's extended-POST module.
 
+**Progress (HW-proven, committed) — the fold so far:**
+- **Slice 1:** `--diag` feature + `diag_ext` boot window + `Command::SkipDiag` (master skip over the Stem
+  bus). The window services `ec::poll` each pass (cooperative). HW-proven: skip + no-skip paths.
+- **Slice 2:** I2C device **scan + inventory** (re-homed `t_scan`/`t_devices` via the shared `leaf-scan`):
+  acquire Leaf (Sensing) → `enumerate::scan`/`report` → release.
+- **Slice 2b:** per-device **value exercises** (MC6470 gravity, Si7021 T/RH) via the shared `devices`
+  `Device::measure`, guarded by presence.
+- **Slice 3a:** **ADC board-health** (`bsp::adc`, re-homed from `diag/adc.rs`): rail mV + die temp from the
+  internal channels. HW-proven `board: DVCC=3311mV Tdie=32C`. (FR2355/FR2155 TLV cal *values* to-confirm.)
+
+**PARKED (deferred, 2026-10-11) — radar + button, with a reproduced finding:**
+- **Radar (RCWL-0516, P2.4):** the radar board isn't connected on the bench → **deferred**. The re-home is
+  trivial (read P2.4; pin is in `bsp/connections.toml` `rcwl_out`); do it when a module is wired.
+- **Button (S1):** **all boards have a button**, so this SHOULD be `bsp`/PAC-supported and used (press within
+  the window = a radio-free skip). It is **parked on a BUG, not a fundamental blocker.** When I re-homed
+  `diag/buttons.rs` into a `bsp::inputs` (P4.0, input+pull-up, active-low) and (a) configured P2.4/P4.0 at
+  boot and (b) **read P4.0 in the boot-window loop**, the node **reset-looped**: committed 3a (no inputs) is
+  stable (1 banner/9 s); configuring P2.4/P4.0 alone → ~5–10 s reset (2/10 s); **reading P4.0 in the window →
+  tight reset loop (3/9 s)**. The code was byte-identical to diag's *proven* `rcwl.rs`/`buttons.rs`, so it's a
+  **context interaction** (standalone diag read the same pins fine). **Reverted** (quality bar: don't ship a
+  resetting node). Root-cause needs **bench diagnosis, not more blind code**: read `SYSRSTIV`/boot-reason to
+  see *why* it resets (BOR/SVS brownout vs PUC vs WDT), and scope/verify P2.4+P4.0 wiring + the S1 state.
+  References for the re-home: `diag/src/{buttons,rcwl}.rs` (working) + `bsp/src/adc.rs` (the re-home model).
+  Pins: FR2476 S1 = **P4.0** (SLAU802 Fig. 19); other boards' button pins need allocation via the pinmux model.
+- **stress / soak / signature:** the task-based long-running diag modes — not yet re-homed.
+
 ### Single binary across multiple models
 Requirement: **one binary image serves multiple MSP430 models**, detecting the exact model and
 mapping pins at runtime. Feasible **within a register-/memory-map-compatible family** (same peripheral

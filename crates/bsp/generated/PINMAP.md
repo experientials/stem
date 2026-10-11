@@ -6,7 +6,7 @@
 
 **Chip:** `MSP430FR2476` · **package:** RHA VQFN-40? · **datasheet:** datasheets/msp430fr2476.pdf
 
-15 connections. `status`: active = wired/verified · planned = product-intent, confirm before activating · reserved = programming/debug.
+16 connections. `status`: active = wired/verified · planned = product-intent, confirm before activating · reserved = programming/debug.
 
 ## Active (6)
 
@@ -31,9 +31,10 @@
 | sensor_int | Sensor interrupt in | TBD | GPIO | PORT | in | sensor INT (e.g. APDS-9960 / IMU) |
 | som_wake | SoM wake — PMIC_ON_REQ OP-bank bit (the MSP IS the I/O expander) | TBD | GPIO | PORT | out | MSP GPIO / regmap OP-bank bit → PCA9450 PMIC_ON_REQ (assert HIGH to power-on the SoM). MSP replaces the old PCA9555/FR2032 expanders. |
 
-## Reserved (2)
+## Reserved (3)
 
 | ID | Signal | Pin | Function | Module | Dir | Net |
 |---|---|---|---|---|---|---|
 | msp_rst | Reset / SBW | RST/NMI/SBWTDIO | RESET | SYS | bidir | eZ-FET SBW |
 | msp_test | Test / SBW clock | TEST/SBWTCK | TEST | SYS | in | eZ-FET SBW |
+| s1_button | S1 user button (diag skip / mode-cycle) | P4.0 | GPIO | PORT | in | P4.0_S1 — active-low, 47 kohm external pull-up to 3V3 (FR2476 LaunchPad). |
